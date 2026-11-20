@@ -27,8 +27,9 @@ This template should help get you started developing with Tauri, React and Types
   - command: `list_remote_probe_history` lists stored probe history (newest first)
   - command: `export_last_remote_probe_markdown` exports last probe report to markdown (`remote-probe-last.md`)
 - Auth skeleton:
-  - backend auth state machine in `src-tauri/src/auth.rs`
+  - backend auth state machine (`idle -> waitingOtp -> authenticated` or `idle -> authenticated`) and replaceable `AuthBackendAdapter` trait in `src-tauri/src/auth.rs`
   - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`
+  - challenge-based password login: step 1 sends only `username` + `password`; backend adapter returns either direct `Authenticated` or `MfaRequired { challenge_id }`, and step 2 verifies OTP against the active `challengeId`
   - dedicated login page with `一般登入` and `OIDC 配置` tabs; saving OIDC config (`issuerUrl`, `clientId`, `redirectUri`, `scopes`, `providerName`) persists to `settings.json` and dynamically enables the OIDC login button on the standard login view
 - Sync storage skeleton:
   - SQLite schema bootstrap in `src-tauri/src/storage.rs`

@@ -22,6 +22,7 @@ type AuthStatus = {
   stage: "idle" | "waitingOtp" | "waitingSsoCallback" | "authenticated" | string;
   username: string | null;
   method: string | null;
+  challengeId: string | null;
   message: string | null;
   authorizationUrl: string | null;
 };
@@ -447,14 +448,14 @@ function App() {
         request: {
           username,
           password,
-          otpCode: otpCode.trim() ? otpCode : null,
         },
       });
+      setOtpCode("");
       setAuthResult(
         status,
         status.stage === "authenticated"
           ? "登入成功！"
-          : "帳號密碼已驗證，請輸入 6 位數 OTP 驗證碼完成登入。"
+          : "伺服器要求第二因素驗證 (MFA Challenge)，請輸入 6 位數 OTP 驗證碼。"
       );
     } catch (err) {
       setError(String(err));
@@ -470,7 +471,10 @@ function App() {
     setMessage(null);
     try {
       const status = await invoke<AuthStatus>("submit_otp", {
-        request: { otpCode },
+        request: {
+          otpCode,
+          challengeId: authStatus?.challengeId ?? null,
+        },
       });
       setAuthResult(status, "OTP 驗證完成，已成功登入。");
     } catch (err) {
@@ -1186,69 +1190,91 @@ function App() {
               </div>
             ) : null}
 
-            {/* OPTION 1: 一般登入 */}
+            {/* OPTION 1: 一般登入 (Challenge-based: Step 1 帳密 -> Step 2 若伺服器回 waitingOtp 才顯示 OTP) */}
             {loginTab === "standard" && (
               <div className="login-tab-panel">
-                <form className="form-stack" onSubmit={loginByPassword}>
-                  <label className="form-field">
-                    <span>DSM 帳號</span>
-                    <input
-                      className="input"
-                      value={username}
-                      onChange={(event) => setUsername(event.currentTarget.value)}
-                      placeholder="輸入使用者帳號"
-                      autoComplete="username"
-                    />
-                  </label>
+                {authStatus?.stage !== "waitingOtp" ? (
+                  <>
+                    <form className="form-stack" onSubmit={loginByPassword}>
+                      <label className="form-field">
+                        <span>DSM 帳號</span>
+                        <input
+                          className="input"
+                          value={username}
+                          onChange={(event) => setUsername(event.currentTarget.value)}
+                          placeholder="輸入使用者帳號（含 2fa/otp 將模擬觸發 MFA）"
+                          autoComplete="username"
+                        />
+                      </label>
 
-                  <label className="form-field">
-                    <span>密碼</span>
-                    <input
-                      className="input"
-                      type="password"
-                      value={password}
-                      onChange={(event) => setPassword(event.currentTarget.value)}
-                      placeholder="輸入登入密碼"
-                      autoComplete="current-password"
-                    />
-                  </label>
+                      <label className="form-field">
+                        <span>密碼</span>
+                        <input
+                          className="input"
+                          type="password"
+                          value={password}
+                          onChange={(event) => setPassword(event.currentTarget.value)}
+                          placeholder="輸入登入密碼"
+                          autoComplete="current-password"
+                        />
+                      </label>
 
-                  <label className="form-field">
-                    <span>OTP 二階段驗證碼（選填）</span>
-                    <input
-                      className="input"
-                      value={otpCode}
-                      onChange={(event) => setOtpCode(event.currentTarget.value)}
-                      placeholder="若已啟用 2FA 可直接輸入 6 位數字"
-                      inputMode="numeric"
-                    />
-                  </label>
+                      <button
+                        type="submit"
+                        className="btn btn-primary btn-block btn-lg"
+                        disabled={authLoading}
+                      >
+                        {authLoading ? "登入驗證中..." : "登入"}
+                      </button>
+                    </form>
 
-                  <button
-                    type="submit"
-                    className="btn btn-primary btn-block btn-lg"
-                    disabled={authLoading}
-                  >
-                    {authLoading ? "登入驗證中..." : "一般帳號登入"}
-                  </button>
-                </form>
-
-                {/* Step 2: Waiting for OTP verification */}
-                {authStatus?.stage === "waitingOtp" && (
+                    <div className="cell-secondary" style={{ textAlign: "center" }}>
+                      模擬提示：一般帳密將直接登入；帳號或密碼含 <code className="mono">2fa</code> /{" "}
+                      <code className="mono">otp</code> 時，伺服器將回傳 MFA Challenge 進入下一步 OTP 驗證。
+                    </div>
+                  </>
+                ) : (
+                  /* Step 2: Challenge-based OTP Verification */
                   <form className="login-step-box" onSubmit={submitOtp}>
                     <div className="login-step-title">
-                      需要二階段驗證 (OTP) — 帳號：{authStatus.username}
+                      需要二階段驗證 (MFA Challenge)
                     </div>
-                    <div className="inline-input-row">
+                    <div className="cell-secondary">
+                      帳號：<strong>{authStatus.username}</strong>
+                      {authStatus.challengeId ? (
+                        <>
+                          {" "}
+                          · Challenge: <code className="mono">{authStatus.challengeId}</code>
+                        </>
+                      ) : null}
+                    </div>
+                    <label className="form-field">
+                      <span>6 位數 OTP 驗證碼</span>
                       <input
                         className="input"
                         value={otpCode}
                         onChange={(event) => setOtpCode(event.currentTarget.value)}
-                        placeholder="輸入 6 位數驗證碼"
+                        placeholder="請輸入驗證器上的 6 位數字"
                         inputMode="numeric"
+                        autoFocus
                       />
-                      <button type="submit" className="btn btn-primary" disabled={authLoading}>
-                        驗證 OTP
+                    </label>
+                    <div className="button-row">
+                      <button
+                        type="submit"
+                        className="btn btn-primary"
+                        style={{ flex: 1 }}
+                        disabled={authLoading}
+                      >
+                        {authLoading ? "驗證中..." : "送出 OTP 驗證"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={logout}
+                        disabled={authLoading}
+                      >
+                        返回重新登入
                       </button>
                     </div>
                   </form>
