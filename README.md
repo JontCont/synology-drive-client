@@ -50,6 +50,7 @@ This template should help get you started developing with Tauri, React and Types
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
   - commands: `enqueue_sync_operation`, `seed_demo_operations`, `seed_fault_matrix_operations`, `list_sync_operations`, `get_operation_stage_counts`, `retry_sync_operation`, `purge_sync_operations`
   - frontend panel to add sample/retryable/hard-retry operations and preview recent rows (`lastError` / `nextRetryAt`)
+  - command: `run_fault_matrix_once` for one-shot seed + batch execution drill
   - ingest path has de-dup guard: skip enqueue when same `scan_local_path` is already in `planned/processing/retryable`
 - Executor skeleton:
   - single-step executor in `src-tauri/src/executor.rs`

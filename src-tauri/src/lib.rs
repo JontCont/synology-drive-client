@@ -298,6 +298,13 @@ struct PipelineBatchResult {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaultMatrixRunResult {
+    seeded_count: usize,
+    batch: PipelineBatchResult,
+}
+
 #[tauri::command]
 fn get_system_snapshot(
     app: tauri::AppHandle,
@@ -435,6 +442,19 @@ fn run_pipeline_batch(
     })
 }
 
+#[tauri::command]
+fn run_fault_matrix_once(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<FaultMatrixRunResult, String> {
+    let seeded = storage::seed_fault_matrix_operations(&app)?;
+    let batch = run_pipeline_batch(app, watcher_state, Some(20), Some(20))?;
+    Ok(FaultMatrixRunResult {
+        seeded_count: seeded.len(),
+        batch,
+    })
+}
+
 fn enqueue_paths_as_operations(
     app: &tauri::AppHandle,
     paths: Vec<String>,
@@ -565,6 +585,7 @@ pub fn run() {
             scan_local_once_to_operations,
             run_pipeline_once,
             run_pipeline_batch,
+            run_fault_matrix_once,
             get_auth_status,
             login_with_password,
             submit_otp,

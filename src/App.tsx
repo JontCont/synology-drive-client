@@ -137,6 +137,11 @@ type PipelineBatchResult = {
   message: string;
 };
 
+type FaultMatrixRunResult = {
+  seededCount: number;
+  batch: PipelineBatchResult;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -714,6 +719,24 @@ function App() {
     }
   }
 
+  async function runFaultMatrixOnce() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<FaultMatrixRunResult>("run_fault_matrix_once");
+      await refreshOperations();
+      await refreshWatcherStatus();
+      setMessage(
+        `fault-matrix: seeded ${result.seededCount}, processed ${result.batch.processedCount}/${result.batch.steps}, last=${result.batch.lastOperationId ?? "-"}`
+      );
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function runExecutorOnce() {
     setOpsLoading(true);
     setError(null);
@@ -981,6 +1004,9 @@ function App() {
           </button>
           <button type="button" onClick={seedFaultMatrixOperations} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "灌入 fault matrix"}
+          </button>
+          <button type="button" onClick={runFaultMatrixOnce} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "執行 fault matrix"}
           </button>
           <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增 retryable operation"}
