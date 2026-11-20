@@ -4,14 +4,18 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
+use crate::config;
 use crate::executor;
+use crate::scanner;
 use crate::storage;
+use crate::watcher;
 
 #[derive(Debug, Default)]
 struct ServiceMetrics {
     tick_count: u64,
+    queued_count: u64,
     processed_count: u64,
     failed_count: u64,
     retry_scheduled_count: u64,
@@ -45,6 +49,7 @@ pub struct SyncServiceStatus {
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub tick_count: u64,
+    pub queued_count: u64,
     pub processed_count: u64,
     pub failed_count: u64,
     pub retry_scheduled_count: u64,
@@ -106,6 +111,10 @@ impl SyncServiceState {
                             }
                             let result = (|| -> Result<executor::ExecutorRunResult, String> {
                                 let _ = storage::init(&app_for_thread)?;
+                                let queued = Self::ingest_once(&app_for_thread)?;
+                                if let Ok(mut m) = metrics_for_thread.lock() {
+                                    m.queued_count += queued as u64;
+                                }
                                 executor::run_once(&app_for_thread)
                             })();
                             if let Ok(mut m) = metrics_for_thread.lock() {
@@ -188,6 +197,7 @@ impl SyncServiceState {
                 local_sync_path: Some(running.local_sync_path.clone()),
                 remote_path: Some(running.remote_path.clone()),
                 tick_count: metrics.tick_count,
+                queued_count: metrics.queued_count,
                 processed_count: metrics.processed_count,
                 failed_count: metrics.failed_count,
                 retry_scheduled_count: metrics.retry_scheduled_count,
@@ -207,6 +217,7 @@ impl SyncServiceState {
                 local_sync_path: None,
                 remote_path: None,
                 tick_count: 0,
+                queued_count: 0,
                 processed_count: 0,
                 failed_count: 0,
                 retry_scheduled_count: 0,
@@ -217,5 +228,41 @@ impl SyncServiceState {
                 last_message: None,
             })
         }
+    }
+
+    fn ingest_once(app: &AppHandle) -> Result<usize, String> {
+        let watcher_state = app.state::<watcher::LocalWatcherState>();
+        let mut paths = watcher_state.drain_event_paths(20)?;
+        if paths.is_empty() {
+            if let Some(root) = config::load(app)?.local_sync_path {
+                paths = scanner::collect_local_paths(&root, 20)?;
+            }
+        }
+        if paths.is_empty() {
+            return Ok(0);
+        }
+
+        let mut queued = 0;
+        for (idx, path) in paths.iter().enumerate() {
+            let op = storage::NewOperation {
+                id: format!(
+                    "service-{}-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|e| format!("取得時間戳失敗：{e}"))?
+                        .as_millis(),
+                    idx
+                ),
+                root_id: "default-root".to_string(),
+                item_id: None,
+                op_type: "scan_local_path".to_string(),
+                from_path: Some(path.clone()),
+                to_path: None,
+                stage: Some("planned".to_string()),
+            };
+            let _ = storage::enqueue_operation(app, op)?;
+            queued += 1;
+        }
+        Ok(queued)
     }
 }

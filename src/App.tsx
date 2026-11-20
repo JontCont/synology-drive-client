@@ -37,6 +37,7 @@ type SyncServiceStatus = {
   localSyncPath: string | null;
   remotePath: string | null;
   tickCount: number;
+  queuedCount: number;
   processedCount: number;
   failedCount: number;
   retryScheduledCount: number;
@@ -763,7 +764,8 @@ function App() {
           {serviceStatus?.tickCount ?? 0}
         </p>
         <p className="hint">
-          processed: {serviceStatus?.processedCount ?? 0} / retry:{" "}
+          queued: {serviceStatus?.queuedCount ?? 0} / processed:{" "}
+          {serviceStatus?.processedCount ?? 0} / retry:{" "}
           {serviceStatus?.retryScheduledCount ?? 0} / failed: {serviceStatus?.failedCount ?? 0}
         </p>
         {serviceStatus?.lastTickEpochMs ? (
