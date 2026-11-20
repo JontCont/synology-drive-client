@@ -51,6 +51,20 @@ pub struct OperationStageCount {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictRow {
+    pub id: String,
+    pub item_id: String,
+    pub reason: String,
+    pub local_version: Option<String>,
+    pub remote_version: Option<String>,
+    pub local_copy_path: Option<String>,
+    pub remote_copy_path: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewOperation {
@@ -61,6 +75,19 @@ pub struct NewOperation {
     pub from_path: Option<String>,
     pub to_path: Option<String>,
     pub stage: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewConflict {
+    pub id: String,
+    pub item_id: String,
+    pub reason: String,
+    pub local_version: Option<String>,
+    pub remote_version: Option<String>,
+    pub local_copy_path: Option<String>,
+    pub remote_copy_path: Option<String>,
+    pub status: Option<String>,
 }
 
 fn db_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -104,6 +131,20 @@ fn map_sync_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncRootRow> {
         mode: row.get(4)?,
         cursor: row.get(5)?,
         scan_generation: row.get(6)?,
+    })
+}
+
+fn map_conflict_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConflictRow> {
+    Ok(ConflictRow {
+        id: row.get(0)?,
+        item_id: row.get(1)?,
+        reason: row.get(2)?,
+        local_version: row.get(3)?,
+        remote_version: row.get(4)?,
+        local_copy_path: row.get(5)?,
+        remote_copy_path: row.get(6)?,
+        status: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
@@ -295,6 +336,81 @@ pub fn enqueue_operation<R: Runtime>(
         .map_err(|e| format!("建立 operation 回讀查詢失敗：{e}"))?;
     stmt.query_row([op_id], map_operation_row)
     .map_err(|e| format!("operation 建立後回讀失敗：{e}"))
+}
+
+pub fn add_conflict<R: Runtime>(app: &AppHandle<R>, conflict: NewConflict) -> Result<ConflictRow, String> {
+    if conflict.id.trim().is_empty() {
+        return Err("conflict id 不可為空".to_string());
+    }
+    if conflict.item_id.trim().is_empty() {
+        return Err("item_id 不可為空".to_string());
+    }
+    if conflict.reason.trim().is_empty() {
+        return Err("reason 不可為空".to_string());
+    }
+    let status = conflict.status.unwrap_or_else(|| "open".to_string());
+    if status.trim().is_empty() {
+        return Err("status 不可為空".to_string());
+    }
+
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let conflict_id = conflict.id;
+    conn.execute(
+        "
+        INSERT INTO conflicts (
+            id, item_id, reason, local_version, remote_version, local_copy_path, remote_copy_path, status
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+        params![
+            conflict_id,
+            conflict.item_id,
+            conflict.reason,
+            conflict.local_version,
+            conflict.remote_version,
+            conflict.local_copy_path,
+            conflict.remote_copy_path,
+            status
+        ],
+    )
+    .map_err(|e| format!("寫入 conflict 失敗：{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, item_id, reason, local_version, remote_version, local_copy_path, remote_copy_path, status, created_at
+            FROM conflicts
+            WHERE id = ?1
+            ",
+        )
+        .map_err(|e| format!("建立 conflict 回讀查詢失敗：{e}"))?;
+    stmt.query_row([conflict_id], map_conflict_row)
+        .map_err(|e| format!("conflict 建立後回讀失敗：{e}"))
+}
+
+pub fn list_conflicts<R: Runtime>(app: &AppHandle<R>, limit: u32) -> Result<Vec<ConflictRow>, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, item_id, reason, local_version, remote_version, local_copy_path, remote_copy_path, status, created_at
+            FROM conflicts
+            ORDER BY created_at DESC
+            LIMIT ?1
+            ",
+        )
+        .map_err(|e| format!("建立 conflict 查詢失敗：{e}"))?;
+    let rows = stmt
+        .query_map([limit], map_conflict_row)
+        .map_err(|e| format!("查詢 conflict 失敗：{e}"))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("讀取 conflict 列失敗：{e}"))?);
+    }
+    Ok(result)
 }
 
 pub fn seed_demo_operations<R: Runtime>(

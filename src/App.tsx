@@ -77,6 +77,18 @@ type OperationStageCount = {
   count: number;
 };
 
+type ConflictRow = {
+  id: string;
+  itemId: string;
+  reason: string;
+  localVersion: string | null;
+  remoteVersion: string | null;
+  localCopyPath: string | null;
+  remoteCopyPath: string | null;
+  status: string;
+  createdAt: string;
+};
+
 type ExecutorRunResult = {
   processed: boolean;
   operationId: string | null;
@@ -126,6 +138,7 @@ function App() {
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [operations, setOperations] = useState<OperationRow[]>([]);
   const [operationStageCounts, setOperationStageCounts] = useState<OperationStageCount[]>([]);
+  const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -189,6 +202,11 @@ function App() {
       .then((rows) => setOperationStageCounts(rows))
       .catch(() => {
         setOperationStageCounts([]);
+      });
+    invoke<ConflictRow[]>("list_sync_conflicts", { limit: 10 })
+      .then((rows) => setConflicts(rows))
+      .catch(() => {
+        setConflicts([]);
       });
 
     invoke<SyncRootRow>("get_default_sync_root")
@@ -507,6 +525,11 @@ function App() {
     setOperationStageCounts(stageCounts);
   }
 
+  async function refreshConflicts() {
+    const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 10 });
+    setConflicts(rows);
+  }
+
   async function addSampleOperation() {
     setOpsLoading(true);
     setError(null);
@@ -578,6 +601,33 @@ function App() {
       });
       await refreshOperations();
       setMessage("已新增 hard retry 測試 operation。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
+  async function addDemoConflict() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const conflictId = `conflict-${Date.now()}`;
+      await invoke<ConflictRow>("add_sync_conflict", {
+        conflict: {
+          id: conflictId,
+          itemId: `item-${Date.now()}`,
+          reason: "both_modified",
+          localVersion: "local-v2",
+          remoteVersion: "remote-v3",
+          localCopyPath: "/conflict/local-copy.txt",
+          remoteCopyPath: "/conflict/remote-copy.txt",
+          status: "open",
+        },
+      });
+      await refreshConflicts();
+      setMessage("已新增示範 conflict。");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -913,6 +963,30 @@ function App() {
             {opsLoading ? "處理中..." : "重設為 planned"}
           </button>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2>衝突骨架</h2>
+        <p className="hint">目前筆數：{conflicts.length}</p>
+        <div className="button-row">
+          <button type="button" onClick={addDemoConflict} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "新增示範 conflict"}
+          </button>
+          <button type="button" onClick={refreshConflicts} disabled={opsLoading}>
+            重新整理 conflict
+          </button>
+        </div>
+        {conflicts.length > 0 ? (
+          <ul className="op-list">
+            {conflicts.map((conflict) => (
+              <li key={conflict.id}>
+                {conflict.id} / {conflict.reason} / {conflict.status} / {conflict.createdAt}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="hint">目前沒有 conflict。</p>
+        )}
       </section>
 
       <section className="panel">

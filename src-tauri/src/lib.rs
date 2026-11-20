@@ -46,6 +46,22 @@ fn enqueue_sync_operation(
 }
 
 #[tauri::command]
+fn add_sync_conflict(
+    app: tauri::AppHandle,
+    conflict: storage::NewConflict,
+) -> Result<storage::ConflictRow, String> {
+    storage::add_conflict(&app, conflict)
+}
+
+#[tauri::command]
+fn list_sync_conflicts(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<storage::ConflictRow>, String> {
+    storage::list_conflicts(&app, limit.unwrap_or(20))
+}
+
+#[tauri::command]
 fn list_sync_operations(
     app: tauri::AppHandle,
     limit: Option<u32>,
@@ -486,6 +502,8 @@ pub fn run() {
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,
+            add_sync_conflict,
+            list_sync_conflicts,
             seed_demo_operations,
             list_sync_operations,
             get_operation_stage_counts,
