@@ -39,6 +39,7 @@ type SyncServiceStatus = {
   tickCount: number;
   processedCount: number;
   failedCount: number;
+  retryScheduledCount: number;
   lastTickEpochMs: number | null;
   lastError: string | null;
   lastOperationId: string | null;
@@ -77,6 +78,7 @@ type ExecutorRunResult = {
   processed: boolean;
   operationId: string | null;
   stage: string | null;
+  outcome: string;
   message: string;
 };
 
@@ -761,8 +763,8 @@ function App() {
           {serviceStatus?.tickCount ?? 0}
         </p>
         <p className="hint">
-          processed: {serviceStatus?.processedCount ?? 0} / failed:{" "}
-          {serviceStatus?.failedCount ?? 0}
+          processed: {serviceStatus?.processedCount ?? 0} / retry:{" "}
+          {serviceStatus?.retryScheduledCount ?? 0} / failed: {serviceStatus?.failedCount ?? 0}
         </p>
         {serviceStatus?.lastTickEpochMs ? (
           <p className="hint">

@@ -14,6 +14,7 @@ struct ServiceMetrics {
     tick_count: u64,
     processed_count: u64,
     failed_count: u64,
+    retry_scheduled_count: u64,
     last_tick_at: Option<SystemTime>,
     last_error: Option<String>,
     last_operation_id: Option<String>,
@@ -46,6 +47,7 @@ pub struct SyncServiceStatus {
     pub tick_count: u64,
     pub processed_count: u64,
     pub failed_count: u64,
+    pub retry_scheduled_count: u64,
     pub last_tick_epoch_ms: Option<u128>,
     pub last_error: Option<String>,
     pub last_operation_id: Option<String>,
@@ -111,6 +113,12 @@ impl SyncServiceState {
                                     Ok(run_result) => {
                                         if run_result.processed {
                                             m.processed_count += 1;
+                                        }
+                                        if run_result.outcome == "retry_scheduled" {
+                                            m.retry_scheduled_count += 1;
+                                        }
+                                        if run_result.outcome == "failed" {
+                                            m.failed_count += 1;
                                         }
                                         m.last_error = None;
                                         m.last_operation_id = run_result.operation_id;
@@ -182,6 +190,7 @@ impl SyncServiceState {
                 tick_count: metrics.tick_count,
                 processed_count: metrics.processed_count,
                 failed_count: metrics.failed_count,
+                retry_scheduled_count: metrics.retry_scheduled_count,
                 last_tick_epoch_ms: metrics
                     .last_tick_at
                     .and_then(|it| it.duration_since(SystemTime::UNIX_EPOCH).ok())
@@ -200,6 +209,7 @@ impl SyncServiceState {
                 tick_count: 0,
                 processed_count: 0,
                 failed_count: 0,
+                retry_scheduled_count: 0,
                 last_tick_epoch_ms: None,
                 last_error: None,
                 last_operation_id: None,

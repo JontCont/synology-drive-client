@@ -37,7 +37,7 @@ This template should help get you started developing with Tauri, React and Types
   - background loop state in `src-tauri/src/sync_service.rs`
   - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
   - each tick runs one executor step (`storage::init` + `executor::run_once`)
-  - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`)
+  - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`) and counters (`processedCount`, `retryScheduledCount`, `failedCount`)
   - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`
@@ -52,7 +52,7 @@ This template should help get you started developing with Tauri, React and Types
 - Executor skeleton:
   - single-step executor in `src-tauri/src/executor.rs`
   - commands: `run_sync_executor_once`, `run_sync_cycle_once`, `run_pipeline_once`
-  - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` then succeeds, `upload_retry_hard` reaches max attempts then marks `failed`, unsupported type marks `failed` with `last_error`
+  - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` then succeeds, `upload_retry_hard` reaches max attempts then marks `failed`, unsupported type marks `failed` with `last_error`; all outcomes are returned as structured `ExecutorRunResult` (not treated as system error)
 - Diagnostics:
   - command: `get_system_snapshot`
   - returns config/auth/storage/service/watcher summary and operation count in one response

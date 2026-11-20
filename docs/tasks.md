@@ -39,6 +39,7 @@
   - [x] P1-9i operation stage 統計（queue 健康度可視化）
   - [x] P1-9j retry 最大次數保護（避免無限重試）
   - [x] P1-9k operation 清理入口（purge done/failed）
+  - [x] P1-9l executor 結果結構化（retry/failed 非系統錯誤）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
 
