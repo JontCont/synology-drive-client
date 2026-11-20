@@ -1,6 +1,21 @@
+mod config;
+
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, WindowEvent};
+
+#[tauri::command]
+fn get_app_config(app: tauri::AppHandle) -> Result<config::AppConfig, String> {
+    config::load(&app)
+}
+
+#[tauri::command]
+fn update_app_config(
+    app: tauri::AppHandle,
+    update: config::AppConfigUpdate,
+) -> Result<config::AppConfig, String> {
+    config::save(&app, update)
+}
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
@@ -53,6 +68,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
+        .invoke_handler(tauri::generate_handler![get_app_config, update_app_config])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

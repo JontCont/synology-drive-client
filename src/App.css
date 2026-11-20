@@ -30,9 +30,26 @@ h1 {
   margin: 0;
 }
 
+.config {
+  width: min(640px, 100%);
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  text-align: left;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.error {
+  color: #c62828;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
     background-color: #2f2f2f;
+  }
+
+  .error {
+    color: #ff8a80;
   }
 }

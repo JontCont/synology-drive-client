@@ -13,6 +13,10 @@ This template should help get you started developing with Tauri, React and Types
   - default capability only (`core:default`)
   - no opener capability/plugin by default
   - CSP enabled in `src-tauri/tauri.conf.json`
+- Config skeleton:
+  - backend commands: `get_app_config`, `update_app_config`
+  - file location: app config directory `settings.json`
+  - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`
 
 ## Recommended IDE Setup
 
