@@ -52,6 +52,14 @@ fn list_sync_operations(
 }
 
 #[tauri::command]
+fn seed_demo_operations(
+    app: tauri::AppHandle,
+    count: Option<u32>,
+) -> Result<Vec<storage::OperationRow>, String> {
+    storage::seed_demo_operations(&app, count.unwrap_or(5))
+}
+
+#[tauri::command]
 fn retry_sync_operation(
     app: tauri::AppHandle,
     id: String,
@@ -279,6 +287,7 @@ pub fn run() {
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,
+            seed_demo_operations,
             list_sync_operations,
             retry_sync_operation,
             run_sync_executor_once,

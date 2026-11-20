@@ -404,6 +404,21 @@ function App() {
     }
   }
 
+  async function seedDemoOperations() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const rows = await invoke<OperationRow[]>("seed_demo_operations", { count: 5 });
+      await refreshOperations();
+      setMessage(`已新增 ${rows.length} 筆 demo operations。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function runExecutorOnce() {
     setOpsLoading(true);
     setError(null);
@@ -611,6 +626,9 @@ function App() {
         <div className="button-row">
           <button type="button" onClick={addSampleOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增範例 operation"}
+          </button>
+          <button type="button" onClick={seedDemoOperations} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "批次新增 demo operations"}
           </button>
           <button type="button" onClick={runExecutorOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行一次 executor"}

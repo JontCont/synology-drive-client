@@ -27,6 +27,7 @@
   - [x] P1-9b executor 單步執行骨架（claim planned → done）
   - [x] P1-9c sync cycle 單步入口（先 init storage，再跑 executor）
   - [x] P1-9d operation 重試入口（指定 id 重設為 planned）
+  - [x] P1-9e demo operation 批次灌入（快速壓測骨架）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
 

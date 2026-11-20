@@ -277,6 +277,37 @@ pub fn enqueue_operation<R: Runtime>(
     .map_err(|e| format!("operation 建立後回讀失敗：{e}"))
 }
 
+pub fn seed_demo_operations<R: Runtime>(
+    app: &AppHandle<R>,
+    count: u32,
+) -> Result<Vec<OperationRow>, String> {
+    if count == 0 {
+        return Err("count 必須大於 0".to_string());
+    }
+    let count = count.min(100);
+    let mut rows = Vec::new();
+    for idx in 0..count {
+        let op = NewOperation {
+            id: format!(
+                "demo-{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| format!("取得時間戳失敗：{e}"))?
+                    .as_millis(),
+                idx
+            ),
+            root_id: "default-root".to_string(),
+            item_id: None,
+            op_type: "upload".to_string(),
+            from_path: Some(format!("/demo/local-{idx}.txt")),
+            to_path: Some(format!("/demo/remote-{idx}.txt")),
+            stage: Some("planned".to_string()),
+        };
+        rows.push(enqueue_operation(app, op)?);
+    }
+    Ok(rows)
+}
+
 pub fn list_operations<R: Runtime>(
     app: &AppHandle<R>,
     limit: u32,
