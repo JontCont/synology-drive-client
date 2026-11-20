@@ -30,6 +30,7 @@
   - [x] P1-9d operation 重試入口（指定 id 重設為 planned）
   - [x] P1-9e demo operation 批次灌入（快速壓測骨架）
   - [x] P1-9f 一鍵 pipeline（watcher drain + executor）
+  - [x] P1-9g executor 失敗階段寫回（failed + last_error）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
 

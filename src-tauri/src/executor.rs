@@ -23,7 +23,15 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
         });
     };
 
-    let updated = storage::update_operation_stage(app, &claimed.id, "done")?;
+    let supported = matches!(claimed.op_type.as_str(), "upload" | "download" | "delete" | "rename");
+    if !supported {
+        let error = format!("不支援的 op_type: {}", claimed.op_type);
+        let updated =
+            storage::update_operation_outcome(app, &claimed.id, "failed", Some(&error))?;
+        return Err(format!("operation {} 失敗：{}", updated.id, error));
+    }
+
+    let updated = storage::update_operation_outcome(app, &claimed.id, "done", None)?;
     Ok(ExecutorRunResult {
         processed: true,
         operation_id: Some(updated.id),

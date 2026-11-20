@@ -39,6 +39,7 @@ pub struct OperationRow {
     pub to_path: Option<String>,
     pub stage: String,
     pub attempts: i64,
+    pub last_error: Option<String>,
     pub updated_at: String,
 }
 
@@ -80,7 +81,8 @@ fn map_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> 
         to_path: row.get(5)?,
         stage: row.get(6)?,
         attempts: row.get(7)?,
-        updated_at: row.get(8)?,
+        last_error: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -201,6 +203,15 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<SyncStorageInfo, String> {
     )
     .map_err(|e| format!("寫入 migration 版本失敗：{e}"))?;
 
+    tx.execute(
+        "
+        ALTER TABLE operations
+        ADD COLUMN last_error TEXT
+        ",
+        [],
+    )
+    .ok();
+
     tx.commit().map_err(|e| format!("提交 migration 失敗：{e}"))?;
 
     Ok(SyncStorageInfo {
@@ -267,7 +278,7 @@ pub fn enqueue_operation<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
             FROM operations
             WHERE id = ?1
             ",
@@ -318,7 +329,7 @@ pub fn list_operations<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
             FROM operations
             ORDER BY updated_at DESC
             LIMIT ?1
@@ -376,6 +387,7 @@ pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<Ope
         UPDATE operations
         SET stage = 'processing',
             attempts = attempts + 1,
+            last_error = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?1
         ",
@@ -388,7 +400,7 @@ pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<Ope
             .prepare(
                 "
                 SELECT
-                    id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+                    id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
                 FROM operations
                 WHERE id = ?1
                 ",
@@ -408,16 +420,26 @@ pub fn update_operation_stage<R: Runtime>(
     id: &str,
     stage: &str,
 ) -> Result<OperationRow, String> {
+    update_operation_outcome(app, id, stage, None)
+}
+
+pub fn update_operation_outcome<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    stage: &str,
+    last_error: Option<&str>,
+) -> Result<OperationRow, String> {
     let path = db_path(app)?;
     let conn = open_connection(&path)?;
     conn.execute(
         "
         UPDATE operations
         SET stage = ?1,
+            last_error = ?2,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?2
+        WHERE id = ?3
         ",
-        params![stage, id],
+        params![stage, last_error, id],
     )
     .map_err(|e| format!("更新 operation stage 失敗：{e}"))?;
 
@@ -425,7 +447,7 @@ pub fn update_operation_stage<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
             FROM operations
             WHERE id = ?1
             ",

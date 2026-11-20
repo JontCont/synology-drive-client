@@ -60,6 +60,7 @@ type OperationRow = {
   toPath: string | null;
   stage: string;
   attempts: number;
+  lastError: string | null;
   updatedAt: string;
 };
 
@@ -701,6 +702,7 @@ function App() {
             {operations.map((op) => (
               <li key={op.id}>
                 {op.id} / {op.opType} / {op.stage} / {op.updatedAt}
+                {op.lastError ? ` / error: ${op.lastError}` : ""}
               </li>
             ))}
           </ul>

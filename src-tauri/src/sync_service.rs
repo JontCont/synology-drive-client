@@ -96,15 +96,16 @@ impl SyncServiceState {
                                 m.tick_count += 1;
                                 m.last_tick_at = Some(SystemTime::now());
                             }
-                            let result = (|| -> Result<(), String> {
+                            let result = (|| -> Result<executor::ExecutorRunResult, String> {
                                 let _ = storage::init(&app_for_thread)?;
-                                let _ = executor::run_once(&app_for_thread)?;
-                                Ok(())
+                                executor::run_once(&app_for_thread)
                             })();
                             if let Ok(mut m) = metrics_for_thread.lock() {
                                 match result {
-                                    Ok(()) => {
-                                        m.processed_count += 1;
+                                    Ok(run_result) => {
+                                        if run_result.processed {
+                                            m.processed_count += 1;
+                                        }
                                         m.last_error = None;
                                     }
                                     Err(err) => {
