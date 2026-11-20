@@ -54,6 +54,10 @@ This template should help get you started developing with Tauri, React and Types
   - command: `get_system_snapshot`
   - returns config/auth/storage/service/watcher summary and operation count in one response
 
+## Validation command
+
+- `npm run check` : runs frontend build + Rust `cargo check`
+
 ## Recommended IDE Setup
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
