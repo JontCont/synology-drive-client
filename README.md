@@ -36,6 +36,7 @@ This template should help get you started developing with Tauri, React and Types
 - Sync service skeleton:
   - background loop state in `src-tauri/src/sync_service.rs`
   - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
+  - each tick runs one executor step (`storage::init` + `executor::run_once`)
   - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`

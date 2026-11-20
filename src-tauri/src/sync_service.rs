@@ -4,11 +4,18 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
+use tauri::AppHandle;
+
+use crate::executor;
+use crate::storage;
 
 #[derive(Debug, Default)]
 struct ServiceMetrics {
     tick_count: u64,
+    processed_count: u64,
+    failed_count: u64,
     last_tick_at: Option<SystemTime>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -34,7 +41,10 @@ pub struct SyncServiceStatus {
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub tick_count: u64,
+    pub processed_count: u64,
+    pub failed_count: u64,
     pub last_tick_epoch_ms: Option<u128>,
+    pub last_error: Option<String>,
 }
 
 impl SyncServiceState {
@@ -46,6 +56,7 @@ impl SyncServiceState {
 
     pub fn start(
         &self,
+        app: AppHandle,
         interval_seconds: u32,
         local_sync_path: String,
         remote_path: String,
@@ -73,6 +84,7 @@ impl SyncServiceState {
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let sleep_duration = Duration::from_secs(interval_seconds as u64);
 
+        let app_for_thread = app.clone();
         let handle = thread::Builder::new()
             .name("sync-service-loop".to_string())
             .spawn(move || {
@@ -83,6 +95,23 @@ impl SyncServiceState {
                             if let Ok(mut m) = metrics_for_thread.lock() {
                                 m.tick_count += 1;
                                 m.last_tick_at = Some(SystemTime::now());
+                            }
+                            let result = (|| -> Result<(), String> {
+                                let _ = storage::init(&app_for_thread)?;
+                                let _ = executor::run_once(&app_for_thread)?;
+                                Ok(())
+                            })();
+                            if let Ok(mut m) = metrics_for_thread.lock() {
+                                match result {
+                                    Ok(()) => {
+                                        m.processed_count += 1;
+                                        m.last_error = None;
+                                    }
+                                    Err(err) => {
+                                        m.failed_count += 1;
+                                        m.last_error = Some(err);
+                                    }
+                                }
                             }
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -140,10 +169,13 @@ impl SyncServiceState {
                 local_sync_path: Some(running.local_sync_path.clone()),
                 remote_path: Some(running.remote_path.clone()),
                 tick_count: metrics.tick_count,
+                processed_count: metrics.processed_count,
+                failed_count: metrics.failed_count,
                 last_tick_epoch_ms: metrics
                     .last_tick_at
                     .and_then(|it| it.duration_since(SystemTime::UNIX_EPOCH).ok())
                     .map(|it| it.as_millis()),
+                last_error: metrics.last_error.clone(),
             })
         } else {
             Ok(SyncServiceStatus {
@@ -152,7 +184,10 @@ impl SyncServiceState {
                 local_sync_path: None,
                 remote_path: None,
                 tick_count: 0,
+                processed_count: 0,
+                failed_count: 0,
                 last_tick_epoch_ms: None,
+                last_error: None,
             })
         }
     }

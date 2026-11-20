@@ -86,6 +86,7 @@ fn start_sync_service(
 ) -> Result<sync_service::SyncServiceStatus, String> {
     let cfg = config::load(&app)?;
     sync_state.start(
+        app,
         cfg.poll_interval_seconds,
         cfg.local_sync_path.unwrap_or_default(),
         cfg.remote_path.unwrap_or_default(),

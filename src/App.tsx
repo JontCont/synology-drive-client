@@ -37,7 +37,10 @@ type SyncServiceStatus = {
   localSyncPath: string | null;
   remotePath: string | null;
   tickCount: number;
+  processedCount: number;
+  failedCount: number;
   lastTickEpochMs: number | null;
+  lastError: string | null;
 };
 
 type LocalWatcherStatus = {
@@ -510,11 +513,16 @@ function App() {
           狀態：{serviceStatus?.running ? "running" : "stopped"} / tick:{" "}
           {serviceStatus?.tickCount ?? 0}
         </p>
+        <p className="hint">
+          processed: {serviceStatus?.processedCount ?? 0} / failed:{" "}
+          {serviceStatus?.failedCount ?? 0}
+        </p>
         {serviceStatus?.lastTickEpochMs ? (
           <p className="hint">
             最後 tick：{new Date(serviceStatus.lastTickEpochMs).toLocaleString()}
           </p>
         ) : null}
+        {serviceStatus?.lastError ? <p className="error">{serviceStatus.lastError}</p> : null}
         <div className="button-row">
           <button type="button" onClick={startService} disabled={serviceLoading}>
             {serviceLoading ? "處理中..." : "啟動同步服務"}
