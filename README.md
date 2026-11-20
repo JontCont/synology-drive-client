@@ -24,6 +24,8 @@ This template should help get you started developing with Tauri, React and Types
   - command: `run_fake_remote_probe` for contract smoke checks (mkdir/write/read/move/delete/not-found)
   - command: `run_and_store_fake_remote_probe` writes probe report to app data (`remote-probe-last.json`)
   - command: `load_last_remote_probe_report` reads last persisted probe report
+  - command: `list_remote_probe_history` lists stored probe history (newest first)
+  - command: `export_last_remote_probe_markdown` exports last probe report to markdown (`remote-probe-last.md`)
 - Auth skeleton:
   - backend auth state machine in `src-tauri/src/auth.rs`
   - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`

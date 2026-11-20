@@ -12,7 +12,7 @@ use crate::remote::RemoteProvider;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 
@@ -164,7 +164,7 @@ fn get_default_sync_root(app: tauri::AppHandle) -> Result<storage::SyncRootRow, 
     storage::get_default_sync_root(&app)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeCase {
     name: String,
@@ -172,7 +172,7 @@ struct RemoteProbeCase {
     detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeResult {
     provider: String,
@@ -193,6 +193,35 @@ struct StoredRemoteProbeResult {
 struct RemoteProbeReportFile {
     report_path: String,
     content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeHistoryItem {
+    timestamp_epoch_ms: u128,
+    provider: String,
+    passed_count: usize,
+    total_count: usize,
+    report_path: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeHistoryIndex {
+    items: Vec<RemoteProbeHistoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeMarkdownFile {
+    report_path: String,
+    content: String,
+}
+
+fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("無法取得資料目錄：{e}"))
 }
 
 #[tauri::command]
@@ -281,15 +310,41 @@ fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
 #[tauri::command]
 fn run_and_store_fake_remote_probe(app: tauri::AppHandle) -> Result<StoredRemoteProbeResult, String> {
     let result = run_fake_remote_probe()?;
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("無法取得資料目錄：{e}"))?;
+    let dir = app_data_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|e| format!("建立資料目錄失敗：{e}"))?;
     let report_path = dir.join("remote-probe-last.json");
     let raw = serde_json::to_string_pretty(&result)
         .map_err(|e| format!("序列化 remote probe 失敗：{e}"))?;
     fs::write(&report_path, raw).map_err(|e| format!("寫入 remote probe 報告失敗：{e}"))?;
+
+    let history_path = dir.join("remote-probe-history.json");
+    let mut history = if history_path.exists() {
+        let raw = fs::read_to_string(&history_path)
+            .map_err(|e| format!("讀取 remote probe 歷史失敗：{e}"))?;
+        serde_json::from_str::<RemoteProbeHistoryIndex>(&raw)
+            .map_err(|e| format!("解析 remote probe 歷史失敗：{e}"))?
+    } else {
+        RemoteProbeHistoryIndex::default()
+    };
+    let timestamp_epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("取得時間戳失敗：{e}"))?
+        .as_millis();
+    history.items.push(RemoteProbeHistoryItem {
+        timestamp_epoch_ms,
+        provider: result.provider.clone(),
+        passed_count: result.passed_count,
+        total_count: result.total_count,
+        report_path: report_path.to_string_lossy().to_string(),
+    });
+    if history.items.len() > 200 {
+        let start = history.items.len() - 200;
+        history.items = history.items[start..].to_vec();
+    }
+    let history_raw = serde_json::to_string_pretty(&history)
+        .map_err(|e| format!("序列化 remote probe 歷史失敗：{e}"))?;
+    fs::write(&history_path, history_raw).map_err(|e| format!("寫入 remote probe 歷史失敗：{e}"))?;
+
     Ok(StoredRemoteProbeResult {
         report_path: report_path.to_string_lossy().to_string(),
         result,
@@ -300,10 +355,7 @@ fn run_and_store_fake_remote_probe(app: tauri::AppHandle) -> Result<StoredRemote
 fn load_last_remote_probe_report(
     app: tauri::AppHandle,
 ) -> Result<Option<RemoteProbeReportFile>, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("無法取得資料目錄：{e}"))?;
+    let dir = app_data_dir(&app)?;
     let report_path = dir.join("remote-probe-last.json");
     if !report_path.exists() {
         return Ok(None);
@@ -312,6 +364,67 @@ fn load_last_remote_probe_report(
         fs::read_to_string(&report_path).map_err(|e| format!("讀取 remote probe 報告失敗：{e}"))?;
     Ok(Some(RemoteProbeReportFile {
         report_path: report_path.to_string_lossy().to_string(),
+        content,
+    }))
+}
+
+#[tauri::command]
+fn list_remote_probe_history(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<RemoteProbeHistoryItem>, String> {
+    let dir = app_data_dir(&app)?;
+    let history_path = dir.join("remote-probe-history.json");
+    if !history_path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw =
+        fs::read_to_string(&history_path).map_err(|e| format!("讀取 remote probe 歷史失敗：{e}"))?;
+    let history = serde_json::from_str::<RemoteProbeHistoryIndex>(&raw)
+        .map_err(|e| format!("解析 remote probe 歷史失敗：{e}"))?;
+    let take = limit.unwrap_or(20).clamp(1, 200) as usize;
+    let mut items = history.items;
+    items.reverse();
+    if items.len() > take {
+        items.truncate(take);
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+fn export_last_remote_probe_markdown(
+    app: tauri::AppHandle,
+) -> Result<Option<RemoteProbeMarkdownFile>, String> {
+    let dir = app_data_dir(&app)?;
+    let report_path = dir.join("remote-probe-last.json");
+    if !report_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&report_path)
+        .map_err(|e| format!("讀取 remote probe 報告失敗：{e}"))?;
+    let result = serde_json::from_str::<RemoteProbeResult>(&raw)
+        .map_err(|e| format!("解析 remote probe 報告失敗：{e}"))?;
+    let mut lines = Vec::new();
+    lines.push("# Remote Probe Report".to_string());
+    lines.push(String::new());
+    lines.push(format!("- Provider: {}", result.provider));
+    lines.push(format!(
+        "- Result: {}/{} passed",
+        result.passed_count, result.total_count
+    ));
+    lines.push(String::new());
+    lines.push("| Case | Passed | Detail |".to_string());
+    lines.push("|---|---|---|".to_string());
+    for c in result.cases {
+        let passed = if c.passed { "PASS" } else { "FAIL" };
+        lines.push(format!("| {} | {} | {} |", c.name, passed, c.detail));
+    }
+    lines.push(String::new());
+    let content = lines.join("\n");
+    let md_path = dir.join("remote-probe-last.md");
+    fs::write(&md_path, &content).map_err(|e| format!("寫入 remote probe markdown 失敗：{e}"))?;
+    Ok(Some(RemoteProbeMarkdownFile {
+        report_path: md_path.to_string_lossy().to_string(),
         content,
     }))
 }
@@ -794,6 +907,8 @@ pub fn run() {
             run_fake_remote_probe,
             run_and_store_fake_remote_probe,
             load_last_remote_probe_report,
+            list_remote_probe_history,
+            export_last_remote_probe_markdown,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
