@@ -413,6 +413,43 @@ pub fn list_conflicts<R: Runtime>(app: &AppHandle<R>, limit: u32) -> Result<Vec<
     Ok(result)
 }
 
+pub fn update_conflict_status<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    status: &str,
+) -> Result<ConflictRow, String> {
+    if id.trim().is_empty() {
+        return Err("conflict id 不可為空".to_string());
+    }
+    if status.trim().is_empty() {
+        return Err("status 不可為空".to_string());
+    }
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    conn.execute(
+        "
+        UPDATE conflicts
+        SET status = ?1
+        WHERE id = ?2
+        ",
+        params![status, id],
+    )
+    .map_err(|e| format!("更新 conflict 狀態失敗：{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, item_id, reason, local_version, remote_version, local_copy_path, remote_copy_path, status, created_at
+            FROM conflicts
+            WHERE id = ?1
+            ",
+        )
+        .map_err(|e| format!("建立 conflict 狀態回讀查詢失敗：{e}"))?;
+    stmt.query_row([id], map_conflict_row)
+        .map_err(|e| format!("回讀 conflict 狀態失敗：{e}"))
+}
+
 pub fn seed_demo_operations<R: Runtime>(
     app: &AppHandle<R>,
     count: u32,

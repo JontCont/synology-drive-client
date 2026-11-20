@@ -62,6 +62,14 @@ fn list_sync_conflicts(
 }
 
 #[tauri::command]
+fn resolve_sync_conflict(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<storage::ConflictRow, String> {
+    storage::update_conflict_status(&app, &id, "resolved")
+}
+
+#[tauri::command]
 fn list_sync_operations(
     app: tauri::AppHandle,
     limit: Option<u32>,
@@ -504,6 +512,7 @@ pub fn run() {
             enqueue_sync_operation,
             add_sync_conflict,
             list_sync_conflicts,
+            resolve_sync_conflict,
             seed_demo_operations,
             list_sync_operations,
             get_operation_stage_counts,

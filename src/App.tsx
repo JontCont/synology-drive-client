@@ -635,6 +635,21 @@ function App() {
     }
   }
 
+  async function resolveConflict(id: string) {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await invoke<ConflictRow>("resolve_sync_conflict", { id });
+      await refreshConflicts();
+      setMessage(`conflict ${id} 已標記 resolved。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function seedDemoOperations() {
     setOpsLoading(true);
     setError(null);
@@ -981,6 +996,18 @@ function App() {
             {conflicts.map((conflict) => (
               <li key={conflict.id}>
                 {conflict.id} / {conflict.reason} / {conflict.status} / {conflict.createdAt}
+                {conflict.status !== "resolved" ? (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={() => resolveConflict(conflict.id)}
+                      disabled={opsLoading}
+                    >
+                      resolved
+                    </button>
+                  </>
+                ) : null}
               </li>
             ))}
           </ul>
