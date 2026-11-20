@@ -394,6 +394,35 @@ pub fn count_operations_by_stage<R: Runtime>(
     Ok(result)
 }
 
+pub fn purge_operations_by_stage<R: Runtime>(
+    app: &AppHandle<R>,
+    stage: &str,
+    limit: u32,
+) -> Result<u64, String> {
+    if stage.trim().is_empty() {
+        return Err("stage 不可為空".to_string());
+    }
+    let limit = limit.clamp(1, 5000);
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let deleted = conn
+        .execute(
+            "
+            DELETE FROM operations
+            WHERE id IN (
+                SELECT id
+                FROM operations
+                WHERE stage = ?1
+                ORDER BY updated_at ASC
+                LIMIT ?2
+            )
+            ",
+            params![stage, limit],
+        )
+        .map_err(|e| format!("清理 operation 失敗：{e}"))?;
+    Ok(deleted as u64)
+}
+
 pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<OperationRow>, String> {
     let path = db_path(app)?;
     let mut conn = open_connection(&path)?;

@@ -637,6 +637,24 @@ function App() {
     }
   }
 
+  async function purgeOperations(stage: "done" | "failed") {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const deleted = await invoke<number>("purge_sync_operations", {
+        stage,
+        limit: 200,
+      });
+      await refreshOperations();
+      setMessage(`已清理 ${deleted} 筆 ${stage} operation。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function refreshSnapshot() {
     try {
       const s = await invoke<SystemSnapshot>("get_system_snapshot");
@@ -838,6 +856,12 @@ function App() {
           </button>
           <button type="button" onClick={refreshOperations} disabled={opsLoading}>
             重新整理 operation
+          </button>
+          <button type="button" onClick={() => purgeOperations("done")} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "清理 done"}
+          </button>
+          <button type="button" onClick={() => purgeOperations("failed")} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "清理 failed"}
           </button>
         </div>
         {operations.length > 0 ? (

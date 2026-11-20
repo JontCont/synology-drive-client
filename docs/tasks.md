@@ -38,6 +38,7 @@
   - [x] P1-9h retryable/backoff 骨架（next_retry_at + due 重試）
   - [x] P1-9i operation stage 統計（queue 健康度可視化）
   - [x] P1-9j retry 最大次數保護（避免無限重試）
+  - [x] P1-9k operation 清理入口（purge done/failed）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
 

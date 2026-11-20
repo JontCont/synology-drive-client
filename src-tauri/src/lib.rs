@@ -61,6 +61,15 @@ fn get_operation_stage_counts(
 }
 
 #[tauri::command]
+fn purge_sync_operations(
+    app: tauri::AppHandle,
+    stage: String,
+    limit: Option<u32>,
+) -> Result<u64, String> {
+    storage::purge_operations_by_stage(&app, &stage, limit.unwrap_or(100))
+}
+
+#[tauri::command]
 fn seed_demo_operations(
     app: tauri::AppHandle,
     count: Option<u32>,
@@ -477,6 +486,7 @@ pub fn run() {
             seed_demo_operations,
             list_sync_operations,
             get_operation_stage_counts,
+            purge_sync_operations,
             retry_sync_operation,
             run_sync_executor_once,
             run_sync_cycle_once,
