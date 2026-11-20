@@ -7,6 +7,7 @@
 - [ ] T2 定稿 Provider（WebDAV / Drive API 二擇一）
 - [ ] T3 定義 RemoteProvider 契約與錯誤模型
   - [x] T3a FakeRemote contract probe 指令（含報告落檔）
+  - [x] T3b 載入最近一次 probe 報告指令
 
 ## Phase 1（MVP）
 - [x] P1-0 專案骨架（Tauri + React + Rust）

@@ -188,6 +188,13 @@ struct StoredRemoteProbeResult {
     result: RemoteProbeResult,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeReportFile {
+    report_path: String,
+    content: String,
+}
+
 #[tauri::command]
 fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
     let mut remote = remote::FakeRemote::new();
@@ -287,6 +294,26 @@ fn run_and_store_fake_remote_probe(app: tauri::AppHandle) -> Result<StoredRemote
         report_path: report_path.to_string_lossy().to_string(),
         result,
     })
+}
+
+#[tauri::command]
+fn load_last_remote_probe_report(
+    app: tauri::AppHandle,
+) -> Result<Option<RemoteProbeReportFile>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("無法取得資料目錄：{e}"))?;
+    let report_path = dir.join("remote-probe-last.json");
+    if !report_path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&report_path).map_err(|e| format!("讀取 remote probe 報告失敗：{e}"))?;
+    Ok(Some(RemoteProbeReportFile {
+        report_path: report_path.to_string_lossy().to_string(),
+        content,
+    }))
 }
 
 #[tauri::command]
@@ -766,6 +793,7 @@ pub fn run() {
             get_default_sync_root,
             run_fake_remote_probe,
             run_and_store_fake_remote_probe,
+            load_last_remote_probe_report,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
