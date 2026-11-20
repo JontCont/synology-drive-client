@@ -4,6 +4,7 @@ mod remote;
 mod storage;
 mod sync_model;
 mod sync_service;
+mod watcher;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -57,6 +58,29 @@ fn get_sync_service_status(
     sync_state: State<'_, sync_service::SyncServiceState>,
 ) -> Result<sync_service::SyncServiceStatus, String> {
     sync_state.status()
+}
+
+#[tauri::command]
+fn start_local_watcher(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<watcher::LocalWatcherStatus, String> {
+    let cfg = config::load(&app)?;
+    watcher_state.start(cfg.local_sync_path.unwrap_or_default())
+}
+
+#[tauri::command]
+fn stop_local_watcher(
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<watcher::LocalWatcherStatus, String> {
+    watcher_state.stop()
+}
+
+#[tauri::command]
+fn get_local_watcher_status(
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<watcher::LocalWatcherStatus, String> {
+    watcher_state.status()
 }
 
 #[tauri::command]
@@ -114,6 +138,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(auth::AuthState::new())
         .manage(sync_service::SyncServiceState::new())
+        .manage(watcher::LocalWatcherState::new())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -162,6 +187,9 @@ pub fn run() {
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
+            start_local_watcher,
+            stop_local_watcher,
+            get_local_watcher_status,
             get_auth_status,
             login_with_password,
             submit_otp,

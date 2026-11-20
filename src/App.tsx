@@ -30,11 +30,19 @@ type SyncServiceStatus = {
   lastTickEpochMs: number | null;
 };
 
+type LocalWatcherStatus = {
+  running: boolean;
+  rootPath: string | null;
+  eventCount: number;
+  lastEventPath: string | null;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
+  const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -50,6 +58,7 @@ function App() {
   const [ssoCallbackUrl, setSsoCallbackUrl] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [serviceLoading, setServiceLoading] = useState(false);
+  const [watcherLoading, setWatcherLoading] = useState(false);
 
   useEffect(() => {
     invoke<AppConfig>("get_app_config")
@@ -75,6 +84,12 @@ function App() {
       .then((value) => setServiceStatus(value))
       .catch(() => {
         setServiceStatus(null);
+      });
+
+    invoke<LocalWatcherStatus>("get_local_watcher_status")
+      .then((value) => setWatcherStatus(value))
+      .catch(() => {
+        setWatcherStatus(null);
       });
   }, []);
 
@@ -250,6 +265,41 @@ function App() {
     }
   }
 
+  async function refreshWatcherStatus() {
+    const status = await invoke<LocalWatcherStatus>("get_local_watcher_status");
+    setWatcherStatus(status);
+  }
+
+  async function startWatcher() {
+    setWatcherLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const status = await invoke<LocalWatcherStatus>("start_local_watcher");
+      setWatcherStatus(status);
+      setMessage("本機監看已啟動。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWatcherLoading(false);
+    }
+  }
+
+  async function stopWatcher() {
+    setWatcherLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const status = await invoke<LocalWatcherStatus>("stop_local_watcher");
+      setWatcherStatus(status);
+      setMessage("本機監看已停止。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setWatcherLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -333,6 +383,29 @@ function App() {
           </button>
           <button type="button" onClick={refreshServiceStatus} disabled={serviceLoading}>
             重新整理狀態
+          </button>
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2>本機監看骨架</h2>
+        <p className="hint">
+          狀態：{watcherStatus?.running ? "running" : "stopped"} / event:{" "}
+          {watcherStatus?.eventCount ?? 0}
+        </p>
+        {watcherStatus?.rootPath ? <p className="hint">root: {watcherStatus.rootPath}</p> : null}
+        {watcherStatus?.lastEventPath ? (
+          <p className="hint">last: {watcherStatus.lastEventPath}</p>
+        ) : null}
+        <div className="button-row">
+          <button type="button" onClick={startWatcher} disabled={watcherLoading}>
+            {watcherLoading ? "處理中..." : "啟動本機監看"}
+          </button>
+          <button type="button" onClick={stopWatcher} disabled={watcherLoading}>
+            {watcherLoading ? "處理中..." : "停止本機監看"}
+          </button>
+          <button type="button" onClick={refreshWatcherStatus} disabled={watcherLoading}>
+            重新整理監看狀態
           </button>
         </div>
       </section>
