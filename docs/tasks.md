@@ -12,8 +12,8 @@
 - [x] P1-2 關窗縮系統匣
 - [x] P1-3 安全基線（移除 opener、最小 capability、CSP）
 - [x] P1-4 設定檔骨架（`get_app_config` / `update_app_config`）
-- [ ] P1-5 設定 UI（可修改與儲存設定）
-- [ ] P1-6 認證流程骨架（帳密/OTP + SSO）
+- [x] P1-5 設定 UI（可修改與儲存設定）
+- [x] P1-6 認證流程骨架（帳密/OTP + SSO）
 - [ ] P1-7 同步資料模型（baseline/operations/conflicts）
 - [ ] P1-8 掃描與監看（notify + 補掃描）
 - [ ] P1-9 三方比對與 executor

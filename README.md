@@ -21,6 +21,10 @@ This template should help get you started developing with Tauri, React and Types
 - Remote contract skeleton:
   - `RemoteProvider` trait and in-memory `FakeRemote` in `src-tauri/src/remote.rs`
   - includes basic list/stat/read/write/delete/move/mkdir operations for contract testing
+- Auth skeleton:
+  - backend auth state machine in `src-tauri/src/auth.rs`
+  - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`
+  - frontend includes account login, OTP step, SSO start/callback placeholders
 
 ## Recommended IDE Setup
 

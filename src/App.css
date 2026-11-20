@@ -17,26 +17,17 @@
 .container {
   margin: 0;
   min-height: 100vh;
-  gap: 8px;
+  gap: 12px;
   padding: 24px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
   text-align: center;
 }
 
 h1 {
   margin: 0;
-}
-
-.config {
-  width: min(640px, 100%);
-  margin: 0;
-  padding: 12px;
-  border-radius: 8px;
-  text-align: left;
-  background: rgba(127, 127, 127, 0.12);
 }
 
 .error {
@@ -54,6 +45,19 @@ h1 {
   gap: 12px;
 }
 
+.panel {
+  width: min(760px, 100%);
+  padding: 14px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 10px;
+  text-align: left;
+}
+
+.panel h2,
+.panel h3 {
+  margin: 0 0 8px 0;
+}
+
 .config-form label {
   display: flex;
   flex-direction: column;
@@ -62,7 +66,8 @@ h1 {
 }
 
 .config-form input,
-.config-form button {
+.config-form button,
+.panel > button {
   padding: 10px;
   border-radius: 8px;
   border: 1px solid rgba(127, 127, 127, 0.45);
@@ -70,8 +75,30 @@ h1 {
   color: inherit;
 }
 
-.config-form button {
+.config-form button,
+.panel > button {
   cursor: pointer;
+}
+
+.auth-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.inline-form {
+  margin-bottom: 12px;
+}
+
+.auth-status {
+  margin: 0 0 8px 0;
+}
+
+.hint {
+  margin: 0;
+  word-break: break-all;
+  font-size: 0.9rem;
 }
 
 @media (prefers-color-scheme: dark) {
