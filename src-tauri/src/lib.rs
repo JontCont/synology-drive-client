@@ -8,11 +8,13 @@ mod sync_model;
 mod sync_service;
 mod watcher;
 
+use crate::remote::RemoteProvider;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
 use serde::Serialize;
 use std::collections::HashSet;
+use std::fs;
 
 #[tauri::command]
 fn get_app_config(app: tauri::AppHandle) -> Result<config::AppConfig, String> {
@@ -160,6 +162,131 @@ fn sync_default_root_from_config(app: tauri::AppHandle) -> Result<storage::SyncR
 #[tauri::command]
 fn get_default_sync_root(app: tauri::AppHandle) -> Result<storage::SyncRootRow, String> {
     storage::get_default_sync_root(&app)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeCase {
+    name: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeResult {
+    provider: String,
+    passed_count: usize,
+    total_count: usize,
+    cases: Vec<RemoteProbeCase>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRemoteProbeResult {
+    report_path: String,
+    result: RemoteProbeResult,
+}
+
+#[tauri::command]
+fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
+    let mut remote = remote::FakeRemote::new();
+    let mut cases = Vec::new();
+
+    let mkdir_ok = remote.mkdir("/sync").is_ok();
+    cases.push(RemoteProbeCase {
+        name: "mkdir /sync".to_string(),
+        passed: mkdir_ok,
+        detail: if mkdir_ok {
+            "建立同步資料夾成功".to_string()
+        } else {
+            "建立同步資料夾失敗".to_string()
+        },
+    });
+
+    let write_ok = remote.write_file("/sync/a.txt", b"hello".to_vec()).is_ok();
+    cases.push(RemoteProbeCase {
+        name: "write /sync/a.txt".to_string(),
+        passed: write_ok,
+        detail: if write_ok {
+            "寫入檔案成功".to_string()
+        } else {
+            "寫入檔案失敗".to_string()
+        },
+    });
+
+    let read_ok = remote
+        .read_file("/sync/a.txt")
+        .map(|content| content == b"hello".to_vec())
+        .unwrap_or(false);
+    cases.push(RemoteProbeCase {
+        name: "read /sync/a.txt".to_string(),
+        passed: read_ok,
+        detail: if read_ok {
+            "讀取內容與預期一致".to_string()
+        } else {
+            "讀取內容不一致或讀取失敗".to_string()
+        },
+    });
+
+    let move_ok = remote.move_item("/sync/a.txt", "/sync/b.txt").is_ok();
+    cases.push(RemoteProbeCase {
+        name: "move a.txt -> b.txt".to_string(),
+        passed: move_ok,
+        detail: if move_ok {
+            "rename 成功".to_string()
+        } else {
+            "rename 失敗".to_string()
+        },
+    });
+
+    let delete_ok = remote.delete("/sync/b.txt").is_ok();
+    cases.push(RemoteProbeCase {
+        name: "delete /sync/b.txt".to_string(),
+        passed: delete_ok,
+        detail: if delete_ok {
+            "刪除檔案成功".to_string()
+        } else {
+            "刪除檔案失敗".to_string()
+        },
+    });
+
+    let not_found_ok = matches!(remote.stat("/sync/not-exists.txt"), Err(remote::RemoteError::NotFound));
+    cases.push(RemoteProbeCase {
+        name: "stat missing returns NotFound".to_string(),
+        passed: not_found_ok,
+        detail: if not_found_ok {
+            "缺檔回應符合預期".to_string()
+        } else {
+            "缺檔回應不符合預期".to_string()
+        },
+    });
+
+    let passed_count = cases.iter().filter(|it| it.passed).count();
+    Ok(RemoteProbeResult {
+        provider: "fake-remote".to_string(),
+        passed_count,
+        total_count: cases.len(),
+        cases,
+    })
+}
+
+#[tauri::command]
+fn run_and_store_fake_remote_probe(app: tauri::AppHandle) -> Result<StoredRemoteProbeResult, String> {
+    let result = run_fake_remote_probe()?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("無法取得資料目錄：{e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("建立資料目錄失敗：{e}"))?;
+    let report_path = dir.join("remote-probe-last.json");
+    let raw = serde_json::to_string_pretty(&result)
+        .map_err(|e| format!("序列化 remote probe 失敗：{e}"))?;
+    fs::write(&report_path, raw).map_err(|e| format!("寫入 remote probe 報告失敗：{e}"))?;
+    Ok(StoredRemoteProbeResult {
+        report_path: report_path.to_string_lossy().to_string(),
+        result,
+    })
 }
 
 #[tauri::command]
@@ -637,6 +764,8 @@ pub fn run() {
             run_sync_cycle_once,
             sync_default_root_from_config,
             get_default_sync_root,
+            run_fake_remote_probe,
+            run_and_store_fake_remote_probe,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,

@@ -6,6 +6,7 @@
   - [x] T1a 建立 Spike 記錄模板（`docs/remote-spike.md`）
 - [ ] T2 定稿 Provider（WebDAV / Drive API 二擇一）
 - [ ] T3 定義 RemoteProvider 契約與錯誤模型
+  - [x] T3a FakeRemote contract probe 指令（含報告落檔）
 
 ## Phase 1（MVP）
 - [x] P1-0 專案骨架（Tauri + React + Rust）
