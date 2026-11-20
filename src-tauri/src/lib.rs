@@ -54,6 +54,13 @@ fn list_sync_operations(
 }
 
 #[tauri::command]
+fn get_operation_stage_counts(
+    app: tauri::AppHandle,
+) -> Result<Vec<storage::OperationStageCount>, String> {
+    storage::count_operations_by_stage(&app)
+}
+
+#[tauri::command]
 fn seed_demo_operations(
     app: tauri::AppHandle,
     count: Option<u32>,
@@ -469,6 +476,7 @@ pub fn run() {
             enqueue_sync_operation,
             seed_demo_operations,
             list_sync_operations,
+            get_operation_stage_counts,
             retry_sync_operation,
             run_sync_executor_once,
             run_sync_cycle_once,

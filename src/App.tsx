@@ -68,6 +68,11 @@ type OperationRow = {
   updatedAt: string;
 };
 
+type OperationStageCount = {
+  stage: string;
+  count: number;
+};
+
 type ExecutorRunResult = {
   processed: boolean;
   operationId: string | null;
@@ -115,6 +120,7 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [operations, setOperations] = useState<OperationRow[]>([]);
+  const [operationStageCounts, setOperationStageCounts] = useState<OperationStageCount[]>([]);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -171,6 +177,11 @@ function App() {
       .then((rows) => setOperations(rows))
       .catch(() => {
         setOperations([]);
+      });
+    invoke<OperationStageCount[]>("get_operation_stage_counts")
+      .then((rows) => setOperationStageCounts(rows))
+      .catch(() => {
+        setOperationStageCounts([]);
       });
 
     invoke<SyncRootRow>("get_default_sync_root")
@@ -479,6 +490,8 @@ function App() {
   async function refreshOperations() {
     const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
     setOperations(rows);
+    const stageCounts = await invoke<OperationStageCount[]>("get_operation_stage_counts");
+    setOperationStageCounts(stageCounts);
   }
 
   async function addSampleOperation() {
@@ -772,6 +785,12 @@ function App() {
       <section className="panel">
         <h2>操作佇列骨架</h2>
         <p className="hint">目前筆數：{operations.length}</p>
+        <p className="hint">
+          stage 統計：
+          {operationStageCounts.length > 0
+            ? ` ${operationStageCounts.map((it) => `${it.stage}:${it.count}`).join(" / ")}`
+            : " 無資料"}
+        </p>
         <div className="button-row">
           <button type="button" onClick={addSampleOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增範例 operation"}

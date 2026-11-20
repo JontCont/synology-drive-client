@@ -44,6 +44,13 @@ pub struct OperationRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationStageCount {
+    pub stage: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewOperation {
@@ -355,6 +362,36 @@ pub fn count_operations<R: Runtime>(app: &AppHandle<R>) -> Result<i64, String> {
     let conn = open_connection(&path)?;
     conn.query_row("SELECT COUNT(1) FROM operations", [], |row| row.get(0))
         .map_err(|e| format!("查詢 operation 數量失敗：{e}"))
+}
+
+pub fn count_operations_by_stage<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<OperationStageCount>, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT stage, COUNT(1) AS count
+            FROM operations
+            GROUP BY stage
+            ORDER BY stage ASC
+            ",
+        )
+        .map_err(|e| format!("建立 operation stage 統計查詢失敗：{e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(OperationStageCount {
+                stage: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })
+        .map_err(|e| format!("查詢 operation stage 統計失敗：{e}"))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("讀取 operation stage 統計列失敗：{e}"))?);
+    }
+    Ok(result)
 }
 
 pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<OperationRow>, String> {
