@@ -22,7 +22,7 @@
   - [x] P1-7d conflict 骨架指令（add/list + 前端檢視）
   - [x] P1-7e conflict 狀態更新（resolve）
   - [x] P1-7f conflict 統計與清理（status counts + purge resolved）
-- [ ] P1-8 掃描與監看（notify + 補掃描）
+- [x] P1-8 掃描與監看（notify + 補掃描）
   - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
   - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）
   - [x] P1-8c watcher 事件轉入 operation 佇列
@@ -34,7 +34,7 @@
   - [x] P1-8i ingest backlog guard（pending 過高時暫停入列）
   - [x] P1-8j ingest 去重（相同 path pending 時不重複入列）
   - [x] P1-8k ingest backlog 上限可設定（settings.json）
-- [ ] P1-9 三方比對與 executor
+- [x] P1-9 三方比對與 executor
   - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
   - [x] P1-9b executor 單步執行骨架（claim planned → done）
   - [x] P1-9c sync cycle 單步入口（先 init storage，再跑 executor）
