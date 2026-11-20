@@ -46,7 +46,7 @@ This template should help get you started developing with Tauri, React and Types
   - frontend panel to add sample operation and preview recent rows
 - Executor skeleton:
   - single-step executor in `src-tauri/src/executor.rs`
-  - command: `run_sync_executor_once`
+  - commands: `run_sync_executor_once`, `run_sync_cycle_once`
   - behavior (current skeleton): claim one `planned` operation and mark as `done`
 
 ## Recommended IDE Setup

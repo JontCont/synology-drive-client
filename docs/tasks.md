@@ -24,6 +24,7 @@
 - [ ] P1-9 三方比對與 executor
   - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
   - [x] P1-9b executor 單步執行骨架（claim planned → done）
+  - [x] P1-9c sync cycle 單步入口（先 init storage，再跑 executor）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 
 ## Phase 2（Files On-Demand）

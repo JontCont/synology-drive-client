@@ -56,6 +56,12 @@ fn run_sync_executor_once(app: tauri::AppHandle) -> Result<executor::ExecutorRun
 }
 
 #[tauri::command]
+fn run_sync_cycle_once(app: tauri::AppHandle) -> Result<executor::ExecutorRunResult, String> {
+    let _ = storage::init(&app)?;
+    executor::run_once(&app)
+}
+
+#[tauri::command]
 fn start_sync_service(
     app: tauri::AppHandle,
     sync_state: State<'_, sync_service::SyncServiceState>,
@@ -209,6 +215,7 @@ pub fn run() {
             enqueue_sync_operation,
             list_sync_operations,
             run_sync_executor_once,
+            run_sync_cycle_once,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
