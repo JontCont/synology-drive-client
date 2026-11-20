@@ -48,11 +48,11 @@ This template should help get you started developing with Tauri, React and Types
 - Operation queue skeleton:
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
   - commands: `enqueue_sync_operation`, `seed_demo_operations`, `list_sync_operations`, `get_operation_stage_counts`, `retry_sync_operation`
-  - frontend panel to add sample/retryable operations and preview recent rows (`lastError` / `nextRetryAt`)
+  - frontend panel to add sample/retryable/hard-retry operations and preview recent rows (`lastError` / `nextRetryAt`)
 - Executor skeleton:
   - single-step executor in `src-tauri/src/executor.rs`
   - commands: `run_sync_executor_once`, `run_sync_cycle_once`, `run_pipeline_once`
-  - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` with delayed `next_retry_at` then succeeds, unsupported type marks `failed` with `last_error`
+  - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` then succeeds, `upload_retry_hard` reaches max attempts then marks `failed`, unsupported type marks `failed` with `last_error`
 - Diagnostics:
   - command: `get_system_snapshot`
   - returns config/auth/storage/service/watcher summary and operation count in one response

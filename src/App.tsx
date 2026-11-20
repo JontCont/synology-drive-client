@@ -546,6 +546,32 @@ function App() {
     }
   }
 
+  async function addHardRetryableOperation() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const opId = `op-retry-hard-${Date.now()}`;
+      await invoke<OperationRow>("enqueue_sync_operation", {
+        operation: {
+          id: opId,
+          rootId: "default-root",
+          itemId: null,
+          opType: "upload_retry_hard",
+          fromPath: "/sample/retry-hard-local.txt",
+          toPath: "/sample/retry-hard-remote.txt",
+          stage: "planned",
+        },
+      });
+      await refreshOperations();
+      setMessage("已新增 hard retry 測試 operation。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function seedDemoOperations() {
     setOpsLoading(true);
     setError(null);
@@ -800,6 +826,9 @@ function App() {
           </button>
           <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增 retryable operation"}
+          </button>
+          <button type="button" onClick={addHardRetryableOperation} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "新增 hard retry operation"}
           </button>
           <button type="button" onClick={runExecutorOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行一次 executor"}

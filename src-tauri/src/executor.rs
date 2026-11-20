@@ -3,6 +3,8 @@ use tauri::{AppHandle, Runtime};
 
 use crate::storage;
 
+const RETRYABLE_MAX_ATTEMPTS: i64 = 3;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutorRunResult {
@@ -39,6 +41,23 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
             stage: Some(updated.stage),
             message: "retryable operation 重試成功".to_string(),
         });
+    }
+
+    if claimed.op_type == "upload_retry_hard" {
+        if claimed.attempts < RETRYABLE_MAX_ATTEMPTS {
+            let error = format!(
+                "模擬持續性錯誤（第 {}/{} 次）",
+                claimed.attempts, RETRYABLE_MAX_ATTEMPTS
+            );
+            let updated = storage::schedule_operation_retry(app, &claimed.id, &error, 10)?;
+            return Err(format!(
+                "operation {} 轉為 {}：{}",
+                updated.id, updated.stage, error
+            ));
+        }
+        let error = format!("超過最大重試次數（{}）", RETRYABLE_MAX_ATTEMPTS);
+        let updated = storage::update_operation_outcome(app, &claimed.id, "failed", Some(&error))?;
+        return Err(format!("operation {} 失敗：{}", updated.id, error));
     }
 
     let supported = matches!(
