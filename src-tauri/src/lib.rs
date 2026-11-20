@@ -3,6 +3,7 @@ mod config;
 mod remote;
 mod storage;
 mod sync_model;
+mod sync_service;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -29,6 +30,33 @@ fn init_sync_storage(app: tauri::AppHandle) -> Result<storage::SyncStorageInfo, 
 #[tauri::command]
 fn get_sync_storage_info(app: tauri::AppHandle) -> Result<storage::SyncStorageInfo, String> {
     storage::info(&app)
+}
+
+#[tauri::command]
+fn start_sync_service(
+    app: tauri::AppHandle,
+    sync_state: State<'_, sync_service::SyncServiceState>,
+) -> Result<sync_service::SyncServiceStatus, String> {
+    let cfg = config::load(&app)?;
+    sync_state.start(
+        cfg.poll_interval_seconds,
+        cfg.local_sync_path.unwrap_or_default(),
+        cfg.remote_path.unwrap_or_default(),
+    )
+}
+
+#[tauri::command]
+fn stop_sync_service(
+    sync_state: State<'_, sync_service::SyncServiceState>,
+) -> Result<sync_service::SyncServiceStatus, String> {
+    sync_state.stop()
+}
+
+#[tauri::command]
+fn get_sync_service_status(
+    sync_state: State<'_, sync_service::SyncServiceState>,
+) -> Result<sync_service::SyncServiceStatus, String> {
+    sync_state.status()
 }
 
 #[tauri::command]
@@ -85,6 +113,7 @@ fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
 pub fn run() {
     tauri::Builder::default()
         .manage(auth::AuthState::new())
+        .manage(sync_service::SyncServiceState::new())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -130,6 +159,9 @@ pub fn run() {
             update_app_config,
             init_sync_storage,
             get_sync_storage_info,
+            start_sync_service,
+            stop_sync_service,
+            get_sync_service_status,
             get_auth_status,
             login_with_password,
             submit_otp,

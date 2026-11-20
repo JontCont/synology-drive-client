@@ -80,6 +80,21 @@ h1 {
   cursor: pointer;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button-row button {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .auth-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

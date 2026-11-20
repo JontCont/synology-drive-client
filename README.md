@@ -32,6 +32,10 @@ This template should help get you started developing with Tauri, React and Types
 - Sync decision skeleton:
   - three-way comparison model in `src-tauri/src/sync_model.rs`
   - includes initial decision function (`decide_action`) and unit tests
+- Sync service skeleton:
+  - background loop state in `src-tauri/src/sync_service.rs`
+  - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
+  - frontend panel for start/stop/status preview
 
 ## Recommended IDE Setup
 

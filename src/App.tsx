@@ -21,10 +21,20 @@ type SyncStorageInfo = {
   schemaVersion: number;
 };
 
+type SyncServiceStatus = {
+  running: boolean;
+  intervalSeconds: number | null;
+  localSyncPath: string | null;
+  remotePath: string | null;
+  tickCount: number;
+  lastTickEpochMs: number | null;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
+  const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -39,6 +49,7 @@ function App() {
   const [ssoEntryUrl, setSsoEntryUrl] = useState("https://nas.example.com/sso");
   const [ssoCallbackUrl, setSsoCallbackUrl] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [serviceLoading, setServiceLoading] = useState(false);
 
   useEffect(() => {
     invoke<AppConfig>("get_app_config")
@@ -58,6 +69,12 @@ function App() {
       .then((value) => setStorageInfo(value))
       .catch(() => {
         setStorageInfo(null);
+      });
+
+    invoke<SyncServiceStatus>("get_sync_service_status")
+      .then((value) => setServiceStatus(value))
+      .catch(() => {
+        setServiceStatus(null);
       });
   }, []);
 
@@ -198,6 +215,41 @@ function App() {
     }
   }
 
+  async function refreshServiceStatus() {
+    const status = await invoke<SyncServiceStatus>("get_sync_service_status");
+    setServiceStatus(status);
+  }
+
+  async function startService() {
+    setServiceLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const status = await invoke<SyncServiceStatus>("start_sync_service");
+      setServiceStatus(status);
+      setMessage("同步服務已啟動。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setServiceLoading(false);
+    }
+  }
+
+  async function stopService() {
+    setServiceLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const status = await invoke<SyncServiceStatus>("stop_sync_service");
+      setServiceStatus(status);
+      setMessage("同步服務已停止。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setServiceLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -259,6 +311,30 @@ function App() {
         <button type="button" onClick={initStorage} disabled={authLoading}>
           {authLoading ? "處理中..." : "初始化同步資料庫"}
         </button>
+      </section>
+
+      <section className="panel">
+        <h2>同步服務骨架</h2>
+        <p className="hint">
+          狀態：{serviceStatus?.running ? "running" : "stopped"} / tick:{" "}
+          {serviceStatus?.tickCount ?? 0}
+        </p>
+        {serviceStatus?.lastTickEpochMs ? (
+          <p className="hint">
+            最後 tick：{new Date(serviceStatus.lastTickEpochMs).toLocaleString()}
+          </p>
+        ) : null}
+        <div className="button-row">
+          <button type="button" onClick={startService} disabled={serviceLoading}>
+            {serviceLoading ? "處理中..." : "啟動同步服務"}
+          </button>
+          <button type="button" onClick={stopService} disabled={serviceLoading}>
+            {serviceLoading ? "處理中..." : "停止同步服務"}
+          </button>
+          <button type="button" onClick={refreshServiceStatus} disabled={serviceLoading}>
+            重新整理狀態
+          </button>
+        </div>
       </section>
 
       <section className="panel">
