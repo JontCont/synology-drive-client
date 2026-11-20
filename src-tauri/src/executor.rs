@@ -41,7 +41,10 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
         });
     }
 
-    let supported = matches!(claimed.op_type.as_str(), "upload" | "download" | "delete" | "rename");
+    let supported = matches!(
+        claimed.op_type.as_str(),
+        "upload" | "download" | "delete" | "rename" | "scan_local_path"
+    );
     if !supported {
         let error = format!("不支援的 op_type: {}", claimed.op_type);
         let updated =

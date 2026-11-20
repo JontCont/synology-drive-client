@@ -427,6 +427,23 @@ function App() {
     }
   }
 
+  async function scanLocalOnce() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<WatcherDrainResult>("scan_local_once_to_operations", {
+        limit: 50,
+      });
+      await refreshOperations();
+      setMessage(`補掃描已轉入 ${result.queuedCount} 筆 operation。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function refreshOperations() {
     const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
     setOperations(rows);
@@ -710,6 +727,9 @@ function App() {
           </button>
           <button type="button" onClick={runPipelineOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行一次 pipeline"}
+          </button>
+          <button type="button" onClick={scanLocalOnce} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "補掃描入列"}
           </button>
         </div>
       </section>

@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod executor;
 mod remote;
+mod scanner;
 mod storage;
 mod sync_model;
 mod sync_service;
@@ -260,6 +261,24 @@ fn drain_watcher_events_to_operations(
 }
 
 #[tauri::command]
+fn scan_local_once_to_operations(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+) -> Result<WatcherDrainResult, String> {
+    let _ = storage::init(&app)?;
+    let cfg = config::load(&app)?;
+    let root = cfg
+        .local_sync_path
+        .ok_or_else(|| "尚未設定本機同步資料夾".to_string())?;
+    let paths = scanner::collect_local_paths(&root, limit.unwrap_or(50))?;
+    let operation_ids = enqueue_paths_as_operations(&app, paths)?;
+    Ok(WatcherDrainResult {
+        queued_count: operation_ids.len(),
+        operation_ids,
+    })
+}
+
+#[tauri::command]
 fn run_pipeline_once(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
@@ -393,6 +412,7 @@ pub fn run() {
             stop_local_watcher,
             get_local_watcher_status,
             drain_watcher_events_to_operations,
+            scan_local_once_to_operations,
             run_pipeline_once,
             get_auth_status,
             login_with_password,
