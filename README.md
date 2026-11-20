@@ -9,6 +9,10 @@ This template should help get you started developing with Tauri, React and Types
 - Tray menu:
   - `開啟`: restore/focus main window
   - `結束`: fully exit the app
+- Security baseline:
+  - default capability only (`core:default`)
+  - no opener capability/plugin by default
+  - CSP enabled in `src-tauri/tauri.conf.json`
 
 ## Recommended IDE Setup
 
