@@ -93,6 +93,7 @@ type PipelineRunResult = {
   queuedCount: number;
   processed: boolean;
   operationId: string | null;
+  source: string;
   message: string;
 };
 
@@ -418,7 +419,7 @@ function App() {
       await refreshOperations();
       await refreshWatcherStatus();
       setMessage(
-        `pipeline: queued ${result.queuedCount}, processed=${result.processed}, op=${result.operationId ?? "-"}`
+        `pipeline(${result.source}): queued ${result.queuedCount}, processed=${result.processed}, op=${result.operationId ?? "-"}`
       );
     } catch (err) {
       setError(String(err));

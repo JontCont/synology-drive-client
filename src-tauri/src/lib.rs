@@ -218,6 +218,7 @@ struct PipelineRunResult {
     queued_count: usize,
     processed: bool,
     operation_id: Option<String>,
+    source: String,
     message: String,
 }
 
@@ -285,13 +286,22 @@ fn run_pipeline_once(
     drain_limit: Option<u32>,
 ) -> Result<PipelineRunResult, String> {
     let _ = storage::init(&app)?;
-    let paths = watcher_state.drain_event_paths(drain_limit.unwrap_or(20))?;
+    let limit = drain_limit.unwrap_or(20);
+    let mut source = "watcher".to_string();
+    let mut paths = watcher_state.drain_event_paths(limit)?;
+    if paths.is_empty() {
+        source = "scanner".to_string();
+        if let Some(root) = config::load(&app)?.local_sync_path {
+            paths = scanner::collect_local_paths(&root, limit)?;
+        }
+    }
     let operation_ids = enqueue_paths_as_operations(&app, paths)?;
     let run_result = executor::run_once(&app)?;
     Ok(PipelineRunResult {
         queued_count: operation_ids.len(),
         processed: run_result.processed,
         operation_id: run_result.operation_id,
+        source,
         message: run_result.message,
     })
 }
