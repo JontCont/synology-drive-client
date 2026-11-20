@@ -23,6 +23,24 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
         });
     };
 
+    if claimed.op_type == "upload_retry" {
+        if claimed.attempts < 2 {
+            let error = "模擬暫時性錯誤，稍後重試".to_string();
+            let updated = storage::schedule_operation_retry(app, &claimed.id, &error, 10)?;
+            return Err(format!(
+                "operation {} 轉為 {}：{}",
+                updated.id, updated.stage, error
+            ));
+        }
+        let updated = storage::update_operation_outcome(app, &claimed.id, "done", None)?;
+        return Ok(ExecutorRunResult {
+            processed: true,
+            operation_id: Some(updated.id),
+            stage: Some(updated.stage),
+            message: "retryable operation 重試成功".to_string(),
+        });
+    }
+
     let supported = matches!(claimed.op_type.as_str(), "upload" | "download" | "delete" | "rename");
     if !supported {
         let error = format!("不支援的 op_type: {}", claimed.op_type);

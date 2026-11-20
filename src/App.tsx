@@ -61,6 +61,7 @@ type OperationRow = {
   stage: string;
   attempts: number;
   lastError: string | null;
+  nextRetryAt: string | null;
   updatedAt: string;
 };
 
@@ -454,6 +455,32 @@ function App() {
     }
   }
 
+  async function addRetryableOperation() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const opId = `op-retry-${Date.now()}`;
+      await invoke<OperationRow>("enqueue_sync_operation", {
+        operation: {
+          id: opId,
+          rootId: "default-root",
+          itemId: null,
+          opType: "upload_retry",
+          fromPath: "/sample/retry-local.txt",
+          toPath: "/sample/retry-remote.txt",
+          stage: "planned",
+        },
+      });
+      await refreshOperations();
+      setMessage("已新增可重試範例 operation。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function seedDemoOperations() {
     setOpsLoading(true);
     setError(null);
@@ -687,6 +714,9 @@ function App() {
           <button type="button" onClick={seedDemoOperations} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "批次新增 demo operations"}
           </button>
+          <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "新增 retryable operation"}
+          </button>
           <button type="button" onClick={runExecutorOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行一次 executor"}
           </button>
@@ -703,6 +733,7 @@ function App() {
               <li key={op.id}>
                 {op.id} / {op.opType} / {op.stage} / {op.updatedAt}
                 {op.lastError ? ` / error: ${op.lastError}` : ""}
+                {op.nextRetryAt ? ` / retryAt: ${op.nextRetryAt}` : ""}
               </li>
             ))}
           </ul>

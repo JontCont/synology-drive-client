@@ -40,6 +40,7 @@ pub struct OperationRow {
     pub stage: String,
     pub attempts: i64,
     pub last_error: Option<String>,
+    pub next_retry_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -82,7 +83,8 @@ fn map_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> 
         stage: row.get(6)?,
         attempts: row.get(7)?,
         last_error: row.get(8)?,
-        updated_at: row.get(9)?,
+        next_retry_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -278,7 +280,7 @@ pub fn enqueue_operation<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, next_retry_at, updated_at
             FROM operations
             WHERE id = ?1
             ",
@@ -329,7 +331,7 @@ pub fn list_operations<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, next_retry_at, updated_at
             FROM operations
             ORDER BY updated_at DESC
             LIMIT ?1
@@ -368,6 +370,7 @@ pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<Ope
             SELECT id
             FROM operations
             WHERE stage = 'planned'
+               OR (stage = 'retryable' AND next_retry_at IS NOT NULL AND next_retry_at <= CURRENT_TIMESTAMP)
             ORDER BY updated_at ASC
             LIMIT 1
             ",
@@ -400,7 +403,7 @@ pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<Ope
             .prepare(
                 "
                 SELECT
-                    id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
+                    id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, next_retry_at, updated_at
                 FROM operations
                 WHERE id = ?1
                 ",
@@ -436,6 +439,7 @@ pub fn update_operation_outcome<R: Runtime>(
         UPDATE operations
         SET stage = ?1,
             last_error = ?2,
+            next_retry_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?3
         ",
@@ -447,7 +451,7 @@ pub fn update_operation_outcome<R: Runtime>(
         .prepare(
             "
             SELECT
-                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, updated_at
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, next_retry_at, updated_at
             FROM operations
             WHERE id = ?1
             ",
@@ -455,6 +459,45 @@ pub fn update_operation_outcome<R: Runtime>(
         .map_err(|e| format!("建立 operation stage 回讀查詢失敗：{e}"))?;
     stmt.query_row([id], map_operation_row)
         .map_err(|e| format!("回讀 operation stage 失敗：{e}"))
+}
+
+pub fn schedule_operation_retry<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    error: &str,
+    delay_seconds: u32,
+) -> Result<OperationRow, String> {
+    if delay_seconds == 0 {
+        return Err("delay_seconds 必須大於 0".to_string());
+    }
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let delay = format!("+{} seconds", delay_seconds);
+    conn.execute(
+        "
+        UPDATE operations
+        SET stage = 'retryable',
+            last_error = ?1,
+            next_retry_at = datetime('now', ?2),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?3
+        ",
+        params![error, delay, id],
+    )
+    .map_err(|e| format!("更新 operation retry 狀態失敗：{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, last_error, next_retry_at, updated_at
+            FROM operations
+            WHERE id = ?1
+            ",
+        )
+        .map_err(|e| format!("建立 operation retry 回讀查詢失敗：{e}"))?;
+    stmt.query_row([id], map_operation_row)
+        .map_err(|e| format!("回讀 operation retry 狀態失敗：{e}"))
 }
 
 pub fn upsert_default_sync_root<R: Runtime>(
