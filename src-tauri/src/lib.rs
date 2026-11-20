@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod remote;
+mod storage;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -17,6 +18,16 @@ fn update_app_config(
     update: config::AppConfigUpdate,
 ) -> Result<config::AppConfig, String> {
     config::save(&app, update)
+}
+
+#[tauri::command]
+fn init_sync_storage(app: tauri::AppHandle) -> Result<storage::SyncStorageInfo, String> {
+    storage::init(&app)
+}
+
+#[tauri::command]
+fn get_sync_storage_info(app: tauri::AppHandle) -> Result<storage::SyncStorageInfo, String> {
+    storage::info(&app)
 }
 
 #[tauri::command]
@@ -116,6 +127,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_config,
             update_app_config,
+            init_sync_storage,
+            get_sync_storage_info,
             get_auth_status,
             login_with_password,
             submit_otp,

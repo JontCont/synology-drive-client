@@ -16,9 +16,15 @@ type AuthStatus = {
   authorizationUrl: string | null;
 };
 
+type SyncStorageInfo = {
+  dbPath: string;
+  schemaVersion: number;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -47,6 +53,12 @@ function App() {
     invoke<AuthStatus>("get_auth_status")
       .then((value) => setAuthStatus(value))
       .catch((err) => setError(String(err)));
+
+    invoke<SyncStorageInfo>("get_sync_storage_info")
+      .then((value) => setStorageInfo(value))
+      .catch(() => {
+        setStorageInfo(null);
+      });
   }, []);
 
   function setAuthResult(status: AuthStatus, successMessage?: string) {
@@ -171,6 +183,21 @@ function App() {
     }
   }
 
+  async function initStorage() {
+    setAuthLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const info = await invoke<SyncStorageInfo>("init_sync_storage");
+      setStorageInfo(info);
+      setMessage("同步資料庫已初始化。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -218,6 +245,20 @@ function App() {
         ) : (
           <p>讀取設定中...</p>
         )}
+      </section>
+
+      <section className="panel">
+        <h2>同步資料庫骨架</h2>
+        {storageInfo ? (
+          <p className="hint">
+            schema v{storageInfo.schemaVersion} / {storageInfo.dbPath}
+          </p>
+        ) : (
+          <p className="hint">尚未初始化同步資料庫。</p>
+        )}
+        <button type="button" onClick={initStorage} disabled={authLoading}>
+          {authLoading ? "處理中..." : "初始化同步資料庫"}
+        </button>
       </section>
 
       <section className="panel">

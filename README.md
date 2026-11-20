@@ -25,6 +25,10 @@ This template should help get you started developing with Tauri, React and Types
   - backend auth state machine in `src-tauri/src/auth.rs`
   - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`
   - frontend includes account login, OTP step, SSO start/callback placeholders
+- Sync storage skeleton:
+  - SQLite schema bootstrap in `src-tauri/src/storage.rs`
+  - commands: `init_sync_storage`, `get_sync_storage_info`
+  - tables: `sync_roots`, `items`, `observations`, `baseline`, `tombstones`, `operations`, `conflicts`
 
 ## Recommended IDE Setup
 
