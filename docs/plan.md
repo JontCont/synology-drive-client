@@ -45,3 +45,8 @@
 3. Provider Spike（可重現測試腳本與報告）
 4. RemoteProvider 契約與 FakeRemote
 
+## 8) Windows Explorer 整合目標（Phase 2）
+- 綁定後在 Explorer 左側導覽出現 Sync Root 入口（體感對齊 iCloud Drive）
+- file 與 folder 需顯示 Windows 內建同步狀態 icon（同步中/已同步/錯誤）
+- 採用 Windows CfApi（Cloud Files）實作，不自行做私有 overlay hack
+

@@ -68,6 +68,13 @@
 
 ## Phase 2（Files On-Demand）
 - [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）
+  - [ ] P2-1a 綁定入口（Explorer 左側導覽可見 Sync Root，效果對齊 iCloud Drive）
+  - [ ] P2-1b 註冊 Sync Root policy（hydration/population/in-sync policy）並完成解除註冊流程
 - [ ] P2-2 placeholder 建立與 hydration
+  - [ ] P2-2a 首次掃描建立 file/folder placeholder（含 metadata）
+  - [ ] P2-2b 雙擊/讀取觸發 hydration（NAS -> local）與失敗重試
 - [ ] P2-3 dehydration/釘選與狀態協調
+  - [ ] P2-3a sync state 對映 Windows 內建狀態（已同步/同步中/錯誤）並顯示 file/folder sync icon
+  - [ ] P2-3b 釘選（always available）與釋放空間（online-only）切換
+  - [ ] P2-3c 驗收：Explorer 入口 + file/folder icon overlay 皆可穩定顯示
 
