@@ -239,7 +239,8 @@ impl SyncServiceState {
     }
 
     fn ingest_once(app: &AppHandle) -> Result<usize, String> {
-        if Self::pending_backlog_count(app)? >= 200 {
+        let cfg = config::load(app)?;
+        if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
             return Ok(0);
         }
 

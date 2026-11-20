@@ -16,7 +16,7 @@ This template should help get you started developing with Tauri, React and Types
 - Config skeleton:
   - backend commands: `get_app_config`, `update_app_config`
   - file location: app config directory `settings.json`
-  - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`
+  - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`, `ingestBacklogLimit`
   - frontend has a basic settings form for editing/saving these fields
 - Remote contract skeleton:
   - `RemoteProvider` trait and in-memory `FakeRemote` in `src-tauri/src/remote.rs`
@@ -38,7 +38,7 @@ This template should help get you started developing with Tauri, React and Types
   - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
   - each tick runs ingest + one executor step (`storage::init` + watcher/scanner ingest + `executor::run_once`)
   - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`) and counters (`queuedCount`, `ingestSkippedCount`, `processedCount`, `retryScheduledCount`, `failedCount`)
-  - ingest has backlog guard: when pending (`planned/processing/retryable`) reaches threshold, skip new ingestion
+  - ingest has backlog guard: when pending (`planned/processing/retryable`) reaches `ingestBacklogLimit`, skip new ingestion
   - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`

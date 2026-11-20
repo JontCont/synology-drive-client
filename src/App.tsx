@@ -6,6 +6,7 @@ type AppConfig = {
   localSyncPath: string | null;
   remotePath: string | null;
   pollIntervalSeconds: number;
+  ingestBacklogLimit: number;
 };
 
 type AuthStatus = {
@@ -133,6 +134,7 @@ function App() {
   const [localSyncPath, setLocalSyncPath] = useState("");
   const [remotePath, setRemotePath] = useState("");
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState("30");
+  const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -152,6 +154,7 @@ function App() {
         setLocalSyncPath(value.localSyncPath ?? "");
         setRemotePath(value.remotePath ?? "");
         setPollIntervalSeconds(String(value.pollIntervalSeconds));
+        setIngestBacklogLimit(String(value.ingestBacklogLimit));
       })
       .catch((err) => setError(String(err)));
 
@@ -223,6 +226,11 @@ function App() {
       setError("輪詢間隔必須是大於 0 的整數。");
       return;
     }
+    const parsedBacklog = Number.parseInt(ingestBacklogLimit, 10);
+    if (!Number.isFinite(parsedBacklog) || parsedBacklog <= 0) {
+      setError("ingest backlog 上限必須是大於 0 的整數。");
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -234,6 +242,7 @@ function App() {
           localSyncPath,
           remotePath,
           pollIntervalSeconds: parsedPoll,
+          ingestBacklogLimit: parsedBacklog,
         },
       });
       setConfig(next);
@@ -720,6 +729,14 @@ function App() {
               <input
                 value={pollIntervalSeconds}
                 onChange={(event) => setPollIntervalSeconds(event.currentTarget.value)}
+                inputMode="numeric"
+              />
+            </label>
+            <label>
+              ingest backlog 上限
+              <input
+                value={ingestBacklogLimit}
+                onChange={(event) => setIngestBacklogLimit(event.currentTarget.value)}
                 inputMode="numeric"
               />
             </label>

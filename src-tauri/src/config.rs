@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub poll_interval_seconds: u32,
+    pub ingest_backlog_limit: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -20,6 +21,7 @@ pub struct AppConfigUpdate {
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub poll_interval_seconds: Option<u32>,
+    pub ingest_backlog_limit: Option<u32>,
 }
 
 impl Default for AppConfig {
@@ -28,6 +30,7 @@ impl Default for AppConfig {
             local_sync_path: None,
             remote_path: None,
             poll_interval_seconds: 30,
+            ingest_backlog_limit: 200,
         }
     }
 }
@@ -60,6 +63,13 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
             return Err("輪詢間隔必須大於 0 秒".to_string());
         }
         config.poll_interval_seconds = poll_interval_seconds;
+    }
+
+    if let Some(ingest_backlog_limit) = update.ingest_backlog_limit {
+        if ingest_backlog_limit == 0 {
+            return Err("ingest backlog 上限必須大於 0".to_string());
+        }
+        config.ingest_backlog_limit = ingest_backlog_limit;
     }
 
     if let Some(local_sync_path) = update.local_sync_path {
