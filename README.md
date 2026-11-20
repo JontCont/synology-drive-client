@@ -35,11 +35,11 @@ This template should help get you started developing with Tauri, React and Types
 - Sync service skeleton:
   - background loop state in `src-tauri/src/sync_service.rs`
   - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
-  - frontend panel for start/stop/status preview
+  - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`
   - commands: `start_local_watcher`, `stop_local_watcher`, `get_local_watcher_status`
-  - frontend panel for watcher start/stop/status preview
+  - frontend panel for watcher start/stop/status preview (auto refresh)
 - Operation queue skeleton:
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
   - commands: `enqueue_sync_operation`, `list_sync_operations`

@@ -113,6 +113,14 @@ function App() {
       });
   }, []);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      refreshServiceStatus().catch(() => undefined);
+      refreshWatcherStatus().catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   function setAuthResult(status: AuthStatus, successMessage?: string) {
     setAuthStatus(status);
     setError(null);
