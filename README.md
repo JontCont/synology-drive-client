@@ -65,6 +65,9 @@ This template should help get you started developing with Tauri, React and Types
 - Diagnostics:
   - command: `get_system_snapshot`
   - returns config/auth/storage/service/watcher summary, operation/conflict counts, and stage/status aggregates in one response
+- Modern Desktop UI:
+  - sidebar navigation (`總覽儀表板`, `操作佇列與監看`, `衝突管理`, `帳號與認證`, `同步設定與診斷`)
+  - KPI dashboard cards, stage-filtered operations table, conflict cards, and theme switcher (`自動` / `淺色` / `深色`)
 
 ## Validation command
 

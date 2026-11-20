@@ -152,7 +152,34 @@ type FaultMatrixFastRunResult = {
   operationStageCounts: OperationStageCount[];
 };
 
+type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings";
+
+function getStageBadgeClass(stage: string | null | undefined): string {
+  switch (stage) {
+    case "done":
+    case "authenticated":
+    case "resolved":
+      return "badge-success";
+    case "planned":
+    case "processing":
+    case "waitingOtp":
+    case "waitingSsoCallback":
+      return "badge-info";
+    case "retryable":
+      return "badge-warning";
+    case "failed":
+    case "open":
+      return "badge-danger";
+    default:
+      return "badge-neutral";
+  }
+}
+
 function App() {
+  const [activeTab, setActiveTab] = useState<NavTab>("overview");
+  const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [stageFilter, setStageFilter] = useState<string>("all");
+
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
@@ -185,6 +212,15 @@ function App() {
   const [retryOpId, setRetryOpId] = useState("");
 
   useEffect(() => {
+    const rootEl = document.documentElement;
+    if (theme === "system") {
+      rootEl.removeAttribute("data-theme");
+    } else {
+      rootEl.setAttribute("data-theme", theme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
     invoke<AppConfig>("get_app_config")
       .then((value) => {
         setConfig(value);
@@ -201,54 +237,39 @@ function App() {
 
     invoke<SyncStorageInfo>("get_sync_storage_info")
       .then((value) => setStorageInfo(value))
-      .catch(() => {
-        setStorageInfo(null);
-      });
+      .catch(() => setStorageInfo(null));
 
     invoke<SyncServiceStatus>("get_sync_service_status")
       .then((value) => setServiceStatus(value))
-      .catch(() => {
-        setServiceStatus(null);
-      });
+      .catch(() => setServiceStatus(null));
 
     invoke<LocalWatcherStatus>("get_local_watcher_status")
       .then((value) => setWatcherStatus(value))
-      .catch(() => {
-        setWatcherStatus(null);
-      });
+      .catch(() => setWatcherStatus(null));
 
-    invoke<OperationRow[]>("list_sync_operations", { limit: 10 })
+    invoke<OperationRow[]>("list_sync_operations", { limit: 20 })
       .then((rows) => setOperations(rows))
-      .catch(() => {
-        setOperations([]);
-      });
+      .catch(() => setOperations([]));
+
     invoke<OperationStageCount[]>("get_operation_stage_counts")
       .then((rows) => setOperationStageCounts(rows))
-      .catch(() => {
-        setOperationStageCounts([]);
-      });
-    invoke<ConflictRow[]>("list_sync_conflicts", { limit: 10 })
+      .catch(() => setOperationStageCounts([]));
+
+    invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 })
       .then((rows) => setConflicts(rows))
-      .catch(() => {
-        setConflicts([]);
-      });
+      .catch(() => setConflicts([]));
+
     invoke<ConflictStatusCount[]>("get_conflict_status_counts")
       .then((rows) => setConflictStatusCounts(rows))
-      .catch(() => {
-        setConflictStatusCounts([]);
-      });
+      .catch(() => setConflictStatusCounts([]));
 
     invoke<SyncRootRow>("get_default_sync_root")
       .then((row) => setSyncRoot(row))
-      .catch(() => {
-        setSyncRoot(null);
-      });
+      .catch(() => setSyncRoot(null));
 
     invoke<SystemSnapshot>("get_system_snapshot")
       .then((s) => setSnapshot(s))
-      .catch(() => {
-        setSnapshot(null);
-      });
+      .catch(() => setSnapshot(null));
   }, []);
 
   useEffect(() => {
@@ -548,14 +569,14 @@ function App() {
   }
 
   async function refreshOperations() {
-    const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
+    const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 20 });
     setOperations(rows);
     const stageCounts = await invoke<OperationStageCount[]>("get_operation_stage_counts");
     setOperationStageCounts(stageCounts);
   }
 
   async function refreshConflicts() {
-    const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 10 });
+    const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 });
     setConflicts(rows);
     const statusCounts = await invoke<ConflictStatusCount[]>("get_conflict_status_counts");
     setConflictStatusCounts(statusCounts);
@@ -753,15 +774,11 @@ function App() {
     setMessage(null);
     try {
       const result = await invoke<FaultMatrixFastRunResult>("run_fault_matrix_fast", {
-        maxSteps: 60,
+        maxSteps: 40,
       });
       await refreshOperations();
-      const stageSummary =
-        result.operationStageCounts.length > 0
-          ? result.operationStageCounts.map((it) => `${it.stage}:${it.count}`).join(" / ")
-          : "無";
       setMessage(
-        `fault-matrix-fast: seeded ${result.seededCount}, processed ${result.processedCount}/${result.steps}, released=${result.releasedRetryableCount}, stage=[${stageSummary}]`
+        `fault-matrix-fast: seeded ${result.seededCount}, processed ${result.processedCount}/${result.steps}, releasedRetry=${result.releasedRetryableCount}`
       );
     } catch (err) {
       setError(String(err));
@@ -775,9 +792,9 @@ function App() {
     setError(null);
     setMessage(null);
     try {
-      const count = await invoke<number>("force_due_retryable_operations", { limit: 200 });
+      const released = await invoke<number>("force_due_retryable_operations", { limit: 100 });
       await refreshOperations();
-      setMessage(`已釋放 ${count} 筆 retryable 為可立即重試。`);
+      setMessage(`已強制釋放 ${released} 筆 retryable operation 進入到期待執行狀態。`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -815,9 +832,8 @@ function App() {
     }
   }
 
-  async function retryOperation(event: React.FormEvent) {
-    event.preventDefault();
-    if (!retryOpId.trim()) {
+  async function retryOperationById(id: string) {
+    if (!id.trim()) {
       setError("請輸入 operation id。");
       return;
     }
@@ -825,14 +841,19 @@ function App() {
     setError(null);
     setMessage(null);
     try {
-      await invoke<OperationRow>("retry_sync_operation", { id: retryOpId.trim() });
+      await invoke<OperationRow>("retry_sync_operation", { id: id.trim() });
       await refreshOperations();
-      setMessage("operation 已重設為 planned。");
+      setMessage(`operation ${id.trim()} 已重設為 planned。`);
     } catch (err) {
       setError(String(err));
     } finally {
       setOpsLoading(false);
     }
+  }
+
+  async function retryOperation(event: React.FormEvent) {
+    event.preventDefault();
+    await retryOperationById(retryOpId);
   }
 
   async function purgeOperations(stage: "done" | "failed") {
@@ -857,6 +878,7 @@ function App() {
     try {
       const s = await invoke<SystemSnapshot>("get_system_snapshot");
       setSnapshot(s);
+      setMessage("系統快照已更新。");
     } catch {
       setSnapshot(null);
     }
@@ -877,394 +899,1277 @@ function App() {
     }
   }
 
+  const totalQueuedOperations = operationStageCounts.reduce((acc, item) => acc + item.count, 0);
+  const openConflictCount =
+    conflictStatusCounts.find((c) => c.status === "open")?.count ??
+    conflicts.filter((c) => c.status !== "resolved").length;
+
+  const filteredOperations =
+    stageFilter === "all"
+      ? operations
+      : operations.filter((op) => op.stage === stageFilter);
+
   return (
-    <main className="container">
-      <h1>Synology Drive Client</h1>
-      <p>桌面基礎框架已啟用，關閉視窗會縮到系統匣。</p>
-      {error ? <p className="error">{error}</p> : null}
-      {message ? <p className="success">{message}</p> : null}
-      <section className="panel">
-        <h2>同步設定</h2>
-        {config ? (
-          <form
-            className="config-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              saveConfig();
-            }}
-          >
-            <label>
-              本機同步資料夾
-              <input
-                value={localSyncPath}
-                onChange={(event) => setLocalSyncPath(event.currentTarget.value)}
-                placeholder="例如 C:\\Users\\you\\SynologyDrive"
+    <div className="app-shell">
+      {/* Left Sidebar */}
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
               />
-            </label>
-            <label>
-              遠端路徑
-              <input
-                value={remotePath}
-                onChange={(event) => setRemotePath(event.currentTarget.value)}
-                placeholder="例如 /Drive/SyncRoot"
-              />
-            </label>
-            <label>
-              輪詢間隔（秒）
-              <input
-                value={pollIntervalSeconds}
-                onChange={(event) => setPollIntervalSeconds(event.currentTarget.value)}
-                inputMode="numeric"
-              />
-            </label>
-            <label>
-              ingest backlog 上限
-              <input
-                value={ingestBacklogLimit}
-                onChange={(event) => setIngestBacklogLimit(event.currentTarget.value)}
-                inputMode="numeric"
-              />
-            </label>
-            <button type="submit" disabled={saving}>
-              {saving ? "儲存中..." : "儲存設定"}
-            </button>
-          </form>
-        ) : (
-          <p>讀取設定中...</p>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>同步資料庫骨架</h2>
-        {storageInfo ? (
-          <p className="hint">
-            schema v{storageInfo.schemaVersion} / {storageInfo.dbPath}
-          </p>
-        ) : (
-          <p className="hint">尚未初始化同步資料庫。</p>
-        )}
-        <button type="button" onClick={initStorage} disabled={authLoading}>
-          {authLoading ? "處理中..." : "初始化同步資料庫"}
-        </button>
-        <div className="button-row">
-          <button type="button" onClick={syncDefaultRoot} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "同步 default sync_root"}
-          </button>
+            </svg>
+          </div>
+          <div className="brand-text">
+            <span className="brand-title">Synology Drive</span>
+            <span className="brand-subtitle">Desktop Sync Client</span>
+          </div>
         </div>
-        {syncRoot ? (
-          <p className="hint">
-            root: {syncRoot.id} / {syncRoot.localPath} ⇄ {syncRoot.remotePath}
-          </p>
-        ) : (
-          <p className="hint">尚未建立 default sync_root。</p>
-        )}
-      </section>
 
-      <section className="panel">
-        <h2>同步服務骨架</h2>
-        <p className="hint">
-          狀態：{serviceStatus?.running ? "running" : "stopped"} / tick:{" "}
-          {serviceStatus?.tickCount ?? 0}
-        </p>
-        <p className="hint">
-          queued: {serviceStatus?.queuedCount ?? 0} / processed:{" "}
-          {serviceStatus?.processedCount ?? 0} / retry:{" "}
-          {serviceStatus?.retryScheduledCount ?? 0} / failed: {serviceStatus?.failedCount ?? 0}
-        </p>
-        <p className="hint">ingest skipped: {serviceStatus?.ingestSkippedCount ?? 0}</p>
-        {serviceStatus?.lastTickEpochMs ? (
-          <p className="hint">
-            最後 tick：{new Date(serviceStatus.lastTickEpochMs).toLocaleString()}
-          </p>
-        ) : null}
-        {serviceStatus?.lastError ? <p className="error">{serviceStatus.lastError}</p> : null}
-        {serviceStatus?.lastMessage ? (
-          <p className="hint">
-            最後結果：{serviceStatus.lastMessage}
-            {serviceStatus.lastOperationId ? ` / op: ${serviceStatus.lastOperationId}` : ""}
-            {serviceStatus.lastStage ? ` / stage: ${serviceStatus.lastStage}` : ""}
-          </p>
-        ) : null}
-        <div className="button-row">
-          <button type="button" onClick={startService} disabled={serviceLoading}>
-            {serviceLoading ? "處理中..." : "啟動同步服務"}
-          </button>
-          <button type="button" onClick={stopService} disabled={serviceLoading}>
-            {serviceLoading ? "處理中..." : "停止同步服務"}
-          </button>
-          <button type="button" onClick={refreshServiceStatus} disabled={serviceLoading}>
-            重新整理狀態
-          </button>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>本機監看骨架</h2>
-        <p className="hint">
-          狀態：{watcherStatus?.running ? "running" : "stopped"} / event:{" "}
-          {watcherStatus?.eventCount ?? 0}
-        </p>
-        <p className="hint">pending: {watcherStatus?.pendingCount ?? 0}</p>
-        {watcherStatus?.rootPath ? <p className="hint">root: {watcherStatus.rootPath}</p> : null}
-        {watcherStatus?.lastEventPath ? (
-          <p className="hint">last: {watcherStatus.lastEventPath}</p>
-        ) : null}
-        <div className="button-row">
-          <button type="button" onClick={startWatcher} disabled={watcherLoading}>
-            {watcherLoading ? "處理中..." : "啟動本機監看"}
-          </button>
-          <button type="button" onClick={stopWatcher} disabled={watcherLoading}>
-            {watcherLoading ? "處理中..." : "停止本機監看"}
-          </button>
-          <button type="button" onClick={refreshWatcherStatus} disabled={watcherLoading}>
-            重新整理監看狀態
-          </button>
-          <button type="button" onClick={drainWatcherEvents} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "轉入 operation 佇列"}
-          </button>
-          <button type="button" onClick={runPipelineOnce} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行一次 pipeline"}
-          </button>
-          <button type="button" onClick={runPipelineBatch} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行 pipeline batch"}
-          </button>
-          <button type="button" onClick={scanLocalOnce} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "補掃描入列"}
-          </button>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>操作佇列骨架</h2>
-        <p className="hint">目前筆數：{operations.length}</p>
-        <p className="hint">
-          stage 統計：
-          {operationStageCounts.length > 0
-            ? ` ${operationStageCounts.map((it) => `${it.stage}:${it.count}`).join(" / ")}`
-            : " 無資料"}
-        </p>
-        <div className="button-row">
-          <button type="button" onClick={addSampleOperation} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "新增範例 operation"}
-          </button>
-          <button type="button" onClick={seedDemoOperations} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "批次新增 demo operations"}
-          </button>
-          <button type="button" onClick={seedFaultMatrixOperations} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "灌入 fault matrix"}
-          </button>
-          <button type="button" onClick={runFaultMatrixOnce} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行 fault matrix"}
-          </button>
-          <button type="button" onClick={runFaultMatrixFast} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行 fault matrix fast"}
-          </button>
-          <button type="button" onClick={forceDueRetryable} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "釋放 retryable"}
-          </button>
-          <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "新增 retryable operation"}
-          </button>
-          <button type="button" onClick={addHardRetryableOperation} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "新增 hard retry operation"}
-          </button>
-          <button type="button" onClick={runExecutorOnce} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行一次 executor"}
-          </button>
-          <button type="button" onClick={runSyncCycleOnce} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "執行一次 sync cycle"}
-          </button>
-          <button type="button" onClick={refreshOperations} disabled={opsLoading}>
-            重新整理 operation
-          </button>
-          <button type="button" onClick={() => purgeOperations("done")} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "清理 done"}
-          </button>
-          <button type="button" onClick={() => purgeOperations("failed")} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "清理 failed"}
-          </button>
-        </div>
-        {operations.length > 0 ? (
-          <ul className="op-list">
-            {operations.map((op) => (
-              <li key={op.id}>
-                {op.id} / {op.opType} / {op.stage} / {op.updatedAt}
-                {op.lastError ? ` / error: ${op.lastError}` : ""}
-                {op.nextRetryAt ? ` / retryAt: ${op.nextRetryAt}` : ""}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="hint">目前沒有 operation。</p>
-        )}
-        <form className="config-form inline-form" onSubmit={retryOperation}>
-          <label>
-            重試 operation id
-            <input
-              value={retryOpId}
-              onChange={(event) => setRetryOpId(event.currentTarget.value)}
-              placeholder="例如 op-1730000000000"
+        <div className="service-pill-card">
+          <div className="service-pill-row">
+            <span
+              className={`status-dot ${serviceStatus?.running ? "status-online" : "status-idle"}`}
             />
-          </label>
-          <button type="submit" disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "重設為 planned"}
-          </button>
-        </form>
-      </section>
-
-      <section className="panel">
-        <h2>衝突骨架</h2>
-        <p className="hint">目前筆數：{conflicts.length}</p>
-        <p className="hint">
-          status 統計：
-          {conflictStatusCounts.length > 0
-            ? ` ${conflictStatusCounts.map((it) => `${it.status}:${it.count}`).join(" / ")}`
-            : " 無資料"}
-        </p>
-        <div className="button-row">
-          <button type="button" onClick={addDemoConflict} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "新增示範 conflict"}
-          </button>
-          <button type="button" onClick={refreshConflicts} disabled={opsLoading}>
-            重新整理 conflict
-          </button>
-          <button type="button" onClick={() => purgeConflicts("resolved")} disabled={opsLoading}>
-            {opsLoading ? "處理中..." : "清理 resolved"}
-          </button>
+            <span className="service-pill-label">
+              同步服務：{serviceStatus?.running ? "運行中" : "已停止"}
+            </span>
+          </div>
+          <div className="service-pill-row">
+            <span
+              className={`status-dot ${watcherStatus?.running ? "status-online" : "status-idle"}`}
+            />
+            <span className="service-pill-label">
+              本機監看：{watcherStatus?.running ? "監看中" : "已停止"}
+            </span>
+          </div>
         </div>
-        {conflicts.length > 0 ? (
-          <ul className="op-list">
-            {conflicts.map((conflict) => (
-              <li key={conflict.id}>
-                {conflict.id} / {conflict.reason} / {conflict.status} / {conflict.createdAt}
-                {conflict.status !== "resolved" ? (
-                  <>
-                    {" "}
+
+        <nav className="nav-menu" aria-label="主導覽">
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "overview" ? "active" : ""}`}
+            onClick={() => setActiveTab("overview")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1.5" />
+              <rect x="14" y="3" width="7" height="7" rx="1.5" />
+              <rect x="14" y="14" width="7" height="7" rx="1.5" />
+              <rect x="3" y="14" width="7" height="7" rx="1.5" />
+            </svg>
+            <span>總覽儀表板</span>
+          </button>
+
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "operations" ? "active" : ""}`}
+            onClick={() => setActiveTab("operations")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M4 6h16M4 12h16M4 18h16"
+              />
+            </svg>
+            <span>操作佇列與監看</span>
+            {totalQueuedOperations > 0 ? (
+              <span className="nav-badge">{totalQueuedOperations}</span>
+            ) : null}
+          </button>
+
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "conflicts" ? "active" : ""}`}
+            onClick={() => setActiveTab("conflicts")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+              />
+            </svg>
+            <span>衝突管理</span>
+            {openConflictCount > 0 ? (
+              <span className="nav-badge nav-badge-danger">{openConflictCount}</span>
+            ) : null}
+          </button>
+
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "auth" ? "active" : ""}`}
+            onClick={() => setActiveTab("auth")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+              />
+            </svg>
+            <span>帳號與認證</span>
+            <span
+              className={`status-dot-sm ${
+                authStatus?.stage === "authenticated" ? "status-online" : "status-idle"
+              }`}
+            />
+          </button>
+
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
+            onClick={() => setActiveTab("settings")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+              />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+            <span>同步設定與診斷</span>
+          </button>
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="theme-switcher" role="group" aria-label="佈景主題切換">
+            <button
+              type="button"
+              className={theme === "system" ? "active" : ""}
+              onClick={() => setTheme("system")}
+              title="跟隨系統"
+            >
+              自動
+            </button>
+            <button
+              type="button"
+              className={theme === "light" ? "active" : ""}
+              onClick={() => setTheme("light")}
+              title="淺色模式"
+            >
+              淺色
+            </button>
+            <button
+              type="button"
+              className={theme === "dark" ? "active" : ""}
+              onClick={() => setTheme("dark")}
+              title="深色模式"
+            >
+              深色
+            </button>
+          </div>
+          <p className="tray-hint">關閉視窗將自動縮至系統匣常駐</p>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <div className="main-area">
+        {/* Top Bar */}
+        <header className="topbar">
+          <div>
+            <h1 className="page-title">
+              {activeTab === "overview" && "總覽儀表板"}
+              {activeTab === "operations" && "操作佇列與本機監看"}
+              {activeTab === "conflicts" && "同步衝突管理"}
+              {activeTab === "auth" && "NAS 帳號與 SSO 認證"}
+              {activeTab === "settings" && "同步設定、資料庫與系統快照"}
+            </h1>
+            <p className="page-subtitle">
+              {syncRoot
+                ? `${syncRoot.localPath} ⇄ ${syncRoot.remotePath}`
+                : config?.localSyncPath && config?.remotePath
+                  ? `${config.localSyncPath} ⇄ ${config.remotePath}`
+                  : "尚未設定預設同步路徑"}
+            </p>
+          </div>
+
+          <div className="topbar-actions">
+            <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
+              {authStatus?.stage === "authenticated"
+                ? `已登入 (${authStatus.username ?? "User"})`
+                : `認證：${authStatus?.stage ?? "idle"}`}
+            </span>
+            {serviceStatus?.running ? (
+              <button
+                type="button"
+                className="btn btn-outline-danger btn-sm"
+                onClick={stopService}
+                disabled={serviceLoading}
+              >
+                停止同步服務
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={startService}
+                disabled={serviceLoading}
+              >
+                啟動同步服務
+              </button>
+            )}
+          </div>
+        </header>
+
+        {/* Feedback Banners */}
+        {error || message ? (
+          <div className="banner-stack">
+            {error ? (
+              <div className="alert alert-error" role="alert">
+                <div className="alert-content">
+                  <strong>發生錯誤：</strong>
+                  <span>{error}</span>
+                </div>
+                <button
+                  type="button"
+                  className="alert-close"
+                  onClick={() => setError(null)}
+                  aria-label="關閉錯誤訊息"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
+            {message ? (
+              <div className="alert alert-success" role="status">
+                <div className="alert-content">
+                  <strong>操作成功：</strong>
+                  <span>{message}</span>
+                </div>
+                <button
+                  type="button"
+                  className="alert-close"
+                  onClick={() => setMessage(null)}
+                  aria-label="關閉通知訊息"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        <main className="content-scroll">
+          {/* TAB 1: OVERVIEW */}
+          {activeTab === "overview" && (
+            <div className="section-stack">
+              {/* KPI Summary Grid */}
+              <div className="kpi-grid">
+                <div className="kpi-card">
+                  <div className="kpi-header">
+                    <span className="kpi-label">背景同步服務</span>
+                    <span
+                      className={`badge ${
+                        serviceStatus?.running ? "badge-success" : "badge-neutral"
+                      }`}
+                    >
+                      {serviceStatus?.running ? "Running" : "Stopped"}
+                    </span>
+                  </div>
+                  <div className="kpi-value">{serviceStatus?.tickCount ?? 0} Ticks</div>
+                  <div className="kpi-meta">
+                    已處理 {serviceStatus?.processedCount ?? 0} 筆 · 失敗{" "}
+                    {serviceStatus?.failedCount ?? 0} 筆
+                  </div>
+                </div>
+
+                <div className="kpi-card">
+                  <div className="kpi-header">
+                    <span className="kpi-label">本機檔案監看</span>
+                    <span
+                      className={`badge ${
+                        watcherStatus?.running ? "badge-success" : "badge-neutral"
+                      }`}
+                    >
+                      {watcherStatus?.running ? "Watching" : "Stopped"}
+                    </span>
+                  </div>
+                  <div className="kpi-value">{watcherStatus?.eventCount ?? 0} 事件</div>
+                  <div className="kpi-meta">
+                    待轉入佇列：{watcherStatus?.pendingCount ?? 0} 筆
+                  </div>
+                </div>
+
+                <div className="kpi-card">
+                  <div className="kpi-header">
+                    <span className="kpi-label">操作佇列總計</span>
+                    <span className="badge badge-info">Queue</span>
+                  </div>
+                  <div className="kpi-value">{totalQueuedOperations} 筆</div>
+                  <div className="kpi-meta">
+                    {operationStageCounts.length > 0
+                      ? operationStageCounts.map((it) => `${it.stage}: ${it.count}`).join(" · ")
+                      : "目前無排隊項目"}
+                  </div>
+                </div>
+
+                <div className="kpi-card">
+                  <div className="kpi-header">
+                    <span className="kpi-label">同步衝突狀態</span>
+                    <span
+                      className={`badge ${
+                        openConflictCount > 0 ? "badge-danger" : "badge-success"
+                      }`}
+                    >
+                      {openConflictCount > 0 ? `${openConflictCount} 待處理` : "正常"}
+                    </span>
+                  </div>
+                  <div className="kpi-value">{conflicts.length} 筆記錄</div>
+                  <div className="kpi-meta">
+                    {conflictStatusCounts.length > 0
+                      ? conflictStatusCounts.map((it) => `${it.status}: ${it.count}`).join(" · ")
+                      : "無任何衝突"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Sync Service & Watcher Control Cards */}
+              <div className="two-col-grid">
+                <section className="card">
+                  <div className="card-header">
+                    <div>
+                      <h2 className="card-title">背景同步服務控制</h2>
+                      <p className="card-desc">定期輪詢、轉入變更並驅動 Executor 同步作業</p>
+                    </div>
+                    <span
+                      className={`badge ${
+                        serviceStatus?.running ? "badge-success" : "badge-neutral"
+                      }`}
+                    >
+                      {serviceStatus?.running ? "運行中" : "已停止"}
+                    </span>
+                  </div>
+
+                  <div className="stats-list">
+                    <div className="stat-item">
+                      <span className="stat-key">Queued / Processed</span>
+                      <span className="stat-val">
+                        {serviceStatus?.queuedCount ?? 0} / {serviceStatus?.processedCount ?? 0}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">Retry / Failed</span>
+                      <span className="stat-val">
+                        {serviceStatus?.retryScheduledCount ?? 0} /{" "}
+                        {serviceStatus?.failedCount ?? 0}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">Ingest Skipped (Backlog Guard)</span>
+                      <span className="stat-val">{serviceStatus?.ingestSkippedCount ?? 0}</span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">最後執行時間</span>
+                      <span className="stat-val">
+                        {serviceStatus?.lastTickEpochMs
+                          ? new Date(serviceStatus.lastTickEpochMs).toLocaleTimeString()
+                          : "尚未執行"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {serviceStatus?.lastMessage ? (
+                    <div className="info-box">
+                      <div className="info-box-title">最新 Tick 結果</div>
+                      <div className="info-box-text">
+                        {serviceStatus.lastMessage}
+                        {serviceStatus.lastOperationId
+                          ? ` (op: ${serviceStatus.lastOperationId})`
+                          : ""}
+                        {serviceStatus.lastStage ? ` [${serviceStatus.lastStage}]` : ""}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {serviceStatus?.lastError ? (
+                    <div className="alert alert-error">{serviceStatus.lastError}</div>
+                  ) : null}
+
+                  <div className="button-row">
                     <button
                       type="button"
-                      onClick={() => resolveConflict(conflict.id)}
+                      className="btn btn-primary"
+                      onClick={startService}
+                      disabled={serviceLoading || serviceStatus?.running}
+                    >
+                      {serviceLoading ? "處理中..." : "啟動同步服務"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={stopService}
+                      disabled={serviceLoading || !serviceStatus?.running}
+                    >
+                      停止服務
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={refreshServiceStatus}
+                      disabled={serviceLoading}
+                    >
+                      重新整理
+                    </button>
+                  </div>
+                </section>
+
+                <section className="card">
+                  <div className="card-header">
+                    <div>
+                      <h2 className="card-title">本機檔案監看 (Watcher)</h2>
+                      <p className="card-desc">即時偵測本機同步資料夾異動並排入佇列</p>
+                    </div>
+                    <span
+                      className={`badge ${
+                        watcherStatus?.running ? "badge-success" : "badge-neutral"
+                      }`}
+                    >
+                      {watcherStatus?.running ? "監看中" : "已停止"}
+                    </span>
+                  </div>
+
+                  <div className="stats-list">
+                    <div className="stat-item">
+                      <span className="stat-key">監看根目錄</span>
+                      <span className="stat-val mono">
+                        {watcherStatus?.rootPath || config?.localSyncPath || "未設定"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">累計事件 / 待轉入</span>
+                      <span className="stat-val">
+                        {watcherStatus?.eventCount ?? 0} / {watcherStatus?.pendingCount ?? 0}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">最後異動路徑</span>
+                      <span className="stat-val mono">
+                        {watcherStatus?.lastEventPath ?? "尚無事件"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={startWatcher}
+                      disabled={watcherLoading || watcherStatus?.running}
+                    >
+                      啟動本機監看
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={stopWatcher}
+                      disabled={watcherLoading || !watcherStatus?.running}
+                    >
+                      停止監看
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={refreshWatcherStatus}
+                      disabled={watcherLoading}
+                    >
+                      重新整理
+                    </button>
+                  </div>
+
+                  <div className="divider" />
+
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={runPipelineOnce}
                       disabled={opsLoading}
                     >
-                      resolved
+                      單次 Pipeline
                     </button>
-                  </>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="hint">目前沒有 conflict。</p>
-        )}
-      </section>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={runPipelineBatch}
+                      disabled={opsLoading}
+                    >
+                      批次 Pipeline (10步)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={scanLocalOnce}
+                      disabled={opsLoading}
+                    >
+                      手動補掃描入列
+                    </button>
+                  </div>
+                </section>
+              </div>
 
-      <section className="panel">
-        <h2>系統快照</h2>
-        <div className="button-row">
-          <button type="button" onClick={refreshSnapshot}>
-            重新整理快照
-          </button>
-        </div>
-        {snapshot ? (
-          <pre className="hint">{JSON.stringify(snapshot, null, 2)}</pre>
-        ) : (
-          <p className="hint">尚未取得系統快照。</p>
-        )}
-      </section>
+              {/* Quick Preview of Recent Operations & Conflicts */}
+              <div className="two-col-grid">
+                <section className="card">
+                  <div className="card-header">
+                    <div>
+                      <h2 className="card-title">近期同步操作</h2>
+                      <p className="card-desc">最新 5 筆佇列記錄</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setActiveTab("operations")}
+                    >
+                      查看全部 →
+                    </button>
+                  </div>
+                  {operations.length > 0 ? (
+                    <div className="compact-list">
+                      {operations.slice(0, 5).map((op) => (
+                        <div key={op.id} className="compact-row">
+                          <div className="compact-main">
+                            <span className={`badge ${getStageBadgeClass(op.stage)}`}>
+                              {op.stage}
+                            </span>
+                            <span className="compact-title">{op.opType}</span>
+                            <span className="compact-sub mono">
+                              {op.fromPath || op.toPath || op.id}
+                            </span>
+                          </div>
+                          <span className="compact-time">{op.updatedAt}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="empty-state">目前佇列中沒有同步操作</div>
+                  )}
+                </section>
 
-      <section className="panel">
-        <h2>登入流程骨架</h2>
-        <p className="auth-status">
-          目前狀態：{authStatus?.stage ?? "loading"}
-          {authStatus?.username ? ` / ${authStatus.username}` : ""}
-          {authStatus?.method ? ` / ${authStatus.method}` : ""}
-        </p>
-        {authStatus?.message ? <p>{authStatus.message}</p> : null}
+                <section className="card">
+                  <div className="card-header">
+                    <div>
+                      <h2 className="card-title">待處理衝突與資料庫狀態</h2>
+                      <p className="card-desc">三方比對衝突保護與 SQLite 儲存引擎</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setActiveTab("conflicts")}
+                    >
+                      管理衝突 →
+                    </button>
+                  </div>
+                  <div className="stats-list">
+                    <div className="stat-item">
+                      <span className="stat-key">SQLite 資料庫</span>
+                      <span className="stat-val mono">
+                        {storageInfo
+                          ? `v${storageInfo.schemaVersion} (${storageInfo.dbPath})`
+                          : "尚未初始化"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">預設 Sync Root</span>
+                      <span className="stat-val mono">
+                        {syncRoot
+                          ? `${syncRoot.id}: ${syncRoot.localPath} ⇄ ${syncRoot.remotePath}`
+                          : "尚未綁定"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">未解決衝突數</span>
+                      <span className="stat-val">{openConflictCount} 筆</span>
+                    </div>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={initStorage}
+                      disabled={authLoading}
+                    >
+                      初始化同步資料庫
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={syncDefaultRoot}
+                      disabled={opsLoading}
+                    >
+                      同步設定至 Default Root
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
 
-        <div className="auth-grid">
-          <form className="config-form" onSubmit={loginByPassword}>
-            <h3>NAS 帳號登入</h3>
-            <label>
-              帳號
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.currentTarget.value)}
-                placeholder="user"
-              />
-            </label>
-            <label>
-              密碼
-              <input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.currentTarget.value)}
-                placeholder="password"
-              />
-            </label>
-            <label>
-              OTP（可選）
-              <input
-                value={otpCode}
-                onChange={(event) => setOtpCode(event.currentTarget.value)}
-                placeholder="6 位數字"
-              />
-            </label>
-            <button type="submit" disabled={authLoading}>
-              {authLoading ? "處理中..." : "送出帳密登入"}
-            </button>
-          </form>
+          {/* TAB 2: OPERATIONS & WATCHER */}
+          {activeTab === "operations" && (
+            <div className="section-stack">
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">Pipeline 與執行器控制台</h2>
+                    <p className="card-desc">
+                      手動觸發 Watcher 事件轉入、本機補掃描或單步/批次執行同步佇列
+                    </p>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={refreshOperations}
+                      disabled={opsLoading}
+                    >
+                      重新整理佇列
+                    </button>
+                  </div>
+                </div>
 
-          <form className="config-form" onSubmit={startSso}>
-            <h3>SSO 登入</h3>
-            <label>
-              SSO 入口 URL
-              <input
-                value={ssoEntryUrl}
-                onChange={(event) => setSsoEntryUrl(event.currentTarget.value)}
-                placeholder="https://nas.example.com/sso"
-              />
-            </label>
-            <button type="submit" disabled={authLoading}>
-              {authLoading ? "處理中..." : "開始 SSO 登入"}
-            </button>
-            {authStatus?.authorizationUrl ? (
-              <p className="hint">授權 URL：{authStatus.authorizationUrl}</p>
-            ) : null}
-          </form>
-        </div>
+                <div className="action-groups">
+                  <div className="action-group">
+                    <span className="action-group-label">事件入列與執行</span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={runPipelineBatch}
+                        disabled={opsLoading}
+                      >
+                        執行 Pipeline Batch
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runPipelineOnce}
+                        disabled={opsLoading}
+                      >
+                        執行單次 Pipeline
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runExecutorOnce}
+                        disabled={opsLoading}
+                      >
+                        單步 Executor
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runSyncCycleOnce}
+                        disabled={opsLoading}
+                      >
+                        單次 Sync Cycle
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={drainWatcherEvents}
+                        disabled={opsLoading}
+                      >
+                        轉入 Watcher 事件
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={scanLocalOnce}
+                        disabled={opsLoading}
+                      >
+                        補掃描本機資料夾
+                      </button>
+                    </div>
+                  </div>
 
-        <form className="config-form inline-form" onSubmit={submitOtp}>
-          <label>
-            OTP 驗證碼
-            <input
-              value={otpCode}
-              onChange={(event) => setOtpCode(event.currentTarget.value)}
-              placeholder="6 位數字"
-            />
-          </label>
-          <button type="submit" disabled={authLoading}>
-            {authLoading ? "處理中..." : "送出 OTP"}
-          </button>
-        </form>
+                  <div className="action-group">
+                    <span className="action-group-label">開發壓測與故障矩陣演練 (Fault Matrix)</span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addSampleOperation}
+                        disabled={opsLoading}
+                      >
+                        + 範例 Operation
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addRetryableOperation}
+                        disabled={opsLoading}
+                      >
+                        + Retryable
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addHardRetryableOperation}
+                        disabled={opsLoading}
+                      >
+                        + Hard Retry
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={seedDemoOperations}
+                        disabled={opsLoading}
+                      >
+                        批次新增 5 筆 Demo
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={seedFaultMatrixOperations}
+                        disabled={opsLoading}
+                      >
+                        灌入 Fault Matrix
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={runFaultMatrixOnce}
+                        disabled={opsLoading}
+                      >
+                        執行 Fault Matrix
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={runFaultMatrixFast}
+                        disabled={opsLoading}
+                      >
+                        快速演練 Fault Matrix Fast
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={forceDueRetryable}
+                        disabled={opsLoading}
+                      >
+                        強制釋放 Retryable 到期
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
 
-        <form className="config-form inline-form" onSubmit={completeSso}>
-          <label>
-            SSO callback URL
-            <input
-              value={ssoCallbackUrl}
-              onChange={(event) => setSsoCallbackUrl(event.currentTarget.value)}
-              placeholder="https://nas.example.com/callback?code=..."
-            />
-          </label>
-          <button type="submit" disabled={authLoading}>
-            {authLoading ? "處理中..." : "完成 SSO callback"}
-          </button>
-        </form>
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">操作佇列清單 ({operations.length})</h2>
+                    <p className="card-desc">
+                      Stage 統計：
+                      {operationStageCounts.length > 0
+                        ? ` ${operationStageCounts
+                            .map((it) => `${it.stage}: ${it.count}`)
+                            .join(" / ")}`
+                        : " 尚無統計資料"}
+                    </p>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-outline-danger btn-sm"
+                      onClick={() => purgeOperations("done")}
+                      disabled={opsLoading}
+                    >
+                      清理 Done
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-danger btn-sm"
+                      onClick={() => purgeOperations("failed")}
+                      disabled={opsLoading}
+                    >
+                      清理 Failed
+                    </button>
+                  </div>
+                </div>
 
-        <button type="button" onClick={logout} disabled={authLoading}>
-          {authLoading ? "處理中..." : "登出"}
-        </button>
-      </section>
-    </main>
+                {/* Filter Pills */}
+                <div className="filter-bar">
+                  {["all", "planned", "retryable", "done", "failed"].map((stage) => (
+                    <button
+                      key={stage}
+                      type="button"
+                      className={`filter-pill ${stageFilter === stage ? "active" : ""}`}
+                      onClick={() => setStageFilter(stage)}
+                    >
+                      {stage === "all" ? "全部" : stage}
+                    </button>
+                  ))}
+                </div>
+
+                {filteredOperations.length > 0 ? (
+                  <div className="table-wrapper">
+                    <table className="modern-table">
+                      <thead>
+                        <tr>
+                          <th>狀態</th>
+                          <th>類型 / ID</th>
+                          <th>路徑與錯誤資訊</th>
+                          <th>重試次數</th>
+                          <th>更新時間</th>
+                          <th>動作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredOperations.map((op) => (
+                          <tr key={op.id}>
+                            <td>
+                              <span className={`badge ${getStageBadgeClass(op.stage)}`}>
+                                {op.stage}
+                              </span>
+                            </td>
+                            <td>
+                              <div className="cell-primary">{op.opType}</div>
+                              <div className="cell-secondary mono">{op.id}</div>
+                            </td>
+                            <td>
+                              <div className="cell-primary mono">
+                                {op.fromPath ?? "-"}
+                                {op.toPath ? ` → ${op.toPath}` : ""}
+                              </div>
+                              {op.lastError ? (
+                                <div className="cell-error">錯誤：{op.lastError}</div>
+                              ) : null}
+                              {op.nextRetryAt ? (
+                                <div className="cell-secondary">
+                                  下次重試：{op.nextRetryAt}
+                                </div>
+                              ) : null}
+                            </td>
+                            <td>{op.attempts}</td>
+                            <td className="cell-secondary">{op.updatedAt}</td>
+                            <td>
+                              {op.stage !== "planned" ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={() => retryOperationById(op.id)}
+                                  disabled={opsLoading}
+                                >
+                                  重設為 planned
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="empty-state">目前沒有符合篩選條件的 Operation 記錄。</div>
+                )}
+
+                <div className="divider" />
+
+                <form className="inline-input-row" onSubmit={retryOperation}>
+                  <input
+                    className="input"
+                    value={retryOpId}
+                    onChange={(event) => setRetryOpId(event.currentTarget.value)}
+                    placeholder="輸入指定 Operation ID（例如 op-1730000000000）手動重設為 planned"
+                  />
+                  <button type="submit" className="btn btn-secondary" disabled={opsLoading}>
+                    {opsLoading ? "處理中..." : "重設指定 ID"}
+                  </button>
+                </form>
+              </section>
+            </div>
+          )}
+
+          {/* TAB 3: CONFLICTS */}
+          {activeTab === "conflicts" && (
+            <div className="section-stack">
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">同步衝突管理 ({conflicts.length})</h2>
+                    <p className="card-desc">
+                      當本機與遠端同時修改同一檔案時，系統將保留雙邊版本並列出衝突供您確認
+                    </p>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={addDemoConflict}
+                      disabled={opsLoading}
+                    >
+                      + 新增示範衝突
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={refreshConflicts}
+                      disabled={opsLoading}
+                    >
+                      重新整理
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-danger btn-sm"
+                      onClick={() => purgeConflicts("resolved")}
+                      disabled={opsLoading}
+                    >
+                      清理已解決 (Resolved)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="filter-bar">
+                  <span className="badge badge-neutral">
+                    統計：
+                    {conflictStatusCounts.length > 0
+                      ? ` ${conflictStatusCounts
+                          .map((it) => `${it.status}: ${it.count}`)
+                          .join(" / ")}`
+                      : " 無資料"}
+                  </span>
+                </div>
+
+                {conflicts.length > 0 ? (
+                  <div className="conflict-list">
+                    {conflicts.map((conflict) => (
+                      <div key={conflict.id} className="conflict-card">
+                        <div className="conflict-card-main">
+                          <div className="conflict-title-row">
+                            <span className={`badge ${getStageBadgeClass(conflict.status)}`}>
+                              {conflict.status}
+                            </span>
+                            <strong className="mono">{conflict.id}</strong>
+                            <span className="badge badge-warning">{conflict.reason}</span>
+                            <span className="cell-secondary">建立於 {conflict.createdAt}</span>
+                          </div>
+                          <div className="conflict-paths">
+                            <div>
+                              <span className="path-label">本機版本 ({conflict.localVersion ?? "-"})：</span>
+                              <span className="mono">{conflict.localCopyPath ?? "-"}</span>
+                            </div>
+                            <div>
+                              <span className="path-label">遠端版本 ({conflict.remoteVersion ?? "-"})：</span>
+                              <span className="mono">{conflict.remoteCopyPath ?? "-"}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="conflict-card-actions">
+                          {conflict.status !== "resolved" ? (
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              onClick={() => resolveConflict(conflict.id)}
+                              disabled={opsLoading}
+                            >
+                              標記為已解決 (Resolved)
+                            </button>
+                          ) : (
+                            <span className="cell-secondary">已解決</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state">太棒了！目前沒有任何同步衝突。</div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {/* TAB 4: AUTHENTICATION */}
+          {activeTab === "auth" && (
+            <div className="section-stack">
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">目前認證狀態</h2>
+                    <p className="card-desc">管理與 Synology NAS 的連線憑證與多重驗證</p>
+                  </div>
+                  <div className="button-row">
+                    <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
+                      Stage: {authStatus?.stage ?? "loading"}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-outline-danger btn-sm"
+                      onClick={logout}
+                      disabled={authLoading}
+                    >
+                      登出帳號
+                    </button>
+                  </div>
+                </div>
+
+                <div className="stats-list">
+                  <div className="stat-item">
+                    <span className="stat-key">登入使用者</span>
+                    <span className="stat-val">{authStatus?.username ?? "尚未登入"}</span>
+                  </div>
+                  <div className="stat-item">
+                    <span className="stat-key">驗證方式</span>
+                    <span className="stat-val">{authStatus?.method ?? "-"}</span>
+                  </div>
+                  {authStatus?.message ? (
+                    <div className="stat-item">
+                      <span className="stat-key">狀態訊息</span>
+                      <span className="stat-val">{authStatus.message}</span>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+
+              <div className="two-col-grid">
+                <section className="card">
+                  <h3 className="card-title">NAS 帳號密碼登入</h3>
+                  <p className="card-desc">支援 DSM 帳號密碼與二階段 OTP 驗證碼</p>
+                  <form className="form-stack" onSubmit={loginByPassword}>
+                    <label className="form-field">
+                      <span>帳號</span>
+                      <input
+                        className="input"
+                        value={username}
+                        onChange={(event) => setUsername(event.currentTarget.value)}
+                        placeholder="輸入 DSM 使用者名稱"
+                      />
+                    </label>
+                    <label className="form-field">
+                      <span>密碼</span>
+                      <input
+                        className="input"
+                        type="password"
+                        value={password}
+                        onChange={(event) => setPassword(event.currentTarget.value)}
+                        placeholder="輸入密碼"
+                      />
+                    </label>
+                    <label className="form-field">
+                      <span>OTP 驗證碼（選填）</span>
+                      <input
+                        className="input"
+                        value={otpCode}
+                        onChange={(event) => setOtpCode(event.currentTarget.value)}
+                        placeholder="6 位數動態驗證碼"
+                      />
+                    </label>
+                    <button type="submit" className="btn btn-primary" disabled={authLoading}>
+                      {authLoading ? "驗證中..." : "送出帳密登入"}
+                    </button>
+                  </form>
+
+                  <div className="divider" />
+
+                  <form className="form-stack" onSubmit={submitOtp}>
+                    <label className="form-field">
+                      <span>補送二階段 OTP 驗證碼</span>
+                      <div className="inline-input-row">
+                        <input
+                          className="input"
+                          value={otpCode}
+                          onChange={(event) => setOtpCode(event.currentTarget.value)}
+                          placeholder="6 位數字"
+                        />
+                        <button
+                          type="submit"
+                          className="btn btn-secondary"
+                          disabled={authLoading}
+                        >
+                          送出 OTP
+                        </button>
+                      </div>
+                    </label>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h3 className="card-title">SSO / OIDC 單一登入</h3>
+                  <p className="card-desc">透過企業識別提供者或 Synology SSO Server 驗證</p>
+                  <form className="form-stack" onSubmit={startSso}>
+                    <label className="form-field">
+                      <span>SSO 入口 URL</span>
+                      <input
+                        className="input"
+                        value={ssoEntryUrl}
+                        onChange={(event) => setSsoEntryUrl(event.currentTarget.value)}
+                        placeholder="https://nas.example.com/sso"
+                      />
+                    </label>
+                    <button type="submit" className="btn btn-primary" disabled={authLoading}>
+                      {authLoading ? "處理中..." : "啟動 SSO 登入流程"}
+                    </button>
+                  </form>
+
+                  {authStatus?.authorizationUrl ? (
+                    <div className="info-box">
+                      <div className="info-box-title">SSO 授權網址已產生</div>
+                      <div className="info-box-text mono">{authStatus.authorizationUrl}</div>
+                    </div>
+                  ) : null}
+
+                  <div className="divider" />
+
+                  <form className="form-stack" onSubmit={completeSso}>
+                    <label className="form-field">
+                      <span>SSO Callback URL 驗證</span>
+                      <input
+                        className="input"
+                        value={ssoCallbackUrl}
+                        onChange={(event) => setSsoCallbackUrl(event.currentTarget.value)}
+                        placeholder="https://nas.example.com/callback?code=..."
+                      />
+                    </label>
+                    <button type="submit" className="btn btn-secondary" disabled={authLoading}>
+                      {authLoading ? "處理中..." : "完成 SSO Callback"}
+                    </button>
+                  </form>
+                </section>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: SETTINGS & DIAGNOSTICS */}
+          {activeTab === "settings" && (
+            <div className="section-stack">
+              <div className="two-col-grid">
+                <section className="card">
+                  <h2 className="card-title">同步資料夾與效能設定</h2>
+                  <p className="card-desc">設定本機與遠端 NAS 對應路徑、輪詢間隔與佇列保護上限</p>
+                  {config ? (
+                    <form
+                      className="form-stack"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        saveConfig();
+                      }}
+                    >
+                      <label className="form-field">
+                        <span>本機同步資料夾路徑</span>
+                        <input
+                          className="input mono"
+                          value={localSyncPath}
+                          onChange={(event) => setLocalSyncPath(event.currentTarget.value)}
+                          placeholder="例如 C:\Users\you\SynologyDrive"
+                        />
+                      </label>
+                      <label className="form-field">
+                        <span>遠端 NAS 同步路徑</span>
+                        <input
+                          className="input mono"
+                          value={remotePath}
+                          onChange={(event) => setRemotePath(event.currentTarget.value)}
+                          placeholder="例如 /Drive/SyncRoot"
+                        />
+                      </label>
+                      <div className="two-col-grid">
+                        <label className="form-field">
+                          <span>輪詢間隔（秒）</span>
+                          <input
+                            className="input"
+                            value={pollIntervalSeconds}
+                            onChange={(event) =>
+                              setPollIntervalSeconds(event.currentTarget.value)
+                            }
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="form-field">
+                          <span>Ingest Backlog 上限</span>
+                          <input
+                            className="input"
+                            value={ingestBacklogLimit}
+                            onChange={(event) =>
+                              setIngestBacklogLimit(event.currentTarget.value)
+                            }
+                            inputMode="numeric"
+                          />
+                        </label>
+                      </div>
+                      <div className="button-row">
+                        <button type="submit" className="btn btn-primary" disabled={saving}>
+                          {saving ? "儲存中..." : "儲存同步設定"}
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="empty-state">讀取設定中...</div>
+                  )}
+                </section>
+
+                <section className="card">
+                  <h2 className="card-title">SQLite 儲存引擎與 Sync Root</h2>
+                  <p className="card-desc">管理本機狀態資料庫 Schema 與預設同步根目錄映射</p>
+                  <div className="stats-list">
+                    <div className="stat-item">
+                      <span className="stat-key">Schema 版本</span>
+                      <span className="stat-val">
+                        {storageInfo ? `v${storageInfo.schemaVersion}` : "尚未初始化"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">資料庫檔案位置</span>
+                      <span className="stat-val mono">
+                        {storageInfo?.dbPath ?? "尚未建立"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">Default Sync Root</span>
+                      <span className="stat-val mono">
+                        {syncRoot
+                          ? `${syncRoot.id} (${syncRoot.localPath} ⇄ ${syncRoot.remotePath})`
+                          : "尚未建立 default sync_root"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={initStorage}
+                      disabled={authLoading}
+                    >
+                      {authLoading ? "處理中..." : "初始化同步資料庫"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={syncDefaultRoot}
+                      disabled={opsLoading}
+                    >
+                      {opsLoading ? "處理中..." : "將設定寫入 Default Sync Root"}
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">系統診斷快照 (System Snapshot)</h2>
+                    <p className="card-desc">
+                      集中檢視設定、認證、背景服務、監看器與資料庫佇列聚合統計
+                    </p>
+                  </div>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={refreshSnapshot}>
+                    重新整理快照
+                  </button>
+                </div>
+                {snapshot ? (
+                  <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
+                ) : (
+                  <div className="empty-state">尚未載入系統快照。</div>
+                )}
+              </section>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
   );
 }
 
