@@ -65,6 +65,13 @@ pub struct ConflictRow {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictStatusCount {
+    pub status: String,
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewOperation {
@@ -411,6 +418,65 @@ pub fn list_conflicts<R: Runtime>(app: &AppHandle<R>, limit: u32) -> Result<Vec<
         result.push(row.map_err(|e| format!("讀取 conflict 列失敗：{e}"))?);
     }
     Ok(result)
+}
+
+pub fn count_conflicts_by_status<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<ConflictStatusCount>, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT status, COUNT(1) AS count
+            FROM conflicts
+            GROUP BY status
+            ORDER BY status ASC
+            ",
+        )
+        .map_err(|e| format!("建立 conflict status 統計查詢失敗：{e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ConflictStatusCount {
+                status: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })
+        .map_err(|e| format!("查詢 conflict status 統計失敗：{e}"))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("讀取 conflict status 統計列失敗：{e}"))?);
+    }
+    Ok(result)
+}
+
+pub fn purge_conflicts_by_status<R: Runtime>(
+    app: &AppHandle<R>,
+    status: &str,
+    limit: u32,
+) -> Result<u64, String> {
+    if status.trim().is_empty() {
+        return Err("status 不可為空".to_string());
+    }
+    let limit = limit.clamp(1, 5000);
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let deleted = conn
+        .execute(
+            "
+            DELETE FROM conflicts
+            WHERE id IN (
+                SELECT id
+                FROM conflicts
+                WHERE status = ?1
+                ORDER BY created_at ASC
+                LIMIT ?2
+            )
+            ",
+            params![status, limit],
+        )
+        .map_err(|e| format!("清理 conflict 失敗：{e}"))?;
+    Ok(deleted as u64)
 }
 
 pub fn update_conflict_status<R: Runtime>(

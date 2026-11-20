@@ -21,6 +21,7 @@
   - [x] P1-7c default sync_root 寫入/讀取（由設定檔同步到 SQLite）
   - [x] P1-7d conflict 骨架指令（add/list + 前端檢視）
   - [x] P1-7e conflict 狀態更新（resolve）
+  - [x] P1-7f conflict 統計與清理（status counts + purge resolved）
 - [ ] P1-8 掃描與監看（notify + 補掃描）
   - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
   - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）

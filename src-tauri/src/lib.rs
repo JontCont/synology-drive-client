@@ -70,6 +70,22 @@ fn resolve_sync_conflict(
 }
 
 #[tauri::command]
+fn get_conflict_status_counts(
+    app: tauri::AppHandle,
+) -> Result<Vec<storage::ConflictStatusCount>, String> {
+    storage::count_conflicts_by_status(&app)
+}
+
+#[tauri::command]
+fn purge_sync_conflicts(
+    app: tauri::AppHandle,
+    status: String,
+    limit: Option<u32>,
+) -> Result<u64, String> {
+    storage::purge_conflicts_by_status(&app, &status, limit.unwrap_or(100))
+}
+
+#[tauri::command]
 fn list_sync_operations(
     app: tauri::AppHandle,
     limit: Option<u32>,
@@ -513,6 +529,8 @@ pub fn run() {
             add_sync_conflict,
             list_sync_conflicts,
             resolve_sync_conflict,
+            get_conflict_status_counts,
+            purge_sync_conflicts,
             seed_demo_operations,
             list_sync_operations,
             get_operation_stage_counts,

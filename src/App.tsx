@@ -89,6 +89,11 @@ type ConflictRow = {
   createdAt: string;
 };
 
+type ConflictStatusCount = {
+  status: string;
+  count: number;
+};
+
 type ExecutorRunResult = {
   processed: boolean;
   operationId: string | null;
@@ -139,6 +144,7 @@ function App() {
   const [operations, setOperations] = useState<OperationRow[]>([]);
   const [operationStageCounts, setOperationStageCounts] = useState<OperationStageCount[]>([]);
   const [conflicts, setConflicts] = useState<ConflictRow[]>([]);
+  const [conflictStatusCounts, setConflictStatusCounts] = useState<ConflictStatusCount[]>([]);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -207,6 +213,11 @@ function App() {
       .then((rows) => setConflicts(rows))
       .catch(() => {
         setConflicts([]);
+      });
+    invoke<ConflictStatusCount[]>("get_conflict_status_counts")
+      .then((rows) => setConflictStatusCounts(rows))
+      .catch(() => {
+        setConflictStatusCounts([]);
       });
 
     invoke<SyncRootRow>("get_default_sync_root")
@@ -528,6 +539,8 @@ function App() {
   async function refreshConflicts() {
     const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 10 });
     setConflicts(rows);
+    const statusCounts = await invoke<ConflictStatusCount[]>("get_conflict_status_counts");
+    setConflictStatusCounts(statusCounts);
   }
 
   async function addSampleOperation() {
@@ -643,6 +656,24 @@ function App() {
       await invoke<ConflictRow>("resolve_sync_conflict", { id });
       await refreshConflicts();
       setMessage(`conflict ${id} 已標記 resolved。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
+  async function purgeConflicts(status: "resolved") {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const deleted = await invoke<number>("purge_sync_conflicts", {
+        status,
+        limit: 200,
+      });
+      await refreshConflicts();
+      setMessage(`已清理 ${deleted} 筆 ${status} conflict。`);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -983,12 +1014,21 @@ function App() {
       <section className="panel">
         <h2>衝突骨架</h2>
         <p className="hint">目前筆數：{conflicts.length}</p>
+        <p className="hint">
+          status 統計：
+          {conflictStatusCounts.length > 0
+            ? ` ${conflictStatusCounts.map((it) => `${it.status}:${it.count}`).join(" / ")}`
+            : " 無資料"}
+        </p>
         <div className="button-row">
           <button type="button" onClick={addDemoConflict} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增示範 conflict"}
           </button>
           <button type="button" onClick={refreshConflicts} disabled={opsLoading}>
             重新整理 conflict
+          </button>
+          <button type="button" onClick={() => purgeConflicts("resolved")} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "清理 resolved"}
           </button>
         </div>
         {conflicts.length > 0 ? (
