@@ -19,6 +19,8 @@ pub struct OidcConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub server_host: Option<String>,
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub poll_interval_seconds: u32,
@@ -30,6 +32,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfigUpdate {
+    pub server_host: Option<String>,
     pub local_sync_path: Option<String>,
     pub remote_path: Option<String>,
     pub poll_interval_seconds: Option<u32>,
@@ -40,6 +43,7 @@ pub struct AppConfigUpdate {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            server_host: None,
             local_sync_path: None,
             remote_path: None,
             poll_interval_seconds: 30,
@@ -84,6 +88,14 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
             return Err("ingest backlog 上限必須大於 0".to_string());
         }
         config.ingest_backlog_limit = ingest_backlog_limit;
+    }
+
+    if let Some(server_host) = update.server_host {
+        config.server_host = if server_host.trim().is_empty() {
+            None
+        } else {
+            Some(server_host.trim().to_string())
+        };
     }
 
     if let Some(local_sync_path) = update.local_sync_path {

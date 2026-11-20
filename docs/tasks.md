@@ -18,8 +18,9 @@
 - [x] P1-4 設定檔骨架（`get_app_config` / `update_app_config`）
 - [x] P1-5 設定 UI（可修改與儲存設定）
 - [x] P1-6 認證流程骨架（帳密/OTP + SSO）
-  - [x] P1-6a 獨立登入頁 UI（一般登入 / OIDC 配置雙分頁切換，配置 OIDC 後自動顯示單一登入按鈕並持久化至 settings.json）
+  - [x] P1-6a 獨立登入頁 UI（一般登入 / 配置雙分頁切換，配置 OIDC 後自動顯示單一登入按鈕並持久化至 settings.json）
   - [x] P1-6b Challenge-based 兩階段登入與可替換 `AuthBackendAdapter`（先送帳密，依伺服器回應決定直接 `authenticated` 或帶 `challengeId` 進入 `waitingOtp`）
+  - [x] P1-6c 登入配置區塊化（NAS Host 區塊 + OIDC 區塊 + 步驟引導）與登入頁動態視覺動畫強化
 - [x] P1-7 同步資料模型（baseline/operations/conflicts）
   - [x] P1-7a 三方比對決策模型雛形（純函式 + 單元測試）
   - [x] P1-7b SQLite schema 骨架（sync_roots/items/observations/baseline/tombstones/operations/conflicts）

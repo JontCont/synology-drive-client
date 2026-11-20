@@ -11,6 +11,7 @@ type OidcConfig = {
 };
 
 type AppConfig = {
+  serverHost?: string | null;
   localSyncPath: string | null;
   remotePath: string | null;
   pollIntervalSeconds: number;
@@ -214,6 +215,7 @@ function App() {
   const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
   // Standard Login state
+  const [serverHost, setServerHost] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -243,6 +245,7 @@ function App() {
 
   function applyConfigToState(value: AppConfig) {
     setConfig(value);
+    setServerHost(value.serverHost ?? "");
     setLocalSyncPath(value.localSyncPath ?? "");
     setRemotePath(value.remotePath ?? "");
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
@@ -315,7 +318,9 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // Whether OIDC is currently configured in saved config
+  // Whether Host and OIDC are currently configured in saved config
+  const savedHost = config?.serverHost?.trim() || "";
+  const isHostConfigured = Boolean(savedHost);
   const savedOidc = config?.oidc;
   const isOidcConfigured = Boolean(
     savedOidc?.issuerUrl?.trim() && savedOidc?.clientId?.trim()
@@ -370,6 +375,31 @@ function App() {
     }
   }
 
+  async function saveHostConfig(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmedHost = serverHost.trim();
+    if (!trimmedHost) {
+      setError("請輸入 NAS 伺服器 Host 位址（例如 https://nas.example.com:5001）。");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await invoke<AppConfig>("update_app_config", {
+        update: {
+          serverHost: trimmedHost,
+        },
+      });
+      applyConfigToState(next);
+      setMessage(`已儲存 NAS 連線主機：${trimmedHost}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function saveOidcConfig(event: React.FormEvent) {
     event.preventDefault();
     const trimmedIssuer = oidcIssuerUrl.trim();
@@ -394,6 +424,7 @@ function App() {
     try {
       const next = await invoke<AppConfig>("update_app_config", {
         update: {
+          serverHost: serverHost.trim() || undefined,
           oidc: {
             providerName: oidcProviderName.trim() || null,
             issuerUrl: trimmedIssuer,
@@ -404,7 +435,7 @@ function App() {
         },
       });
       applyConfigToState(next);
-      setMessage("OIDC 配置已儲存，現在可於一般登入頁使用 OIDC 按鈕登入。");
+      setMessage("配置已儲存！現在可於一般登入頁使用 OIDC 按鈕登入。");
       setLoginTab("standard");
     } catch (err) {
       setError(String(err));
@@ -1048,11 +1079,18 @@ function App() {
       : operations.filter((op) => op.stage === stageFilter);
 
   // ============================================================================
-  // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + OIDC 配置)
+  // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + 配置 Block: Host / OIDC)
   // ============================================================================
   if (viewMode === "login") {
     return (
       <div className="login-screen">
+        {/* Ambient animated background orbs */}
+        <div className="login-bg-decor" aria-hidden="true">
+          <div className="login-bg-orb orb-1" />
+          <div className="login-bg-orb orb-2" />
+          <div className="login-bg-orb orb-3" />
+        </div>
+
         {/* Top bar on login screen */}
         <header className="login-topbar">
           <div className="brand">
@@ -1107,24 +1145,27 @@ function App() {
         </header>
 
         <div className="login-center">
-          <div className="login-card">
+          <div className={`login-card ${loginTab === "oidc-config" ? "login-card-wide" : ""}`}>
             <div className="login-card-header">
-              <div className="login-logo-badge" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-                  />
-                </svg>
+              <div className="login-logo-wrap" aria-hidden="true">
+                <div className="login-logo-ring" />
+                <div className="login-logo-badge">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                    />
+                  </svg>
+                </div>
               </div>
-              <h1 className="login-title">登入 Synology NAS</h1>
+              <h1 className="login-title">連線至 Synology Drive</h1>
               <p className="login-subtitle">
-                請選擇一般帳號登入，或先設定 OIDC 單一登入配置
+                透過一般帳號登入，或在「配置」中設定 NAS 伺服器位址與 OIDC 單一登入
               </p>
             </div>
 
-            {/* Segmented Mode Switcher: 一般登入 vs OIDC 配置 */}
+            {/* Segmented Mode Switcher: 一般登入 vs 配置 */}
             <div className="login-tabs" role="tablist" aria-label="登入與配置選項">
               <button
                 type="button"
@@ -1148,17 +1189,25 @@ function App() {
                   setError(null);
                 }}
               >
-                <span>OIDC 配置</span>
+                <span>配置 (Host / OIDC)</span>
                 <span
-                  className={`tab-dot ${isOidcConfigured ? "status-online" : "status-idle"}`}
-                  title={isOidcConfigured ? "已配置 OIDC" : "尚未配置 OIDC"}
+                  className={`tab-dot ${
+                    isHostConfigured || isOidcConfigured ? "status-online" : "status-idle"
+                  }`}
+                  title={
+                    isOidcConfigured
+                      ? "已配置 Host / OIDC"
+                      : isHostConfigured
+                        ? "已配置 NAS Host"
+                        : "尚未設定連線配置"
+                  }
                 />
               </button>
             </div>
 
             {/* Feedback Alerts inside Login Card */}
             {error ? (
-              <div className="alert alert-error" role="alert">
+              <div className="alert alert-error animate-pop" role="alert">
                 <div className="alert-content">
                   <strong>錯誤：</strong>
                   <span>{error}</span>
@@ -1175,7 +1224,7 @@ function App() {
             ) : null}
 
             {message ? (
-              <div className="alert alert-success" role="status">
+              <div className="alert alert-success animate-pop" role="status">
                 <div className="alert-content">
                   <span>{message}</span>
                 </div>
@@ -1192,7 +1241,29 @@ function App() {
 
             {/* OPTION 1: 一般登入 (Challenge-based: Step 1 帳密 -> Step 2 若伺服器回 waitingOtp 才顯示 OTP) */}
             {loginTab === "standard" && (
-              <div className="login-tab-panel">
+              <div key="tab-standard" className="login-tab-panel animate-panel">
+                {/* Current Host indicator banner */}
+                <div className="host-status-bar">
+                  <div className="host-status-info">
+                    <span
+                      className={`status-dot ${
+                        isHostConfigured ? "status-online" : "status-idle"
+                      }`}
+                    />
+                    <span className="host-status-label">NAS 主機：</span>
+                    <code className="mono host-status-value">
+                      {isHostConfigured ? savedHost : "尚未指定（預設本機模擬）"}
+                    </code>
+                  </div>
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setLoginTab("oidc-config")}
+                  >
+                    配置 →
+                  </button>
+                </div>
+
                 {authStatus?.stage !== "waitingOtp" ? (
                   <>
                     <form className="form-stack" onSubmit={loginByPassword}>
@@ -1202,7 +1273,7 @@ function App() {
                           className="input"
                           value={username}
                           onChange={(event) => setUsername(event.currentTarget.value)}
-                          placeholder="輸入使用者帳號（含 2fa/otp 將模擬觸發 MFA）"
+                          placeholder="輸入使用者帳號（含 2fa/otp 將觸發 MFA）"
                           autoComplete="username"
                         />
                       </label>
@@ -1221,21 +1292,24 @@ function App() {
 
                       <button
                         type="submit"
-                        className="btn btn-primary btn-block btn-lg"
+                        className="btn btn-primary btn-block btn-lg btn-animated"
                         disabled={authLoading}
                       >
-                        {authLoading ? "登入驗證中..." : "登入"}
+                        <span>{authLoading ? "登入驗證中..." : "登入"}</span>
                       </button>
                     </form>
 
-                    <div className="cell-secondary" style={{ textAlign: "center" }}>
-                      模擬提示：一般帳密將直接登入；帳號或密碼含 <code className="mono">2fa</code> /{" "}
-                      <code className="mono">otp</code> 時，伺服器將回傳 MFA Challenge 進入下一步 OTP 驗證。
+                    <div className="challenge-guide-chip">
+                      <span>
+                        Challenge 流程：先驗證帳密，若伺服器回應需 2FA（帳號或密碼含{" "}
+                        <code className="mono">2fa</code> / <code className="mono">otp</code>
+                        ）才進入 OTP 步驟。
+                      </span>
                     </div>
                   </>
                 ) : (
                   /* Step 2: Challenge-based OTP Verification */
-                  <form className="login-step-box" onSubmit={submitOtp}>
+                  <form className="login-step-box animate-step" onSubmit={submitOtp}>
                     <div className="login-step-title">
                       需要二階段驗證 (MFA Challenge)
                     </div>
@@ -1262,11 +1336,11 @@ function App() {
                     <div className="button-row">
                       <button
                         type="submit"
-                        className="btn btn-primary"
+                        className="btn btn-primary btn-animated"
                         style={{ flex: 1 }}
                         disabled={authLoading}
                       >
-                        {authLoading ? "驗證中..." : "送出 OTP 驗證"}
+                        <span>{authLoading ? "驗證中..." : "送出 OTP 驗證"}</span>
                       </button>
                       <button
                         type="button"
@@ -1282,14 +1356,14 @@ function App() {
 
                 {/* Conditional OIDC Login Button: ONLY shown when OIDC is configured! */}
                 {isOidcConfigured ? (
-                  <div className="oidc-login-section">
+                  <div className="oidc-login-section animate-step">
                     <div className="or-divider">
                       <span>或使用已配置的單一登入</span>
                     </div>
 
                     <button
                       type="button"
-                      className="btn btn-oidc btn-block btn-lg"
+                      className="btn btn-oidc btn-block btn-lg btn-animated"
                       onClick={triggerOidcLogin}
                       disabled={authLoading}
                     >
@@ -1305,26 +1379,26 @@ function App() {
 
                     <div className="oidc-active-meta">
                       <span>
-                        Issuer: <code className="mono">{savedOidc?.issuerUrl}</code>
+                        OIDC: <code className="mono">{savedOidc?.issuerUrl}</code>
                       </span>
                       <button
                         type="button"
                         className="link-btn"
                         onClick={() => setLoginTab("oidc-config")}
                       >
-                        修改配置
+                        前往配置 →
                       </button>
                     </div>
                   </div>
                 ) : (
                   <div className="oidc-unconfigured-hint">
-                    <span>需要使用企業 OIDC / SSO 登入？</span>
+                    <span>需要設定 NAS 連線位址或啟用 OIDC 單一登入？</span>
                     <button
                       type="button"
                       className="link-btn"
                       onClick={() => setLoginTab("oidc-config")}
                     >
-                      前往設定 OIDC 配置 →
+                      前往配置 →
                     </button>
                   </div>
                 )}
@@ -1332,7 +1406,7 @@ function App() {
                 {/* Step 2: OIDC / SSO Waiting for Callback */}
                 {(authStatus?.stage === "waitingSsoCallback" ||
                   authStatus?.authorizationUrl) && (
-                  <form className="login-step-box" onSubmit={completeSso}>
+                  <form className="login-step-box animate-step" onSubmit={completeSso}>
                     <div className="login-step-title">完成 OIDC 瀏覽器授權驗證</div>
                     {authStatus?.authorizationUrl ? (
                       <div className="info-box">
@@ -1359,96 +1433,182 @@ function App() {
               </div>
             )}
 
-            {/* OPTION 2: OIDC 配置 */}
+            {/* OPTION 2: 配置 (分區 Blocks：NAS Host 區塊 + OIDC 單一登入區塊 + 使用說明) */}
             {loginTab === "oidc-config" && (
-              <div className="login-tab-panel">
-                <form className="form-stack" onSubmit={saveOidcConfig}>
-                  <div className="oidc-status-banner">
+              <div key="tab-config" className="login-tab-panel animate-panel">
+                {/* How-to-use visual step guide block */}
+                <div className="config-guide-banner">
+                  <div className="config-guide-title">如何設定與使用？</div>
+                  <div className="config-steps-row">
+                    <div className="config-step-pill">
+                      <span className="step-num">1</span>
+                      <span>設定 NAS Host 連線位址</span>
+                    </div>
+                    <span className="step-arrow">→</span>
+                    <div className="config-step-pill">
+                      <span className="step-num">2</span>
+                      <span>（選填）設定 OIDC 參數</span>
+                    </div>
+                    <span className="step-arrow">→</span>
+                    <div className="config-step-pill">
+                      <span className="step-num">3</span>
+                      <span>回一般登入頁顯示按鈕</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* BLOCK 1: NAS Host Configuration Block */}
+                <div className="config-block">
+                  <div className="config-block-header">
+                    <div className="config-block-title-wrap">
+                      <div className="config-block-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="2" y="3" width="20" height="7" rx="2" />
+                          <rect x="2" y="14" width="20" height="7" rx="2" />
+                          <circle cx="6" cy="6.5" r="1" />
+                          <circle cx="6" cy="17.5" r="1" />
+                        </svg>
+                      </div>
+                      <div>
+                        <h2 className="config-block-title">區塊 1：NAS 伺服器位址 (Host)</h2>
+                        <p className="config-block-desc">
+                          指定您要同步的 Synology NAS 網域或 IP:Port，供一般帳密登入連線使用
+                        </p>
+                      </div>
+                    </div>
+                    <span
+                      className={`badge ${
+                        isHostConfigured ? "badge-success" : "badge-neutral"
+                      }`}
+                    >
+                      {isHostConfigured ? "已設定 Host" : "未設定"}
+                    </span>
+                  </div>
+
+                  <form className="config-block-body" onSubmit={saveHostConfig}>
+                    <label className="form-field">
+                      <span>NAS Host / 伺服器網址</span>
+                      <div className="inline-input-row">
+                        <input
+                          className="input mono"
+                          value={serverHost}
+                          onChange={(event) => setServerHost(event.currentTarget.value)}
+                          placeholder="例如 https://nas.example.com:5001"
+                        />
+                        <button type="submit" className="btn btn-secondary" disabled={saving}>
+                          儲存 Host
+                        </button>
+                      </div>
+                    </label>
+                  </form>
+                </div>
+
+                {/* BLOCK 2: OIDC Single Sign-On Configuration Block */}
+                <div className="config-block config-block-accent">
+                  <div className="config-block-header">
+                    <div className="config-block-title-wrap">
+                      <div className="config-block-icon icon-accent">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+                          />
+                        </svg>
+                      </div>
+                      <div>
+                        <h2 className="config-block-title">區塊 2：OIDC 單一登入配置（選填）</h2>
+                        <p className="config-block-desc">
+                          填寫 Issuer URL 與 Client ID 並儲存後，「一般登入」頁將自動出現 OIDC 登入按鈕
+                        </p>
+                      </div>
+                    </div>
                     <span
                       className={`badge ${
                         isOidcConfigured ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {isOidcConfigured ? "✓ 已啟用 OIDC 按鈕" : "尚未配置 OIDC"}
-                    </span>
-                    <span className="cell-secondary">
-                      儲存配置後，「一般登入」分頁將自動顯示 OIDC 登入按鈕
+                      {isOidcConfigured ? "✓ 已啟用按鈕" : "未啟用"}
                     </span>
                   </div>
 
-                  <label className="form-field">
-                    <span>顯示名稱 / Provider 名稱（選填）</span>
-                    <input
-                      className="input"
-                      value={oidcProviderName}
-                      onChange={(event) => setOidcProviderName(event.currentTarget.value)}
-                      placeholder="例如：Synology SSO / 企業 OIDC"
-                    />
-                  </label>
-
-                  <label className="form-field">
-                    <span>Issuer / 授權入口 URL（必填，需為 https://）</span>
-                    <input
-                      className="input mono"
-                      value={oidcIssuerUrl}
-                      onChange={(event) => setOidcIssuerUrl(event.currentTarget.value)}
-                      placeholder="https://nas.example.com/sso"
-                    />
-                  </label>
-
-                  <label className="form-field">
-                    <span>Client ID（必填）</span>
-                    <input
-                      className="input mono"
-                      value={oidcClientId}
-                      onChange={(event) => setOidcClientId(event.currentTarget.value)}
-                      placeholder="例如：synology-drive-desktop"
-                    />
-                  </label>
-
-                  <div className="two-col-compact">
+                  <form className="config-block-body form-stack" onSubmit={saveOidcConfig}>
                     <label className="form-field">
-                      <span>Redirect URI（選填）</span>
+                      <span>按鈕顯示名稱 / Provider 名稱（選填）</span>
                       <input
-                        className="input mono"
-                        value={oidcRedirectUri}
-                        onChange={(event) => setOidcRedirectUri(event.currentTarget.value)}
-                        placeholder="https://nas.example.com/callback"
+                        className="input"
+                        value={oidcProviderName}
+                        onChange={(event) => setOidcProviderName(event.currentTarget.value)}
+                        placeholder="例如：Synology SSO / 公司 OIDC（留空預設顯示「使用 OIDC 單一登入」）"
                       />
                     </label>
 
-                    <label className="form-field">
-                      <span>Scopes（選填）</span>
-                      <input
-                        className="input mono"
-                        value={oidcScopes}
-                        onChange={(event) => setOidcScopes(event.currentTarget.value)}
-                        placeholder="openid profile email"
-                      />
-                    </label>
-                  </div>
+                    <div className="two-col-compact">
+                      <label className="form-field">
+                        <span>Issuer / 授權入口 URL（必填 https://）</span>
+                        <input
+                          className="input mono"
+                          value={oidcIssuerUrl}
+                          onChange={(event) => setOidcIssuerUrl(event.currentTarget.value)}
+                          placeholder="https://nas.example.com/sso"
+                        />
+                      </label>
 
-                  <div className="button-row">
-                    <button
-                      type="submit"
-                      className="btn btn-primary"
-                      style={{ flex: 1 }}
-                      disabled={saving}
-                    >
-                      {saving ? "儲存中..." : "儲存 OIDC 配置"}
-                    </button>
-                    {isOidcConfigured ? (
+                      <label className="form-field">
+                        <span>Client ID（必填）</span>
+                        <input
+                          className="input mono"
+                          value={oidcClientId}
+                          onChange={(event) => setOidcClientId(event.currentTarget.value)}
+                          placeholder="synology-drive-desktop"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="two-col-compact">
+                      <label className="form-field">
+                        <span>Redirect URI（選填）</span>
+                        <input
+                          className="input mono"
+                          value={oidcRedirectUri}
+                          onChange={(event) => setOidcRedirectUri(event.currentTarget.value)}
+                          placeholder="https://nas.example.com/callback"
+                        />
+                      </label>
+
+                      <label className="form-field">
+                        <span>Scopes（選填）</span>
+                        <input
+                          className="input mono"
+                          value={oidcScopes}
+                          onChange={(event) => setOidcScopes(event.currentTarget.value)}
+                          placeholder="openid profile email"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="button-row">
                       <button
-                        type="button"
-                        className="btn btn-outline-danger"
-                        onClick={clearOidcConfig}
+                        type="submit"
+                        className="btn btn-primary btn-animated"
+                        style={{ flex: 1 }}
                         disabled={saving}
                       >
-                        清除配置
+                        <span>{saving ? "儲存中..." : "儲存配置並返回登入"}</span>
                       </button>
-                    ) : null}
-                  </div>
-                </form>
+                      {isOidcConfigured ? (
+                        <button
+                          type="button"
+                          className="btn btn-outline-danger"
+                          onClick={clearOidcConfig}
+                          disabled={saving}
+                        >
+                          停用 / 清除 OIDC
+                        </button>
+                      ) : null}
+                    </div>
+                  </form>
+                </div>
               </div>
             )}
           </div>
