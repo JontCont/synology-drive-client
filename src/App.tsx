@@ -84,6 +84,13 @@ type WatcherDrainResult = {
   operationIds: string[];
 };
 
+type PipelineRunResult = {
+  queuedCount: number;
+  processed: boolean;
+  operationId: string | null;
+  message: string;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -397,6 +404,24 @@ function App() {
     }
   }
 
+  async function runPipelineOnce() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<PipelineRunResult>("run_pipeline_once", { drainLimit: 20 });
+      await refreshOperations();
+      await refreshWatcherStatus();
+      setMessage(
+        `pipeline: queued ${result.queuedCount}, processed=${result.processed}, op=${result.operationId ?? "-"}`
+      );
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function refreshOperations() {
     const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
     setOperations(rows);
@@ -644,6 +669,9 @@ function App() {
           </button>
           <button type="button" onClick={drainWatcherEvents} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "轉入 operation 佇列"}
+          </button>
+          <button type="button" onClick={runPipelineOnce} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "執行一次 pipeline"}
           </button>
         </div>
       </section>

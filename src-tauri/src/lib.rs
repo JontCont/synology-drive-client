@@ -211,6 +211,15 @@ struct WatcherDrainResult {
     operation_ids: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PipelineRunResult {
+    queued_count: usize,
+    processed: bool,
+    operation_id: Option<String>,
+    message: String,
+}
+
 #[tauri::command]
 fn get_system_snapshot(
     app: tauri::AppHandle,
@@ -243,11 +252,37 @@ fn drain_watcher_events_to_operations(
 ) -> Result<WatcherDrainResult, String> {
     let _ = storage::init(&app)?;
     let paths = watcher_state.drain_event_paths(limit.unwrap_or(20))?;
+    let operation_ids = enqueue_paths_as_operations(&app, paths)?;
+    Ok(WatcherDrainResult {
+        queued_count: operation_ids.len(),
+        operation_ids,
+    })
+}
+
+#[tauri::command]
+fn run_pipeline_once(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    drain_limit: Option<u32>,
+) -> Result<PipelineRunResult, String> {
+    let _ = storage::init(&app)?;
+    let paths = watcher_state.drain_event_paths(drain_limit.unwrap_or(20))?;
+    let operation_ids = enqueue_paths_as_operations(&app, paths)?;
+    let run_result = executor::run_once(&app)?;
+    Ok(PipelineRunResult {
+        queued_count: operation_ids.len(),
+        processed: run_result.processed,
+        operation_id: run_result.operation_id,
+        message: run_result.message,
+    })
+}
+
+fn enqueue_paths_as_operations(
+    app: &tauri::AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
     if paths.is_empty() {
-        return Ok(WatcherDrainResult {
-            queued_count: 0,
-            operation_ids: Vec::new(),
-        });
+        return Ok(Vec::new());
     }
 
     let mut seen = HashSet::new();
@@ -281,10 +316,7 @@ fn drain_watcher_events_to_operations(
         operation_ids.push(id);
     }
 
-    Ok(WatcherDrainResult {
-        queued_count: operation_ids.len(),
-        operation_ids,
-    })
+    Ok(operation_ids)
 }
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
@@ -361,6 +393,7 @@ pub fn run() {
             stop_local_watcher,
             get_local_watcher_status,
             drain_watcher_events_to_operations,
+            run_pipeline_once,
             get_auth_status,
             login_with_password,
             submit_otp,
