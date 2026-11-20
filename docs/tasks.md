@@ -3,6 +3,7 @@
 ## Phase 0（先驗證）
 - [ ] T0 確認需求範圍與環境（NAS 版本、Windows 版本、資料規模）
 - [ ] T1 登入與 Provider Spike（帳密/OTP + OIDC/SSO）
+  - [x] T1a 建立 Spike 記錄模板（`docs/remote-spike.md`）
 - [ ] T2 定稿 Provider（WebDAV / Drive API 二擇一）
 - [ ] T3 定義 RemoteProvider 契約與錯誤模型
 
