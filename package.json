@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "tauri:dev": "tauri dev",
     "build": "tsc && vite build",
     "check:frontend": "npm run build",
     "check:backend": "cargo check --manifest-path src-tauri/Cargo.toml",

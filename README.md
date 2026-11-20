@@ -74,6 +74,8 @@ This template should help get you started developing with Tauri, React and Types
 ## Validation command
 
 - `npm run check` : runs frontend build + Rust `cargo check`
+- `npm run tauri:dev` : run app with Tauri runtime (required for `invoke` commands)
+- `npm run dev` : frontend-only mode (no Tauri bridge; backend commands unavailable)
 
 ## Recommended IDE Setup
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 type OidcConfig = {
@@ -188,6 +188,17 @@ function getStageBadgeClass(stage: string | null | undefined): string {
 }
 
 function App() {
+  const hasTauriBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const invoke = async <T,>(
+    command: string,
+    args?: Record<string, unknown>,
+  ): Promise<T> => {
+    if (!hasTauriBridge) {
+      throw new Error("偵測不到 Tauri runtime。請使用 `npm run tauri dev` 啟動。");
+    }
+    return tauriInvoke<T>(command, args);
+  };
+
   const [viewMode, setViewMode] = useState<"login" | "dashboard">("login");
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
