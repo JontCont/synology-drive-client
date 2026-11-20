@@ -15,6 +15,8 @@
 - [x] P1-5 設定 UI（可修改與儲存設定）
 - [x] P1-6 認證流程骨架（帳密/OTP + SSO）
 - [ ] P1-7 同步資料模型（baseline/operations/conflicts）
+  - [x] P1-7a 三方比對決策模型雛形（純函式 + 單元測試）
+  - [x] P1-7b SQLite schema 骨架（sync_roots/items/observations/baseline/tombstones/operations/conflicts）
 - [ ] P1-8 掃描與監看（notify + 補掃描）
 - [ ] P1-9 三方比對與 executor
 - [ ] P1-10 真實 NAS 故障矩陣驗證

@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod remote;
 mod storage;
+mod sync_model;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
