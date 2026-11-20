@@ -848,6 +848,35 @@ pub fn schedule_operation_retry<R: Runtime>(
         .map_err(|e| format!("回讀 operation retry 狀態失敗：{e}"))
 }
 
+pub fn force_due_retryable_operations<R: Runtime>(
+    app: &AppHandle<R>,
+    limit: u32,
+) -> Result<u64, String> {
+    let limit = limit.clamp(1, 5000);
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let updated = conn
+        .execute(
+            "
+            UPDATE operations
+            SET next_retry_at = datetime('now', '-1 seconds'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN (
+                SELECT id
+                FROM operations
+                WHERE stage = 'retryable'
+                  AND next_retry_at IS NOT NULL
+                  AND next_retry_at > CURRENT_TIMESTAMP
+                ORDER BY updated_at ASC
+                LIMIT ?1
+            )
+            ",
+            params![limit],
+        )
+        .map_err(|e| format!("釋放 retryable 到期失敗：{e}"))?;
+    Ok(updated as u64)
+}
+
 pub fn upsert_default_sync_root<R: Runtime>(
     app: &AppHandle<R>,
     local_path: &str,

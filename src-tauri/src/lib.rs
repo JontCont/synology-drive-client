@@ -305,6 +305,18 @@ struct FaultMatrixRunResult {
     batch: PipelineBatchResult,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaultMatrixFastRunResult {
+    seeded_count: usize,
+    steps: u32,
+    processed_count: u32,
+    released_retryable_count: u64,
+    last_outcome: Option<String>,
+    last_message: Option<String>,
+    operation_stage_counts: Vec<storage::OperationStageCount>,
+}
+
 #[tauri::command]
 fn get_system_snapshot(
     app: tauri::AppHandle,
@@ -455,6 +467,56 @@ fn run_fault_matrix_once(
     })
 }
 
+#[tauri::command]
+fn force_due_retryable_operations(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+) -> Result<u64, String> {
+    storage::force_due_retryable_operations(&app, limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn run_fault_matrix_fast(
+    app: tauri::AppHandle,
+    max_steps: Option<u32>,
+) -> Result<FaultMatrixFastRunResult, String> {
+    let _ = storage::init(&app)?;
+    let seeded = storage::seed_fault_matrix_operations(&app)?;
+    let step_limit = max_steps.unwrap_or(40).clamp(1, 200);
+    let mut steps = 0;
+    let mut processed_count = 0;
+    let mut released_retryable_count: u64 = 0;
+    let mut last_outcome = None;
+    let mut last_message = None;
+
+    for _ in 0..step_limit {
+        let run_result = executor::run_once(&app)?;
+        steps += 1;
+        last_outcome = Some(run_result.outcome.clone());
+        last_message = Some(run_result.message.clone());
+
+        if !run_result.processed {
+            break;
+        }
+        processed_count += 1;
+
+        if run_result.outcome == "retry_scheduled" {
+            released_retryable_count += storage::force_due_retryable_operations(&app, 200)?;
+        }
+    }
+
+    let operation_stage_counts = storage::count_operations_by_stage(&app).unwrap_or_default();
+    Ok(FaultMatrixFastRunResult {
+        seeded_count: seeded.len(),
+        steps,
+        processed_count,
+        released_retryable_count,
+        last_outcome,
+        last_message,
+        operation_stage_counts,
+    })
+}
+
 fn enqueue_paths_as_operations(
     app: &tauri::AppHandle,
     paths: Vec<String>,
@@ -586,6 +648,8 @@ pub fn run() {
             run_pipeline_once,
             run_pipeline_batch,
             run_fault_matrix_once,
+            run_fault_matrix_fast,
+            force_due_retryable_operations,
             get_auth_status,
             login_with_password,
             submit_otp,

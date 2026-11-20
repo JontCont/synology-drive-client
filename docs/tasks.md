@@ -50,6 +50,7 @@
 - [ ] P1-10 真實 NAS 故障矩陣驗證
   - [x] P1-10a 故障矩陣種子資料（retry / hard-retry / unknown-op）
   - [x] P1-10b 一鍵故障矩陣演練（seed + batch）
+  - [x] P1-10c 快速演練模式（自動釋放 retryable）
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
   - [x] P1-11a 擴充快照聚合（operation/conflict 統計）
 

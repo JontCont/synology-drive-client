@@ -142,6 +142,16 @@ type FaultMatrixRunResult = {
   batch: PipelineBatchResult;
 };
 
+type FaultMatrixFastRunResult = {
+  seededCount: number;
+  steps: number;
+  processedCount: number;
+  releasedRetryableCount: number;
+  lastOutcome: string | null;
+  lastMessage: string | null;
+  operationStageCounts: OperationStageCount[];
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -737,6 +747,44 @@ function App() {
     }
   }
 
+  async function runFaultMatrixFast() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<FaultMatrixFastRunResult>("run_fault_matrix_fast", {
+        maxSteps: 60,
+      });
+      await refreshOperations();
+      const stageSummary =
+        result.operationStageCounts.length > 0
+          ? result.operationStageCounts.map((it) => `${it.stage}:${it.count}`).join(" / ")
+          : "無";
+      setMessage(
+        `fault-matrix-fast: seeded ${result.seededCount}, processed ${result.processedCount}/${result.steps}, released=${result.releasedRetryableCount}, stage=[${stageSummary}]`
+      );
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
+  async function forceDueRetryable() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const count = await invoke<number>("force_due_retryable_operations", { limit: 200 });
+      await refreshOperations();
+      setMessage(`已釋放 ${count} 筆 retryable 為可立即重試。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function runExecutorOnce() {
     setOpsLoading(true);
     setError(null);
@@ -1007,6 +1055,12 @@ function App() {
           </button>
           <button type="button" onClick={runFaultMatrixOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行 fault matrix"}
+          </button>
+          <button type="button" onClick={runFaultMatrixFast} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "執行 fault matrix fast"}
+          </button>
+          <button type="button" onClick={forceDueRetryable} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "釋放 retryable"}
           </button>
           <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增 retryable operation"}
