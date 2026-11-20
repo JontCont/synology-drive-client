@@ -69,6 +69,15 @@ type ExecutorRunResult = {
   message: string;
 };
 
+type SystemSnapshot = {
+  config: AppConfig | null;
+  authStatus: AuthStatus | null;
+  storageInfo: SyncStorageInfo | null;
+  syncServiceStatus: SyncServiceStatus | null;
+  watcherStatus: LocalWatcherStatus | null;
+  operationCount: number;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -77,6 +86,7 @@ function App() {
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [operations, setOperations] = useState<OperationRow[]>([]);
+  const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -138,6 +148,12 @@ function App() {
       .then((row) => setSyncRoot(row))
       .catch(() => {
         setSyncRoot(null);
+      });
+
+    invoke<SystemSnapshot>("get_system_snapshot")
+      .then((s) => setSnapshot(s))
+      .catch(() => {
+        setSnapshot(null);
       });
   }, []);
 
@@ -438,6 +454,15 @@ function App() {
     }
   }
 
+  async function refreshSnapshot() {
+    try {
+      const s = await invoke<SystemSnapshot>("get_system_snapshot");
+      setSnapshot(s);
+    } catch {
+      setSnapshot(null);
+    }
+  }
+
   async function syncDefaultRoot() {
     setOpsLoading(true);
     setError(null);
@@ -621,6 +646,20 @@ function App() {
             {opsLoading ? "處理中..." : "重設為 planned"}
           </button>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2>系統快照</h2>
+        <div className="button-row">
+          <button type="button" onClick={refreshSnapshot}>
+            重新整理快照
+          </button>
+        </div>
+        {snapshot ? (
+          <pre className="hint">{JSON.stringify(snapshot, null, 2)}</pre>
+        ) : (
+          <p className="hint">尚未取得系統快照。</p>
+        )}
       </section>
 
       <section className="panel">

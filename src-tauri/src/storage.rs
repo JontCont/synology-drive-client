@@ -306,6 +306,13 @@ pub fn list_operations<R: Runtime>(
     Ok(result)
 }
 
+pub fn count_operations<R: Runtime>(app: &AppHandle<R>) -> Result<i64, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    conn.query_row("SELECT COUNT(1) FROM operations", [], |row| row.get(0))
+        .map_err(|e| format!("查詢 operation 數量失敗：{e}"))
+}
+
 pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<OperationRow>, String> {
     let path = db_path(app)?;
     let mut conn = open_connection(&path)?;

@@ -50,6 +50,9 @@ This template should help get you started developing with Tauri, React and Types
   - single-step executor in `src-tauri/src/executor.rs`
   - commands: `run_sync_executor_once`, `run_sync_cycle_once`
   - behavior (current skeleton): claim one `planned` operation and mark as `done`
+- Diagnostics:
+  - command: `get_system_snapshot`
+  - returns config/auth/storage/service/watcher summary and operation count in one response
 
 ## Recommended IDE Setup
 

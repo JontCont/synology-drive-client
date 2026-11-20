@@ -10,6 +10,7 @@ mod watcher;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
+use serde::Serialize;
 
 #[tauri::command]
 fn get_app_config(app: tauri::AppHandle) -> Result<config::AppConfig, String> {
@@ -183,6 +184,41 @@ fn logout(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthStatus, St
     auth_state.logout()
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemSnapshot {
+    config: Option<config::AppConfig>,
+    auth_status: Option<auth::AuthStatus>,
+    storage_info: Option<storage::SyncStorageInfo>,
+    sync_service_status: Option<sync_service::SyncServiceStatus>,
+    watcher_status: Option<watcher::LocalWatcherStatus>,
+    operation_count: i64,
+}
+
+#[tauri::command]
+fn get_system_snapshot(
+    app: tauri::AppHandle,
+    auth_state: State<'_, auth::AuthState>,
+    sync_state: State<'_, sync_service::SyncServiceState>,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<SystemSnapshot, String> {
+    let config = config::load(&app).ok();
+    let auth_status = auth_state.status().ok();
+    let storage_info = storage::info(&app).ok();
+    let sync_service_status = sync_state.status().ok();
+    let watcher_status = watcher_state.status().ok();
+    let operation_count = storage::count_operations(&app).unwrap_or(0);
+
+    Ok(SystemSnapshot {
+        config,
+        auth_status,
+        storage_info,
+        sync_service_status,
+        watcher_status,
+        operation_count,
+    })
+}
+
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -261,6 +297,8 @@ pub fn run() {
             start_sso_login,
             complete_sso_login,
             logout
+            ,
+            get_system_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
