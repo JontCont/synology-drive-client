@@ -40,7 +40,7 @@ This template should help get you started developing with Tauri, React and Types
   - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`
-  - commands: `start_local_watcher`, `stop_local_watcher`, `get_local_watcher_status`
+  - commands: `start_local_watcher`, `stop_local_watcher`, `get_local_watcher_status`, `drain_watcher_events_to_operations`
   - frontend panel for watcher start/stop/status preview (auto refresh)
 - Operation queue skeleton:
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`

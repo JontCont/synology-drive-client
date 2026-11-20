@@ -48,6 +48,7 @@ type LocalWatcherStatus = {
   rootPath: string | null;
   eventCount: number;
   lastEventPath: string | null;
+  pendingCount: number;
 };
 
 type OperationRow = {
@@ -76,6 +77,11 @@ type SystemSnapshot = {
   syncServiceStatus: SyncServiceStatus | null;
   watcherStatus: LocalWatcherStatus | null;
   operationCount: number;
+};
+
+type WatcherDrainResult = {
+  queuedCount: number;
+  operationIds: string[];
 };
 
 function App() {
@@ -373,6 +379,24 @@ function App() {
     }
   }
 
+  async function drainWatcherEvents() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<WatcherDrainResult>("drain_watcher_events_to_operations", {
+        limit: 20,
+      });
+      await refreshOperations();
+      await refreshWatcherStatus();
+      setMessage(`已轉入 ${result.queuedCount} 筆 watcher 事件。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function refreshOperations() {
     const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
     setOperations(rows);
@@ -603,6 +627,7 @@ function App() {
           狀態：{watcherStatus?.running ? "running" : "stopped"} / event:{" "}
           {watcherStatus?.eventCount ?? 0}
         </p>
+        <p className="hint">pending: {watcherStatus?.pendingCount ?? 0}</p>
         {watcherStatus?.rootPath ? <p className="hint">root: {watcherStatus.rootPath}</p> : null}
         {watcherStatus?.lastEventPath ? (
           <p className="hint">last: {watcherStatus.lastEventPath}</p>
@@ -616,6 +641,9 @@ function App() {
           </button>
           <button type="button" onClick={refreshWatcherStatus} disabled={watcherLoading}>
             重新整理監看狀態
+          </button>
+          <button type="button" onClick={drainWatcherEvents} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "轉入 operation 佇列"}
           </button>
         </div>
       </section>

@@ -11,6 +11,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
 use serde::Serialize;
+use std::collections::HashSet;
 
 #[tauri::command]
 fn get_app_config(app: tauri::AppHandle) -> Result<config::AppConfig, String> {
@@ -203,6 +204,13 @@ struct SystemSnapshot {
     operation_count: i64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatcherDrainResult {
+    queued_count: usize,
+    operation_ids: Vec<String>,
+}
+
 #[tauri::command]
 fn get_system_snapshot(
     app: tauri::AppHandle,
@@ -224,6 +232,58 @@ fn get_system_snapshot(
         sync_service_status,
         watcher_status,
         operation_count,
+    })
+}
+
+#[tauri::command]
+fn drain_watcher_events_to_operations(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    limit: Option<u32>,
+) -> Result<WatcherDrainResult, String> {
+    let _ = storage::init(&app)?;
+    let paths = watcher_state.drain_event_paths(limit.unwrap_or(20))?;
+    if paths.is_empty() {
+        return Ok(WatcherDrainResult {
+            queued_count: 0,
+            operation_ids: Vec::new(),
+        });
+    }
+
+    let mut seen = HashSet::new();
+    let mut unique_paths = Vec::new();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            unique_paths.push(path);
+        }
+    }
+
+    let mut operation_ids = Vec::new();
+    for (idx, path) in unique_paths.iter().enumerate() {
+        let id = format!(
+            "watcher-{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| format!("取得時間戳失敗：{e}"))?
+                .as_millis(),
+            idx
+        );
+        let op = storage::NewOperation {
+            id: id.clone(),
+            root_id: "default-root".to_string(),
+            item_id: None,
+            op_type: "scan_local_path".to_string(),
+            from_path: Some(path.clone()),
+            to_path: None,
+            stage: Some("planned".to_string()),
+        };
+        let _ = storage::enqueue_operation(&app, op)?;
+        operation_ids.push(id);
+    }
+
+    Ok(WatcherDrainResult {
+        queued_count: operation_ids.len(),
+        operation_ids,
     })
 }
 
@@ -300,6 +360,7 @@ pub fn run() {
             start_local_watcher,
             stop_local_watcher,
             get_local_watcher_status,
+            drain_watcher_events_to_operations,
             get_auth_status,
             login_with_password,
             submit_otp,

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -11,6 +12,7 @@ use serde::Serialize;
 struct WatcherMetrics {
     event_count: u64,
     last_event_path: Option<String>,
+    pending_paths: VecDeque<String>,
 }
 
 #[derive(Debug)]
@@ -33,7 +35,10 @@ pub struct LocalWatcherStatus {
     pub root_path: Option<String>,
     pub event_count: u64,
     pub last_event_path: Option<String>,
+    pub pending_count: u64,
 }
+
+const MAX_PENDING_EVENTS: usize = 512;
 
 impl LocalWatcherState {
     pub fn new() -> Self {
@@ -134,6 +139,29 @@ impl LocalWatcherState {
         Self::status_locked(&guard)
     }
 
+    pub fn drain_event_paths(&self, limit: u32) -> Result<Vec<String>, String> {
+        let limit = limit.clamp(1, 200) as usize;
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| "監看狀態鎖定失敗".to_string())?;
+        let Some(running) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut metrics = running
+            .metrics
+            .lock()
+            .map_err(|_| "監看統計鎖定失敗".to_string())?;
+        let mut paths = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            match metrics.pending_paths.pop_front() {
+                Some(path) => paths.push(path),
+                None => break,
+            }
+        }
+        Ok(paths)
+    }
+
     fn status_locked(guard: &Option<RunningWatcher>) -> Result<LocalWatcherStatus, String> {
         if let Some(running) = guard {
             let metrics = running
@@ -145,6 +173,7 @@ impl LocalWatcherState {
                 root_path: Some(running.root_path.clone()),
                 event_count: metrics.event_count,
                 last_event_path: metrics.last_event_path.clone(),
+                pending_count: metrics.pending_paths.len() as u64,
             })
         } else {
             Ok(LocalWatcherStatus {
@@ -152,6 +181,7 @@ impl LocalWatcherState {
                 root_path: None,
                 event_count: 0,
                 last_event_path: None,
+                pending_count: 0,
             })
         }
     }
@@ -159,7 +189,13 @@ impl LocalWatcherState {
     fn record_event(metrics: &Arc<Mutex<WatcherMetrics>>, event: Event) {
         if let Ok(mut m) = metrics.lock() {
             m.event_count += 1;
-            m.last_event_path = event.paths.first().map(|p| p.to_string_lossy().to_string());
+            if let Some(path) = event.paths.first().map(|p| p.to_string_lossy().to_string()) {
+                m.last_event_path = Some(path.clone());
+                m.pending_paths.push_back(path);
+                while m.pending_paths.len() > MAX_PENDING_EVENTS {
+                    let _ = m.pending_paths.pop_front();
+                }
+            }
         }
     }
 }
