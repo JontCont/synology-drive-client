@@ -232,6 +232,11 @@ function App() {
   const [serviceLoading, setServiceLoading] = useState(false);
   const [watcherLoading, setWatcherLoading] = useState(false);
   const [opsLoading, setOpsLoading] = useState(false);
+  const [conflictsLoading, setConflictsLoading] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [tabSwitching, setTabSwitching] = useState(false);
+  const [loginTabSwitching, setLoginTabSwitching] = useState(false);
   const [retryOpId, setRetryOpId] = useState("");
 
   useEffect(() => {
@@ -260,55 +265,75 @@ function App() {
   }
 
   useEffect(() => {
-    invoke<AppConfig>("get_app_config")
-      .then((value) => applyConfigToState(value))
-      .catch((err) => setError(String(err)));
+    setInitialLoading(true);
+    Promise.allSettled([
+      invoke<AppConfig>("get_app_config")
+        .then((value) => applyConfigToState(value))
+        .catch((err) => setError(String(err))),
 
-    invoke<AuthStatus>("get_auth_status")
-      .then((value) => {
-        setAuthStatus(value);
-        if (value.stage === "authenticated") {
-          setViewMode("dashboard");
-        }
-      })
-      .catch((err) => setError(String(err)));
+      invoke<AuthStatus>("get_auth_status")
+        .then((value) => {
+          setAuthStatus(value);
+          if (value.stage === "authenticated") {
+            setViewMode("dashboard");
+          }
+        })
+        .catch((err) => setError(String(err))),
 
-    invoke<SyncStorageInfo>("get_sync_storage_info")
-      .then((value) => setStorageInfo(value))
-      .catch(() => setStorageInfo(null));
+      invoke<SyncStorageInfo>("get_sync_storage_info")
+        .then((value) => setStorageInfo(value))
+        .catch(() => setStorageInfo(null)),
 
-    invoke<SyncServiceStatus>("get_sync_service_status")
-      .then((value) => setServiceStatus(value))
-      .catch(() => setServiceStatus(null));
+      invoke<SyncServiceStatus>("get_sync_service_status")
+        .then((value) => setServiceStatus(value))
+        .catch(() => setServiceStatus(null)),
 
-    invoke<LocalWatcherStatus>("get_local_watcher_status")
-      .then((value) => setWatcherStatus(value))
-      .catch(() => setWatcherStatus(null));
+      invoke<LocalWatcherStatus>("get_local_watcher_status")
+        .then((value) => setWatcherStatus(value))
+        .catch(() => setWatcherStatus(null)),
 
-    invoke<OperationRow[]>("list_sync_operations", { limit: 20 })
-      .then((rows) => setOperations(rows))
-      .catch(() => setOperations([]));
+      invoke<OperationRow[]>("list_sync_operations", { limit: 20 })
+        .then((rows) => setOperations(rows))
+        .catch(() => setOperations([])),
 
-    invoke<OperationStageCount[]>("get_operation_stage_counts")
-      .then((rows) => setOperationStageCounts(rows))
-      .catch(() => setOperationStageCounts([]));
+      invoke<OperationStageCount[]>("get_operation_stage_counts")
+        .then((rows) => setOperationStageCounts(rows))
+        .catch(() => setOperationStageCounts([])),
 
-    invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 })
-      .then((rows) => setConflicts(rows))
-      .catch(() => setConflicts([]));
+      invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 })
+        .then((rows) => setConflicts(rows))
+        .catch(() => setConflicts([])),
 
-    invoke<ConflictStatusCount[]>("get_conflict_status_counts")
-      .then((rows) => setConflictStatusCounts(rows))
-      .catch(() => setConflictStatusCounts([]));
+      invoke<ConflictStatusCount[]>("get_conflict_status_counts")
+        .then((rows) => setConflictStatusCounts(rows))
+        .catch(() => setConflictStatusCounts([])),
 
-    invoke<SyncRootRow>("get_default_sync_root")
-      .then((row) => setSyncRoot(row))
-      .catch(() => setSyncRoot(null));
+      invoke<SyncRootRow>("get_default_sync_root")
+        .then((row) => setSyncRoot(row))
+        .catch(() => setSyncRoot(null)),
 
-    invoke<SystemSnapshot>("get_system_snapshot")
-      .then((s) => setSnapshot(s))
-      .catch(() => setSnapshot(null));
+      invoke<SystemSnapshot>("get_system_snapshot")
+        .then((s) => setSnapshot(s))
+        .catch(() => setSnapshot(null)),
+    ]).finally(() => {
+      window.setTimeout(() => setInitialLoading(false), 320);
+    });
   }, []);
+
+  function switchDashboardTab(nextTab: NavTab) {
+    if (nextTab === activeTab) return;
+    setActiveTab(nextTab);
+    setTabSwitching(true);
+    window.setTimeout(() => setTabSwitching(false), 260);
+  }
+
+  function switchLoginTab(nextTab: LoginViewTab) {
+    if (nextTab === loginTab) return;
+    setLoginTab(nextTab);
+    setError(null);
+    setLoginTabSwitching(true);
+    window.setTimeout(() => setLoginTabSwitching(false), 240);
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -830,7 +855,7 @@ function App() {
   }
 
   async function addDemoConflict() {
-    setOpsLoading(true);
+    setConflictsLoading(true);
     setError(null);
     setMessage(null);
     try {
@@ -852,12 +877,12 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
-      setOpsLoading(false);
+      setConflictsLoading(false);
     }
   }
 
   async function resolveConflict(id: string) {
-    setOpsLoading(true);
+    setConflictsLoading(true);
     setError(null);
     setMessage(null);
     try {
@@ -867,12 +892,12 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
-      setOpsLoading(false);
+      setConflictsLoading(false);
     }
   }
 
   async function purgeConflicts(status: "resolved") {
-    setOpsLoading(true);
+    setConflictsLoading(true);
     setError(null);
     setMessage(null);
     try {
@@ -885,7 +910,7 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
-      setOpsLoading(false);
+      setConflictsLoading(false);
     }
   }
 
@@ -1044,13 +1069,25 @@ function App() {
   }
 
   async function refreshSnapshot() {
+    setSnapshotLoading(true);
     try {
       const s = await invoke<SystemSnapshot>("get_system_snapshot");
       setSnapshot(s);
       setMessage("系統快照已更新。");
     } catch {
       setSnapshot(null);
+    } finally {
+      window.setTimeout(() => setSnapshotLoading(false), 260);
     }
+  }
+
+  function triggerSkeletonPreview() {
+    setTabSwitching(true);
+    setLoginTabSwitching(true);
+    window.setTimeout(() => {
+      setTabSwitching(false);
+      setLoginTabSwitching(false);
+    }, 900);
   }
 
   async function syncDefaultRoot() {
@@ -1137,7 +1174,19 @@ function App() {
             <button
               type="button"
               className="btn btn-ghost btn-sm"
-              onClick={() => setViewMode("dashboard")}
+              onClick={triggerSkeletonPreview}
+              title="預覽 Facebook 骨架屏載入動畫"
+            >
+              預覽載入動畫
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                setViewMode("dashboard");
+                triggerSkeletonPreview();
+              }}
             >
               進入同步主控台 →
             </button>
@@ -1172,10 +1221,7 @@ function App() {
                 role="tab"
                 aria-selected={loginTab === "standard"}
                 className={`login-tab-btn ${loginTab === "standard" ? "active" : ""}`}
-                onClick={() => {
-                  setLoginTab("standard");
-                  setError(null);
-                }}
+                onClick={() => switchLoginTab("standard")}
               >
                 <span>一般登入</span>
               </button>
@@ -1184,10 +1230,7 @@ function App() {
                 role="tab"
                 aria-selected={loginTab === "oidc-config"}
                 className={`login-tab-btn ${loginTab === "oidc-config" ? "active" : ""}`}
-                onClick={() => {
-                  setLoginTab("oidc-config");
-                  setError(null);
-                }}
+                onClick={() => switchLoginTab("oidc-config")}
               >
                 <span>配置 (Host / OIDC)</span>
                 <span
@@ -1239,8 +1282,32 @@ function App() {
               </div>
             ) : null}
 
+            {/* Facebook-style Shimmer Skeleton when loading / switching login views */}
+            {initialLoading || loginTabSwitching || authLoading || saving ? (
+              <div className="fb-skeleton-container" aria-busy="true" aria-label="載入中">
+                <div className="fb-skeleton-row">
+                  <div className="fb-skeleton fb-skeleton-circle-sm" />
+                  <div className="fb-skeleton fb-skeleton-line w-45" />
+                  <div className="fb-skeleton fb-skeleton-pill ml-auto" />
+                </div>
+                <div className="fb-skeleton-field">
+                  <div className="fb-skeleton fb-skeleton-line w-30" />
+                  <div className="fb-skeleton fb-skeleton-input" />
+                </div>
+                <div className="fb-skeleton-field">
+                  <div className="fb-skeleton fb-skeleton-line w-25" />
+                  <div className="fb-skeleton fb-skeleton-input" />
+                </div>
+                <div className="fb-skeleton fb-skeleton-btn" />
+                <div className="fb-skeleton-row">
+                  <div className="fb-skeleton fb-skeleton-line w-70" />
+                  <div className="fb-skeleton fb-skeleton-line w-20" />
+                </div>
+              </div>
+            ) : null}
+
             {/* OPTION 1: 一般登入 (Challenge-based: Step 1 帳密 -> Step 2 若伺服器回 waitingOtp 才顯示 OTP) */}
-            {loginTab === "standard" && (
+            {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "standard" && (
               <div key="tab-standard" className="login-tab-panel animate-panel">
                 {/* Current Host indicator banner */}
                 <div className="host-status-bar">
@@ -1258,7 +1325,7 @@ function App() {
                   <button
                     type="button"
                     className="link-btn"
-                    onClick={() => setLoginTab("oidc-config")}
+                    onClick={() => switchLoginTab("oidc-config")}
                   >
                     配置 →
                   </button>
@@ -1384,7 +1451,7 @@ function App() {
                       <button
                         type="button"
                         className="link-btn"
-                        onClick={() => setLoginTab("oidc-config")}
+                        onClick={() => switchLoginTab("oidc-config")}
                       >
                         前往配置 →
                       </button>
@@ -1396,7 +1463,7 @@ function App() {
                     <button
                       type="button"
                       className="link-btn"
-                      onClick={() => setLoginTab("oidc-config")}
+                      onClick={() => switchLoginTab("oidc-config")}
                     >
                       前往配置 →
                     </button>
@@ -1434,7 +1501,7 @@ function App() {
             )}
 
             {/* OPTION 2: 配置 (分區 Blocks：NAS Host 區塊 + OIDC 單一登入區塊 + 使用說明) */}
-            {loginTab === "oidc-config" && (
+            {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "oidc-config" && (
               <div key="tab-config" className="login-tab-panel animate-panel">
                 {/* How-to-use visual step guide block */}
                 <div className="config-guide-banner">
@@ -1663,7 +1730,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${activeTab === "overview" ? "active" : ""}`}
-            onClick={() => setActiveTab("overview")}
+            onClick={() => switchDashboardTab("overview")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -1677,7 +1744,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${activeTab === "operations" ? "active" : ""}`}
-            onClick={() => setActiveTab("operations")}
+            onClick={() => switchDashboardTab("operations")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path
@@ -1695,7 +1762,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${activeTab === "conflicts" ? "active" : ""}`}
-            onClick={() => setActiveTab("conflicts")}
+            onClick={() => switchDashboardTab("conflicts")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path
@@ -1713,7 +1780,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${activeTab === "auth" ? "active" : ""}`}
-            onClick={() => setActiveTab("auth")}
+            onClick={() => switchDashboardTab("auth")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path
@@ -1733,7 +1800,7 @@ function App() {
           <button
             type="button"
             className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
-            onClick={() => setActiveTab("settings")}
+            onClick={() => switchDashboardTab("settings")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path
@@ -1807,6 +1874,14 @@ function App() {
           </div>
 
           <div className="topbar-actions">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={triggerSkeletonPreview}
+              title="預覽 Facebook 骨架屏載入效果"
+            >
+              預覽載入動畫
+            </button>
             <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
               {authStatus?.stage === "authenticated"
                 ? `已登入 (${authStatus.username ?? "User"})`
@@ -1891,8 +1966,45 @@ function App() {
         ) : null}
 
         <main className="content-scroll">
+          {/* Global Facebook-style Page Skeleton when switching tabs or initial hydration */}
+          {(initialLoading || tabSwitching) && (
+            <div className="section-stack" aria-busy="true" aria-label="功能載入中">
+              <div className="kpi-grid">
+                {[1, 2, 3, 4].map((idx) => (
+                  <div key={idx} className="kpi-card">
+                    <div className="fb-skeleton-row">
+                      <div className="fb-skeleton fb-skeleton-line w-45" />
+                      <div className="fb-skeleton fb-skeleton-pill ml-auto" />
+                    </div>
+                    <div className="fb-skeleton fb-skeleton-title w-60" />
+                    <div className="fb-skeleton fb-skeleton-line w-80" />
+                  </div>
+                ))}
+              </div>
+              <div className="two-col-grid">
+                {[1, 2].map((cardIdx) => (
+                  <div key={cardIdx} className="card">
+                    <div className="fb-skeleton-row">
+                      <div className="fb-skeleton fb-skeleton-avatar" />
+                      <div className="fb-skeleton-col" style={{ flex: 1 }}>
+                        <div className="fb-skeleton fb-skeleton-line w-45" />
+                        <div className="fb-skeleton fb-skeleton-line w-70" />
+                      </div>
+                    </div>
+                    <div className="fb-skeleton-box" />
+                    <div className="fb-skeleton-row">
+                      <div className="fb-skeleton fb-skeleton-btn-sm" />
+                      <div className="fb-skeleton fb-skeleton-btn-sm" />
+                      <div className="fb-skeleton fb-skeleton-btn-sm" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: OVERVIEW */}
-          {activeTab === "overview" && (
+          {!initialLoading && !tabSwitching && activeTab === "overview" && (
             <div className="section-stack">
               {/* KPI Summary Grid */}
               <div className="kpi-grid">
@@ -2246,7 +2358,7 @@ function App() {
           )}
 
           {/* TAB 2: OPERATIONS & WATCHER */}
-          {activeTab === "operations" && (
+          {!initialLoading && !tabSwitching && activeTab === "operations" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">
@@ -2442,7 +2554,21 @@ function App() {
                   ))}
                 </div>
 
-                {filteredOperations.length > 0 ? (
+                {opsLoading ? (
+                  <div className="fb-skeleton-table" aria-busy="true" aria-label="佇列載入中">
+                    {[1, 2, 3, 4, 5].map((row) => (
+                      <div key={row} className="fb-skeleton-table-row">
+                        <div className="fb-skeleton fb-skeleton-pill" />
+                        <div className="fb-skeleton-col" style={{ flex: 1 }}>
+                          <div className="fb-skeleton fb-skeleton-line w-45" />
+                          <div className="fb-skeleton fb-skeleton-line w-70" />
+                        </div>
+                        <div className="fb-skeleton fb-skeleton-line w-30" />
+                        <div className="fb-skeleton fb-skeleton-btn-sm" />
+                      </div>
+                    ))}
+                  </div>
+                ) : filteredOperations.length > 0 ? (
                   <div className="table-wrapper">
                     <table className="modern-table">
                       <thead>
@@ -2522,7 +2648,7 @@ function App() {
           )}
 
           {/* TAB 3: CONFLICTS */}
-          {activeTab === "conflicts" && (
+          {!initialLoading && !tabSwitching && activeTab === "conflicts" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">
@@ -2571,7 +2697,20 @@ function App() {
                   </span>
                 </div>
 
-                {conflicts.length > 0 ? (
+                {conflictsLoading ? (
+                  <div className="fb-skeleton-table" aria-busy="true" aria-label="衝突清單載入中">
+                    {[1, 2, 3].map((row) => (
+                      <div key={row} className="fb-skeleton-table-row">
+                        <div className="fb-skeleton fb-skeleton-pill" />
+                        <div className="fb-skeleton-col" style={{ flex: 1 }}>
+                          <div className="fb-skeleton fb-skeleton-line w-60" />
+                          <div className="fb-skeleton fb-skeleton-line w-80" />
+                        </div>
+                        <div className="fb-skeleton fb-skeleton-btn-sm" />
+                      </div>
+                    ))}
+                  </div>
+                ) : conflicts.length > 0 ? (
                   <div className="conflict-list">
                     {conflicts.map((conflict) => (
                       <div key={conflict.id} className="conflict-card">
@@ -2620,7 +2759,7 @@ function App() {
           )}
 
           {/* TAB 4: AUTHENTICATION & OIDC SUMMARY */}
-          {activeTab === "auth" && (
+          {!initialLoading && !tabSwitching && activeTab === "auth" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">
@@ -2686,7 +2825,7 @@ function App() {
           )}
 
           {/* TAB 5: SETTINGS & DIAGNOSTICS */}
-          {activeTab === "settings" && (
+          {!initialLoading && !tabSwitching && activeTab === "settings" && (
             <div className="section-stack">
               <div className="two-col-grid">
                 <section className="card">
@@ -2749,7 +2888,11 @@ function App() {
                       </div>
                     </form>
                   ) : (
-                    <div className="empty-state">讀取設定中...</div>
+                    <div className="fb-skeleton-container" aria-busy="true">
+                      <div className="fb-skeleton fb-skeleton-input" />
+                      <div className="fb-skeleton fb-skeleton-input" />
+                      <div className="fb-skeleton fb-skeleton-btn-sm" />
+                    </div>
                   )}
                 </section>
 
@@ -2811,7 +2954,15 @@ function App() {
                     重新整理快照
                   </button>
                 </div>
-                {snapshot ? (
+                {snapshotLoading ? (
+                  <div className="fb-skeleton-container" aria-busy="true" aria-label="快照載入中">
+                    <div className="fb-skeleton fb-skeleton-line w-60" />
+                    <div className="fb-skeleton fb-skeleton-line w-80" />
+                    <div className="fb-skeleton fb-skeleton-line w-45" />
+                    <div className="fb-skeleton fb-skeleton-line w-70" />
+                    <div className="fb-skeleton fb-skeleton-line w-30" />
+                  </div>
+                ) : snapshot ? (
                   <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
                 ) : (
                   <div className="empty-state">尚未載入系統快照。</div>

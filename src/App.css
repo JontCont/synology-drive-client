@@ -1555,6 +1555,179 @@ body {
   color: var(--accent-text);
 }
 
+/* ============================================================================
+   Facebook-Style Skeleton Shimmer Loading System (骨架屏流光載入)
+   ============================================================================ */
+:root {
+  --fb-shimmer-base: #e2e8f0;
+  --fb-shimmer-highlight: #f8fafc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fb-shimmer-base: #1e293b;
+    --fb-shimmer-highlight: #334155;
+  }
+}
+
+:root[data-theme="dark"] {
+  --fb-shimmer-base: #1e293b;
+  --fb-shimmer-highlight: #334155;
+}
+
+@keyframes fbShimmerWave {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.fb-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--fb-shimmer-base) 25%,
+    var(--fb-shimmer-highlight) 50%,
+    var(--fb-shimmer-base) 75%
+  );
+  background-size: 200% 100%;
+  animation: fbShimmerWave 1.35s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+.fb-skeleton-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 6px 0;
+}
+
+.fb-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fb-skeleton-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-skeleton-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.fb-skeleton-line {
+  height: 11px;
+  border-radius: 999px;
+}
+
+.fb-skeleton-title {
+  height: 22px;
+  border-radius: 8px;
+  margin: 4px 0;
+}
+
+.fb-skeleton-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.fb-skeleton-circle-sm {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.fb-skeleton-pill {
+  width: 64px;
+  height: 20px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.fb-skeleton-input {
+  width: 100%;
+  height: 38px;
+  border-radius: 8px;
+}
+
+.fb-skeleton-btn {
+  width: 100%;
+  height: 42px;
+  border-radius: 10px;
+}
+
+.fb-skeleton-btn-sm {
+  width: 92px;
+  height: 30px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.fb-skeleton-box {
+  width: 100%;
+  height: 84px;
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    var(--fb-shimmer-base) 25%,
+    var(--fb-shimmer-highlight) 50%,
+    var(--fb-shimmer-base) 75%
+  );
+  background-size: 200% 100%;
+  animation: fbShimmerWave 1.35s ease-in-out infinite;
+}
+
+.fb-skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.fb-skeleton-table-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+}
+
+.w-20 {
+  width: 20%;
+}
+.w-25 {
+  width: 25%;
+}
+.w-30 {
+  width: 30%;
+}
+.w-45 {
+  width: 45%;
+}
+.w-60 {
+  width: 60%;
+}
+.w-70 {
+  width: 70%;
+}
+.w-80 {
+  width: 80%;
+}
+.ml-auto {
+  margin-left: auto;
+}
+
 @media (max-width: 820px) {
   .app-shell {
     grid-template-columns: 200px 1fr;

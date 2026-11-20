@@ -60,6 +60,7 @@
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
   - [x] P1-11a 擴充快照聚合（operation/conflict 統計）
 - [x] P1-12 現代化桌面 UI 重構（側邊欄分頁導覽、總覽 KPI 儀表板、深淺色主題切換、佇列狀態篩選）
+  - [x] P1-12a Facebook 風格 Skeleton Shimmer 骨架屏載入 UI（啟動載入、功能分頁切換、表單/佇列/衝突/快照非同步操作流光佔位）
 
 ## Phase 2（Files On-Demand）
 - [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）
