@@ -484,6 +484,29 @@ pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<Ope
     Ok(Some(op))
 }
 
+pub fn has_active_operation_for_path<R: Runtime>(
+    app: &AppHandle<R>,
+    op_type: &str,
+    from_path: &str,
+) -> Result<bool, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let count: i64 = conn
+        .query_row(
+            "
+            SELECT COUNT(1)
+            FROM operations
+            WHERE op_type = ?1
+              AND from_path = ?2
+              AND stage IN ('planned', 'processing', 'retryable')
+            ",
+            params![op_type, from_path],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查詢重複 operation 失敗：{e}"))?;
+    Ok(count > 0)
+}
+
 pub fn update_operation_stage<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,

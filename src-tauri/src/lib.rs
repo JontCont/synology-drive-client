@@ -399,6 +399,9 @@ fn enqueue_paths_as_operations(
 
     let mut operation_ids = Vec::new();
     for (idx, path) in unique_paths.iter().enumerate() {
+        if storage::has_active_operation_for_path(app, "scan_local_path", path)? {
+            continue;
+        }
         let id = format!(
             "watcher-{}-{}",
             std::time::SystemTime::now()

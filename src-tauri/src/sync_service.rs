@@ -256,6 +256,9 @@ impl SyncServiceState {
 
         let mut queued = 0;
         for (idx, path) in paths.iter().enumerate() {
+            if storage::has_active_operation_for_path(app, "scan_local_path", path)? {
+                continue;
+            }
             let op = storage::NewOperation {
                 id: format!(
                     "service-{}-{}",
