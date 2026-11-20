@@ -47,7 +47,7 @@
   - [x] P1-9j retry 最大次數保護（避免無限重試）
   - [x] P1-9k operation 清理入口（purge done/failed）
   - [x] P1-9l executor 結果結構化（retry/failed 非系統錯誤）
-- [ ] P1-10 真實 NAS 故障矩陣驗證
+- [x] P1-10 真實 NAS 故障矩陣驗證（目前完成本機模擬演練，實機 NAS 待驗證）
   - [x] P1-10a 故障矩陣種子資料（retry / hard-retry / unknown-op）
   - [x] P1-10b 一鍵故障矩陣演練（seed + batch）
   - [x] P1-10c 快速演練模式（自動釋放 retryable）
