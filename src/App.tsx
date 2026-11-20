@@ -21,6 +21,16 @@ type SyncStorageInfo = {
   schemaVersion: number;
 };
 
+type SyncRootRow = {
+  id: string;
+  accountId: string;
+  localPath: string;
+  remotePath: string;
+  mode: string;
+  cursor: string | null;
+  scanGeneration: number;
+};
+
 type SyncServiceStatus = {
   running: boolean;
   intervalSeconds: number | null;
@@ -60,6 +70,7 @@ function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
+  const [syncRoot, setSyncRoot] = useState<SyncRootRow | null>(null);
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [operations, setOperations] = useState<OperationRow[]>([]);
@@ -118,6 +129,12 @@ function App() {
       .catch(() => {
         setOperations([]);
       });
+
+    invoke<SyncRootRow>("get_default_sync_root")
+      .then((row) => setSyncRoot(row))
+      .catch(() => {
+        setSyncRoot(null);
+      });
   }, []);
 
   useEffect(() => {
@@ -156,6 +173,7 @@ function App() {
         },
       });
       setConfig(next);
+      setSyncRoot(null);
       setMessage("設定已儲存。");
     } catch (err) {
       setError(String(err));
@@ -396,6 +414,21 @@ function App() {
     }
   }
 
+  async function syncDefaultRoot() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const row = await invoke<SyncRootRow>("sync_default_root_from_config");
+      setSyncRoot(row);
+      setMessage("已將設定同步到 default sync_root。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -457,6 +490,18 @@ function App() {
         <button type="button" onClick={initStorage} disabled={authLoading}>
           {authLoading ? "處理中..." : "初始化同步資料庫"}
         </button>
+        <div className="button-row">
+          <button type="button" onClick={syncDefaultRoot} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "同步 default sync_root"}
+          </button>
+        </div>
+        {syncRoot ? (
+          <p className="hint">
+            root: {syncRoot.id} / {syncRoot.localPath} ⇄ {syncRoot.remotePath}
+          </p>
+        ) : (
+          <p className="hint">尚未建立 default sync_root。</p>
+        )}
       </section>
 
       <section className="panel">

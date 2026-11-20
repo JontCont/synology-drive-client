@@ -18,6 +18,18 @@ pub struct SyncStorageInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SyncRootRow {
+    pub id: String,
+    pub account_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub mode: String,
+    pub cursor: Option<String>,
+    pub scan_generation: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperationRow {
     pub id: String,
     pub root_id: String,
@@ -69,6 +81,18 @@ fn map_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> 
         stage: row.get(6)?,
         attempts: row.get(7)?,
         updated_at: row.get(8)?,
+    })
+}
+
+fn map_sync_root_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncRootRow> {
+    Ok(SyncRootRow {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        local_path: row.get(2)?,
+        remote_path: row.get(3)?,
+        mode: row.get(4)?,
+        cursor: row.get(5)?,
+        scan_generation: row.get(6)?,
     })
 }
 
@@ -371,4 +395,50 @@ pub fn update_operation_stage<R: Runtime>(
         .map_err(|e| format!("建立 operation stage 回讀查詢失敗：{e}"))?;
     stmt.query_row([id], map_operation_row)
         .map_err(|e| format!("回讀 operation stage 失敗：{e}"))
+}
+
+pub fn upsert_default_sync_root<R: Runtime>(
+    app: &AppHandle<R>,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<SyncRootRow, String> {
+    if local_path.trim().is_empty() {
+        return Err("local_path 不可為空".to_string());
+    }
+    if remote_path.trim().is_empty() {
+        return Err("remote_path 不可為空".to_string());
+    }
+
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    conn.execute(
+        "
+        INSERT INTO sync_roots (id, account_id, local_path, remote_path, mode, cursor, scan_generation)
+        VALUES ('default-root', 'default-account', ?1, ?2, 'full', NULL, 0)
+        ON CONFLICT(id) DO UPDATE SET
+            local_path = excluded.local_path,
+            remote_path = excluded.remote_path,
+            mode = excluded.mode
+        ",
+        params![local_path, remote_path],
+    )
+    .map_err(|e| format!("寫入 sync_root 失敗：{e}"))?;
+
+    get_default_sync_root(app)
+}
+
+pub fn get_default_sync_root<R: Runtime>(app: &AppHandle<R>) -> Result<SyncRootRow, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT id, account_id, local_path, remote_path, mode, cursor, scan_generation
+            FROM sync_roots
+            WHERE id = 'default-root'
+            ",
+        )
+        .map_err(|e| format!("建立 sync_root 查詢失敗：{e}"))?;
+    stmt.query_row([], map_sync_root_row)
+        .map_err(|e| format!("查詢 default sync_root 失敗：{e}"))
 }

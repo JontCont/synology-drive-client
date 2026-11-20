@@ -18,6 +18,7 @@
 - [ ] P1-7 同步資料模型（baseline/operations/conflicts）
   - [x] P1-7a 三方比對決策模型雛形（純函式 + 單元測試）
   - [x] P1-7b SQLite schema 骨架（sync_roots/items/observations/baseline/tombstones/operations/conflicts）
+  - [x] P1-7c default sync_root 寫入/讀取（由設定檔同步到 SQLite）
 - [ ] P1-8 掃描與監看（notify + 補掃描）
   - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
   - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）

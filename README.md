@@ -29,6 +29,7 @@ This template should help get you started developing with Tauri, React and Types
   - SQLite schema bootstrap in `src-tauri/src/storage.rs`
   - commands: `init_sync_storage`, `get_sync_storage_info`
   - tables: `sync_roots`, `items`, `observations`, `baseline`, `tombstones`, `operations`, `conflicts`
+  - commands: `sync_default_root_from_config`, `get_default_sync_root`
 - Sync decision skeleton:
   - three-way comparison model in `src-tauri/src/sync_model.rs`
   - includes initial decision function (`decide_action`) and unit tests

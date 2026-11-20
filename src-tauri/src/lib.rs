@@ -62,6 +62,24 @@ fn run_sync_cycle_once(app: tauri::AppHandle) -> Result<executor::ExecutorRunRes
 }
 
 #[tauri::command]
+fn sync_default_root_from_config(app: tauri::AppHandle) -> Result<storage::SyncRootRow, String> {
+    let _ = storage::init(&app)?;
+    let cfg = config::load(&app)?;
+    let local = cfg
+        .local_sync_path
+        .ok_or_else(|| "尚未設定本機同步資料夾".to_string())?;
+    let remote = cfg
+        .remote_path
+        .ok_or_else(|| "尚未設定遠端路徑".to_string())?;
+    storage::upsert_default_sync_root(&app, &local, &remote)
+}
+
+#[tauri::command]
+fn get_default_sync_root(app: tauri::AppHandle) -> Result<storage::SyncRootRow, String> {
+    storage::get_default_sync_root(&app)
+}
+
+#[tauri::command]
 fn start_sync_service(
     app: tauri::AppHandle,
     sync_state: State<'_, sync_service::SyncServiceState>,
@@ -216,6 +234,8 @@ pub fn run() {
             list_sync_operations,
             run_sync_executor_once,
             run_sync_cycle_once,
+            sync_default_root_from_config,
+            get_default_sync_root,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
