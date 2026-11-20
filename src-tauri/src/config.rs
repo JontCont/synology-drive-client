@@ -6,6 +6,16 @@ use tauri::{AppHandle, Manager, Runtime};
 
 const CONFIG_FILE_NAME: &str = "settings.json";
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcConfig {
+    pub provider_name: Option<String>,
+    pub issuer_url: Option<String>,
+    pub client_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub scopes: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -13,6 +23,8 @@ pub struct AppConfig {
     pub remote_path: Option<String>,
     pub poll_interval_seconds: u32,
     pub ingest_backlog_limit: u32,
+    #[serde(default)]
+    pub oidc: OidcConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +34,7 @@ pub struct AppConfigUpdate {
     pub remote_path: Option<String>,
     pub poll_interval_seconds: Option<u32>,
     pub ingest_backlog_limit: Option<u32>,
+    pub oidc: Option<OidcConfig>,
 }
 
 impl Default for AppConfig {
@@ -31,6 +44,7 @@ impl Default for AppConfig {
             remote_path: None,
             poll_interval_seconds: 30,
             ingest_backlog_limit: 200,
+            oidc: OidcConfig::default(),
         }
     }
 }
@@ -85,6 +99,19 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
             None
         } else {
             Some(remote_path)
+        };
+    }
+
+    if let Some(oidc) = update.oidc {
+        let trim_opt = |v: Option<String>| -> Option<String> {
+            v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        };
+        config.oidc = OidcConfig {
+            provider_name: trim_opt(oidc.provider_name),
+            issuer_url: trim_opt(oidc.issuer_url),
+            client_id: trim_opt(oidc.client_id),
+            redirect_uri: trim_opt(oidc.redirect_uri),
+            scopes: trim_opt(oidc.scopes),
         };
     }
 

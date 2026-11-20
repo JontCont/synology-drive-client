@@ -38,6 +38,9 @@ pub struct OtpRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SsoStartRequest {
     pub entry_url: String,
+    pub client_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub scopes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,19 +104,42 @@ impl AuthState {
 
     pub fn start_sso(&self, request: SsoStartRequest) -> Result<AuthStatus, String> {
         if !request.entry_url.starts_with("https://") {
-            return Err("SSO 入口必須使用 https://".to_string());
+            return Err("OIDC / SSO 入口必須使用 https://".to_string());
+        }
+        let client_id = request
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("desktop-client");
+        let scope = request
+            .scopes
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("openid profile");
+        let mut auth_url = format!(
+            "{}?client_id={}&response_type=code&scope={}",
+            request.entry_url.trim_end_matches('/'),
+            client_id,
+            scope.replace(' ', "+")
+        );
+        if let Some(redirect) = request
+            .redirect_uri
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            auth_url.push_str(&format!("&redirect_uri={redirect}"));
         }
         let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
         *stage = AuthStage::WaitingSsoCallback;
         Ok(AuthStatus {
             stage: "waitingSsoCallback".to_string(),
             username: None,
-            method: None,
-            message: Some("請在系統瀏覽器完成登入，然後貼上 callback URL".to_string()),
-            authorization_url: Some(format!(
-                "{}?client=desktop-client&response_type=code",
-                request.entry_url.trim_end_matches('/')
-            )),
+            method: Some("oidc".to_string()),
+            message: Some("請在系統瀏覽器完成 OIDC 授權，並貼上 callback URL".to_string()),
+            authorization_url: Some(auth_url),
         })
     }
 
