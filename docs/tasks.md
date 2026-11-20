@@ -21,6 +21,7 @@
   - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
   - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）
 - [ ] P1-9 三方比對與 executor
+  - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 
 ## Phase 2（Files On-Demand）

@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use rusqlite::params;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 
 const DB_FILE_NAME: &str = "sync-state.db";
@@ -13,6 +14,32 @@ const SCHEMA_VERSION: i64 = 1;
 pub struct SyncStorageInfo {
     pub db_path: String,
     pub schema_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationRow {
+    pub id: String,
+    pub root_id: String,
+    pub item_id: Option<String>,
+    pub op_type: String,
+    pub from_path: Option<String>,
+    pub to_path: Option<String>,
+    pub stage: String,
+    pub attempts: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewOperation {
+    pub id: String,
+    pub root_id: String,
+    pub item_id: Option<String>,
+    pub op_type: String,
+    pub from_path: Option<String>,
+    pub to_path: Option<String>,
+    pub stage: Option<String>,
 }
 
 fn db_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -159,4 +186,108 @@ pub fn info<R: Runtime>(app: &AppHandle<R>) -> Result<SyncStorageInfo, String> {
         db_path: path.to_string_lossy().to_string(),
         schema_version: version,
     })
+}
+
+pub fn enqueue_operation<R: Runtime>(
+    app: &AppHandle<R>,
+    operation: NewOperation,
+) -> Result<OperationRow, String> {
+    if operation.id.trim().is_empty() {
+        return Err("operation id 不可為空".to_string());
+    }
+    if operation.root_id.trim().is_empty() {
+        return Err("root_id 不可為空".to_string());
+    }
+    if operation.op_type.trim().is_empty() {
+        return Err("op_type 不可為空".to_string());
+    }
+
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let op_id = operation.id;
+    let stage = operation.stage.unwrap_or_else(|| "planned".to_string());
+
+    conn.execute(
+        "
+        INSERT INTO operations (
+            id, root_id, item_id, op_type, from_path, to_path, stage, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+        ",
+        params![
+            op_id,
+            operation.root_id,
+            operation.item_id,
+            operation.op_type,
+            operation.from_path,
+            operation.to_path,
+            stage
+        ],
+    )
+    .map_err(|e| format!("寫入 operation 失敗：{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+            FROM operations
+            WHERE id = ?1
+            ",
+        )
+        .map_err(|e| format!("建立 operation 回讀查詢失敗：{e}"))?;
+    stmt.query_row([op_id], |row| {
+        Ok(OperationRow {
+            id: row.get(0)?,
+            root_id: row.get(1)?,
+            item_id: row.get(2)?,
+            op_type: row.get(3)?,
+            from_path: row.get(4)?,
+            to_path: row.get(5)?,
+            stage: row.get(6)?,
+            attempts: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })
+    .map_err(|e| format!("operation 建立後回讀失敗：{e}"))
+}
+
+pub fn list_operations<R: Runtime>(
+    app: &AppHandle<R>,
+    limit: u32,
+) -> Result<Vec<OperationRow>, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+            FROM operations
+            ORDER BY updated_at DESC
+            LIMIT ?1
+            ",
+        )
+        .map_err(|e| format!("建立 operation 查詢失敗：{e}"))?;
+
+    let rows = stmt
+        .query_map([limit], |row| {
+            Ok(OperationRow {
+                id: row.get(0)?,
+                root_id: row.get(1)?,
+                item_id: row.get(2)?,
+                op_type: row.get(3)?,
+                from_path: row.get(4)?,
+                to_path: row.get(5)?,
+                stage: row.get(6)?,
+                attempts: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("查詢 operation 失敗：{e}"))?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("讀取 operation 列失敗：{e}"))?);
+    }
+    Ok(result)
 }

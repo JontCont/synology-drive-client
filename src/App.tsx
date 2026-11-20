@@ -37,12 +37,25 @@ type LocalWatcherStatus = {
   lastEventPath: string | null;
 };
 
+type OperationRow = {
+  id: string;
+  rootId: string;
+  itemId: string | null;
+  opType: string;
+  fromPath: string | null;
+  toPath: string | null;
+  stage: string;
+  attempts: number;
+  updatedAt: string;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
+  const [operations, setOperations] = useState<OperationRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -59,6 +72,7 @@ function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [serviceLoading, setServiceLoading] = useState(false);
   const [watcherLoading, setWatcherLoading] = useState(false);
+  const [opsLoading, setOpsLoading] = useState(false);
 
   useEffect(() => {
     invoke<AppConfig>("get_app_config")
@@ -90,6 +104,12 @@ function App() {
       .then((value) => setWatcherStatus(value))
       .catch(() => {
         setWatcherStatus(null);
+      });
+
+    invoke<OperationRow[]>("list_sync_operations", { limit: 10 })
+      .then((rows) => setOperations(rows))
+      .catch(() => {
+        setOperations([]);
       });
   }, []);
 
@@ -300,6 +320,37 @@ function App() {
     }
   }
 
+  async function refreshOperations() {
+    const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 10 });
+    setOperations(rows);
+  }
+
+  async function addSampleOperation() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const opId = `op-${Date.now()}`;
+      await invoke<OperationRow>("enqueue_sync_operation", {
+        operation: {
+          id: opId,
+          rootId: "default-root",
+          itemId: null,
+          opType: "upload",
+          fromPath: "/sample/local.txt",
+          toPath: "/sample/remote.txt",
+          stage: "planned",
+        },
+      });
+      await refreshOperations();
+      setMessage("已新增範例 operation。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -408,6 +459,30 @@ function App() {
             重新整理監看狀態
           </button>
         </div>
+      </section>
+
+      <section className="panel">
+        <h2>操作佇列骨架</h2>
+        <p className="hint">目前筆數：{operations.length}</p>
+        <div className="button-row">
+          <button type="button" onClick={addSampleOperation} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "新增範例 operation"}
+          </button>
+          <button type="button" onClick={refreshOperations} disabled={opsLoading}>
+            重新整理 operation
+          </button>
+        </div>
+        {operations.length > 0 ? (
+          <ul className="op-list">
+            {operations.map((op) => (
+              <li key={op.id}>
+                {op.id} / {op.opType} / {op.stage} / {op.updatedAt}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="hint">目前沒有 operation。</p>
+        )}
       </section>
 
       <section className="panel">

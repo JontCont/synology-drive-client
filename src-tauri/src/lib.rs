@@ -34,6 +34,22 @@ fn get_sync_storage_info(app: tauri::AppHandle) -> Result<storage::SyncStorageIn
 }
 
 #[tauri::command]
+fn enqueue_sync_operation(
+    app: tauri::AppHandle,
+    operation: storage::NewOperation,
+) -> Result<storage::OperationRow, String> {
+    storage::enqueue_operation(&app, operation)
+}
+
+#[tauri::command]
+fn list_sync_operations(
+    app: tauri::AppHandle,
+    limit: Option<u32>,
+) -> Result<Vec<storage::OperationRow>, String> {
+    storage::list_operations(&app, limit.unwrap_or(20))
+}
+
+#[tauri::command]
 fn start_sync_service(
     app: tauri::AppHandle,
     sync_state: State<'_, sync_service::SyncServiceState>,
@@ -184,6 +200,8 @@ pub fn run() {
             update_app_config,
             init_sync_storage,
             get_sync_storage_info,
+            enqueue_sync_operation,
+            list_sync_operations,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,
