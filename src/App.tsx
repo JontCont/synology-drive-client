@@ -97,6 +97,16 @@ type PipelineRunResult = {
   message: string;
 };
 
+type PipelineBatchResult = {
+  source: string;
+  queuedCount: number;
+  steps: number;
+  processedCount: number;
+  lastOperationId: string | null;
+  lastStage: string | null;
+  message: string;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -428,6 +438,27 @@ function App() {
     }
   }
 
+  async function runPipelineBatch() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<PipelineBatchResult>("run_pipeline_batch", {
+        drainLimit: 20,
+        maxSteps: 10,
+      });
+      await refreshOperations();
+      await refreshWatcherStatus();
+      setMessage(
+        `pipeline-batch(${result.source}): queued ${result.queuedCount}, processed ${result.processedCount}/${result.steps}, last=${result.lastOperationId ?? "-"}`
+      );
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function scanLocalOnce() {
     setOpsLoading(true);
     setError(null);
@@ -728,6 +759,9 @@ function App() {
           </button>
           <button type="button" onClick={runPipelineOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "執行一次 pipeline"}
+          </button>
+          <button type="button" onClick={runPipelineBatch} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "執行 pipeline batch"}
           </button>
           <button type="button" onClick={scanLocalOnce} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "補掃描入列"}

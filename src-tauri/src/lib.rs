@@ -222,6 +222,18 @@ struct PipelineRunResult {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PipelineBatchResult {
+    source: String,
+    queued_count: usize,
+    steps: u32,
+    processed_count: u32,
+    last_operation_id: Option<String>,
+    last_stage: Option<String>,
+    message: String,
+}
+
 #[tauri::command]
 fn get_system_snapshot(
     app: tauri::AppHandle,
@@ -303,6 +315,53 @@ fn run_pipeline_once(
         operation_id: run_result.operation_id,
         source,
         message: run_result.message,
+    })
+}
+
+#[tauri::command]
+fn run_pipeline_batch(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    drain_limit: Option<u32>,
+    max_steps: Option<u32>,
+) -> Result<PipelineBatchResult, String> {
+    let _ = storage::init(&app)?;
+    let limit = drain_limit.unwrap_or(20);
+    let mut source = "watcher".to_string();
+    let mut paths = watcher_state.drain_event_paths(limit)?;
+    if paths.is_empty() {
+        source = "scanner".to_string();
+        if let Some(root) = config::load(&app)?.local_sync_path {
+            paths = scanner::collect_local_paths(&root, limit)?;
+        }
+    }
+    let operation_ids = enqueue_paths_as_operations(&app, paths)?;
+
+    let mut steps = 0;
+    let mut processed_count = 0;
+    let mut last_operation_id = None;
+    let mut last_stage = None;
+    let step_limit = max_steps.unwrap_or(5).clamp(1, 50);
+    for _ in 0..step_limit {
+        let run_result = executor::run_once(&app)?;
+        steps += 1;
+        last_operation_id = run_result.operation_id.clone();
+        last_stage = run_result.stage.clone();
+        if run_result.processed {
+            processed_count += 1;
+            continue;
+        }
+        break;
+    }
+
+    Ok(PipelineBatchResult {
+        source,
+        queued_count: operation_ids.len(),
+        steps,
+        processed_count,
+        last_operation_id,
+        last_stage,
+        message: "pipeline batch 完成".to_string(),
     })
 }
 
@@ -424,6 +483,7 @@ pub fn run() {
             drain_watcher_events_to_operations,
             scan_local_once_to_operations,
             run_pipeline_once,
+            run_pipeline_batch,
             get_auth_status,
             login_with_password,
             submit_otp,

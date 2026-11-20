@@ -44,6 +44,7 @@ This template should help get you started developing with Tauri, React and Types
   - commands: `start_local_watcher`, `stop_local_watcher`, `get_local_watcher_status`, `drain_watcher_events_to_operations`, `scan_local_once_to_operations`
   - frontend panel for watcher start/stop/status preview (auto refresh)
   - `run_pipeline_once` 會優先吃 watcher 事件，若無事件則自動 fallback 到 local scan
+  - `run_pipeline_batch` 可一次執行多步 executor（可設定 `max_steps`）
 - Operation queue skeleton:
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
   - commands: `enqueue_sync_operation`, `seed_demo_operations`, `list_sync_operations`, `retry_sync_operation`
