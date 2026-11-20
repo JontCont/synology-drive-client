@@ -15,7 +15,7 @@
 - [x] P1-4 設定檔骨架（`get_app_config` / `update_app_config`）
 - [x] P1-5 設定 UI（可修改與儲存設定）
 - [x] P1-6 認證流程骨架（帳密/OTP + SSO）
-- [ ] P1-7 同步資料模型（baseline/operations/conflicts）
+- [x] P1-7 同步資料模型（baseline/operations/conflicts）
   - [x] P1-7a 三方比對決策模型雛形（純函式 + 單元測試）
   - [x] P1-7b SQLite schema 骨架（sync_roots/items/observations/baseline/tombstones/operations/conflicts）
   - [x] P1-7c default sync_root 寫入/讀取（由設定檔同步到 SQLite）
