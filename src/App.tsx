@@ -49,6 +49,13 @@ type OperationRow = {
   updatedAt: string;
 };
 
+type ExecutorRunResult = {
+  processed: boolean;
+  operationId: string | null;
+  stage: string | null;
+  message: string;
+};
+
 function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -359,6 +366,21 @@ function App() {
     }
   }
 
+  async function runExecutorOnce() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<ExecutorRunResult>("run_sync_executor_once");
+      await refreshOperations();
+      setMessage(result.message);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   return (
     <main className="container">
       <h1>Synology Drive Client</h1>
@@ -475,6 +497,9 @@ function App() {
         <div className="button-row">
           <button type="button" onClick={addSampleOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增範例 operation"}
+          </button>
+          <button type="button" onClick={runExecutorOnce} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "執行一次 executor"}
           </button>
           <button type="button" onClick={refreshOperations} disabled={opsLoading}>
             重新整理 operation

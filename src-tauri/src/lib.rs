@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod executor;
 mod remote;
 mod storage;
 mod sync_model;
@@ -47,6 +48,11 @@ fn list_sync_operations(
     limit: Option<u32>,
 ) -> Result<Vec<storage::OperationRow>, String> {
     storage::list_operations(&app, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn run_sync_executor_once(app: tauri::AppHandle) -> Result<executor::ExecutorRunResult, String> {
+    executor::run_once(&app)
 }
 
 #[tauri::command]
@@ -202,6 +208,7 @@ pub fn run() {
             get_sync_storage_info,
             enqueue_sync_operation,
             list_sync_operations,
+            run_sync_executor_once,
             start_sync_service,
             stop_sync_service,
             get_sync_service_status,

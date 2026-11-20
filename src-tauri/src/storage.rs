@@ -58,6 +58,20 @@ fn open_connection(path: &PathBuf) -> Result<Connection, String> {
     Connection::open(path).map_err(|e| format!("開啟 SQLite 失敗：{e}"))
 }
 
+fn map_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRow> {
+    Ok(OperationRow {
+        id: row.get(0)?,
+        root_id: row.get(1)?,
+        item_id: row.get(2)?,
+        op_type: row.get(3)?,
+        from_path: row.get(4)?,
+        to_path: row.get(5)?,
+        stage: row.get(6)?,
+        attempts: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<SyncStorageInfo, String> {
     let path = db_path(app)?;
     let mut conn = open_connection(&path)?;
@@ -235,19 +249,7 @@ pub fn enqueue_operation<R: Runtime>(
             ",
         )
         .map_err(|e| format!("建立 operation 回讀查詢失敗：{e}"))?;
-    stmt.query_row([op_id], |row| {
-        Ok(OperationRow {
-            id: row.get(0)?,
-            root_id: row.get(1)?,
-            item_id: row.get(2)?,
-            op_type: row.get(3)?,
-            from_path: row.get(4)?,
-            to_path: row.get(5)?,
-            stage: row.get(6)?,
-            attempts: row.get(7)?,
-            updated_at: row.get(8)?,
-        })
-    })
+    stmt.query_row([op_id], map_operation_row)
     .map_err(|e| format!("operation 建立後回讀失敗：{e}"))
 }
 
@@ -270,19 +272,7 @@ pub fn list_operations<R: Runtime>(
         .map_err(|e| format!("建立 operation 查詢失敗：{e}"))?;
 
     let rows = stmt
-        .query_map([limit], |row| {
-            Ok(OperationRow {
-                id: row.get(0)?,
-                root_id: row.get(1)?,
-                item_id: row.get(2)?,
-                op_type: row.get(3)?,
-                from_path: row.get(4)?,
-                to_path: row.get(5)?,
-                stage: row.get(6)?,
-                attempts: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })
+        .query_map([limit], map_operation_row)
         .map_err(|e| format!("查詢 operation 失敗：{e}"))?;
 
     let mut result = Vec::new();
@@ -290,4 +280,95 @@ pub fn list_operations<R: Runtime>(
         result.push(row.map_err(|e| format!("讀取 operation 列失敗：{e}"))?);
     }
     Ok(result)
+}
+
+pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<OperationRow>, String> {
+    let path = db_path(app)?;
+    let mut conn = open_connection(&path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("建立 operation 交易失敗：{e}"))?;
+
+    let op_id: Option<String> = tx
+        .query_row(
+            "
+            SELECT id
+            FROM operations
+            WHERE stage = 'planned'
+            ORDER BY updated_at ASC
+            LIMIT 1
+            ",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let Some(op_id) = op_id else {
+        tx.commit()
+            .map_err(|e| format!("提交空 operation 交易失敗：{e}"))?;
+        return Ok(None);
+    };
+
+    tx.execute(
+        "
+        UPDATE operations
+        SET stage = 'processing',
+            attempts = attempts + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?1
+        ",
+        [&op_id],
+    )
+    .map_err(|e| format!("更新 operation 為 processing 失敗：{e}"))?;
+
+    let op = {
+        let mut stmt = tx
+            .prepare(
+                "
+                SELECT
+                    id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+                FROM operations
+                WHERE id = ?1
+                ",
+            )
+            .map_err(|e| format!("建立 claim operation 查詢失敗：{e}"))?;
+        stmt.query_row([&op_id], map_operation_row)
+            .map_err(|e| format!("讀取已 claim operation 失敗：{e}"))?
+    };
+
+    tx.commit()
+        .map_err(|e| format!("提交 operation claim 交易失敗：{e}"))?;
+    Ok(Some(op))
+}
+
+pub fn update_operation_stage<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    stage: &str,
+) -> Result<OperationRow, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    conn.execute(
+        "
+        UPDATE operations
+        SET stage = ?1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?2
+        ",
+        params![stage, id],
+    )
+    .map_err(|e| format!("更新 operation stage 失敗：{e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT
+                id, root_id, item_id, op_type, from_path, to_path, stage, attempts, updated_at
+            FROM operations
+            WHERE id = ?1
+            ",
+        )
+        .map_err(|e| format!("建立 operation stage 回讀查詢失敗：{e}"))?;
+    stmt.query_row([id], map_operation_row)
+        .map_err(|e| format!("回讀 operation stage 失敗：{e}"))
 }
