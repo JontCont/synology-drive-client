@@ -259,6 +259,9 @@ struct SystemSnapshot {
     sync_service_status: Option<sync_service::SyncServiceStatus>,
     watcher_status: Option<watcher::LocalWatcherStatus>,
     operation_count: i64,
+    operation_stage_counts: Vec<storage::OperationStageCount>,
+    conflict_count: i64,
+    conflict_status_counts: Vec<storage::ConflictStatusCount>,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,6 +306,9 @@ fn get_system_snapshot(
     let sync_service_status = sync_state.status().ok();
     let watcher_status = watcher_state.status().ok();
     let operation_count = storage::count_operations(&app).unwrap_or(0);
+    let operation_stage_counts = storage::count_operations_by_stage(&app).unwrap_or_default();
+    let conflict_count = storage::count_conflicts(&app).unwrap_or(0);
+    let conflict_status_counts = storage::count_conflicts_by_status(&app).unwrap_or_default();
 
     Ok(SystemSnapshot {
         config,
@@ -311,6 +317,9 @@ fn get_system_snapshot(
         sync_service_status,
         watcher_status,
         operation_count,
+        operation_stage_counts,
+        conflict_count,
+        conflict_status_counts,
     })
 }
 

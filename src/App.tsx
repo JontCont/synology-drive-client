@@ -109,6 +109,9 @@ type SystemSnapshot = {
   syncServiceStatus: SyncServiceStatus | null;
   watcherStatus: LocalWatcherStatus | null;
   operationCount: number;
+  operationStageCounts: OperationStageCount[];
+  conflictCount: number;
+  conflictStatusCounts: ConflictStatusCount[];
 };
 
 type WatcherDrainResult = {

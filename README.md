@@ -57,7 +57,7 @@ This template should help get you started developing with Tauri, React and Types
   - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` then succeeds, `upload_retry_hard` reaches max attempts then marks `failed`, unsupported type marks `failed` with `last_error`; all outcomes are returned as structured `ExecutorRunResult` (not treated as system error)
 - Diagnostics:
   - command: `get_system_snapshot`
-  - returns config/auth/storage/service/watcher summary and operation count in one response
+  - returns config/auth/storage/service/watcher summary, operation/conflict counts, and stage/status aggregates in one response
 
 ## Validation command
 

@@ -49,6 +49,7 @@
   - [x] P1-9l executor 結果結構化（retry/failed 非系統錯誤）
 - [ ] P1-10 真實 NAS 故障矩陣驗證
 - [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
+  - [x] P1-11a 擴充快照聚合（operation/conflict 統計）
 
 ## Phase 2（Files On-Demand）
 - [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）

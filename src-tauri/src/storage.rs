@@ -583,6 +583,13 @@ pub fn count_operations<R: Runtime>(app: &AppHandle<R>) -> Result<i64, String> {
         .map_err(|e| format!("查詢 operation 數量失敗：{e}"))
 }
 
+pub fn count_conflicts<R: Runtime>(app: &AppHandle<R>) -> Result<i64, String> {
+    let path = db_path(app)?;
+    let conn = open_connection(&path)?;
+    conn.query_row("SELECT COUNT(1) FROM conflicts", [], |row| row.get(0))
+        .map_err(|e| format!("查詢 conflict 數量失敗：{e}"))
+}
+
 pub fn count_operations_by_stage<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<OperationStageCount>, String> {
