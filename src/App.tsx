@@ -699,6 +699,21 @@ function App() {
     }
   }
 
+  async function seedFaultMatrixOperations() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const rows = await invoke<OperationRow[]>("seed_fault_matrix_operations");
+      await refreshOperations();
+      setMessage(`已新增 ${rows.length} 筆 fault matrix operations。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function runExecutorOnce() {
     setOpsLoading(true);
     setError(null);
@@ -963,6 +978,9 @@ function App() {
           </button>
           <button type="button" onClick={seedDemoOperations} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "批次新增 demo operations"}
+          </button>
+          <button type="button" onClick={seedFaultMatrixOperations} disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "灌入 fault matrix"}
           </button>
           <button type="button" onClick={addRetryableOperation} disabled={opsLoading}>
             {opsLoading ? "處理中..." : "新增 retryable operation"}

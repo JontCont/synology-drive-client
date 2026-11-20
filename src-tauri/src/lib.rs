@@ -118,6 +118,11 @@ fn seed_demo_operations(
 }
 
 #[tauri::command]
+fn seed_fault_matrix_operations(app: tauri::AppHandle) -> Result<Vec<storage::OperationRow>, String> {
+    storage::seed_fault_matrix_operations(&app)
+}
+
+#[tauri::command]
 fn retry_sync_operation(
     app: tauri::AppHandle,
     id: String,
@@ -541,6 +546,7 @@ pub fn run() {
             get_conflict_status_counts,
             purge_sync_conflicts,
             seed_demo_operations,
+            seed_fault_matrix_operations,
             list_sync_operations,
             get_operation_stage_counts,
             purge_sync_operations,

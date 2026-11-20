@@ -547,6 +547,39 @@ pub fn seed_demo_operations<R: Runtime>(
     Ok(rows)
 }
 
+pub fn seed_fault_matrix_operations<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<OperationRow>, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("取得時間戳失敗：{e}"))?
+        .as_millis();
+    let templates = [
+        ("upload_retry", "/fault/retry-local.txt", "/fault/retry-remote.txt"),
+        ("upload_retry_hard", "/fault/hard-local.txt", "/fault/hard-remote.txt"),
+        (
+            "unknown_op_for_failure",
+            "/fault/unknown-local.txt",
+            "/fault/unknown-remote.txt",
+        ),
+    ];
+
+    let mut rows = Vec::new();
+    for (idx, (op_type, from_path, to_path)) in templates.iter().enumerate() {
+        let op = NewOperation {
+            id: format!("fault-{ts}-{idx}"),
+            root_id: "default-root".to_string(),
+            item_id: None,
+            op_type: (*op_type).to_string(),
+            from_path: Some((*from_path).to_string()),
+            to_path: Some((*to_path).to_string()),
+            stage: Some("planned".to_string()),
+        };
+        rows.push(enqueue_operation(app, op)?);
+    }
+    Ok(rows)
+}
+
 pub fn list_operations<R: Runtime>(
     app: &AppHandle<R>,
     limit: u32,
