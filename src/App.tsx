@@ -41,6 +41,9 @@ type SyncServiceStatus = {
   failedCount: number;
   lastTickEpochMs: number | null;
   lastError: string | null;
+  lastOperationId: string | null;
+  lastStage: string | null;
+  lastMessage: string | null;
 };
 
 type LocalWatcherStatus = {
@@ -661,6 +664,13 @@ function App() {
           </p>
         ) : null}
         {serviceStatus?.lastError ? <p className="error">{serviceStatus.lastError}</p> : null}
+        {serviceStatus?.lastMessage ? (
+          <p className="hint">
+            最後結果：{serviceStatus.lastMessage}
+            {serviceStatus.lastOperationId ? ` / op: ${serviceStatus.lastOperationId}` : ""}
+            {serviceStatus.lastStage ? ` / stage: ${serviceStatus.lastStage}` : ""}
+          </p>
+        ) : null}
         <div className="button-row">
           <button type="button" onClick={startService} disabled={serviceLoading}>
             {serviceLoading ? "處理中..." : "啟動同步服務"}

@@ -16,6 +16,9 @@ struct ServiceMetrics {
     failed_count: u64,
     last_tick_at: Option<SystemTime>,
     last_error: Option<String>,
+    last_operation_id: Option<String>,
+    last_stage: Option<String>,
+    last_message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -45,6 +48,9 @@ pub struct SyncServiceStatus {
     pub failed_count: u64,
     pub last_tick_epoch_ms: Option<u128>,
     pub last_error: Option<String>,
+    pub last_operation_id: Option<String>,
+    pub last_stage: Option<String>,
+    pub last_message: Option<String>,
 }
 
 impl SyncServiceState {
@@ -107,9 +113,13 @@ impl SyncServiceState {
                                             m.processed_count += 1;
                                         }
                                         m.last_error = None;
+                                        m.last_operation_id = run_result.operation_id;
+                                        m.last_stage = run_result.stage;
+                                        m.last_message = Some(run_result.message);
                                     }
                                     Err(err) => {
                                         m.failed_count += 1;
+                                        m.last_message = Some(err.clone());
                                         m.last_error = Some(err);
                                     }
                                 }
@@ -177,6 +187,9 @@ impl SyncServiceState {
                     .and_then(|it| it.duration_since(SystemTime::UNIX_EPOCH).ok())
                     .map(|it| it.as_millis()),
                 last_error: metrics.last_error.clone(),
+                last_operation_id: metrics.last_operation_id.clone(),
+                last_stage: metrics.last_stage.clone(),
+                last_message: metrics.last_message.clone(),
             })
         } else {
             Ok(SyncServiceStatus {
@@ -189,6 +202,9 @@ impl SyncServiceState {
                 failed_count: 0,
                 last_tick_epoch_ms: None,
                 last_error: None,
+                last_operation_id: None,
+                last_stage: None,
+                last_message: None,
             })
         }
     }

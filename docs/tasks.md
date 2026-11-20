@@ -23,6 +23,7 @@
   - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
   - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）
   - [x] P1-8c watcher 事件轉入 operation 佇列
+  - [x] P1-8d 同步服務 tick 結果回報（lastMessage / lastOperationId / lastStage）
 - [ ] P1-9 三方比對與 executor
   - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
   - [x] P1-9b executor 單步執行骨架（claim planned → done）
