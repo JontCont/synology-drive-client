@@ -38,6 +38,7 @@ type SyncServiceStatus = {
   remotePath: string | null;
   tickCount: number;
   queuedCount: number;
+  ingestSkippedCount: number;
   processedCount: number;
   failedCount: number;
   retryScheduledCount: number;
@@ -768,6 +769,7 @@ function App() {
           {serviceStatus?.processedCount ?? 0} / retry:{" "}
           {serviceStatus?.retryScheduledCount ?? 0} / failed: {serviceStatus?.failedCount ?? 0}
         </p>
+        <p className="hint">ingest skipped: {serviceStatus?.ingestSkippedCount ?? 0}</p>
         {serviceStatus?.lastTickEpochMs ? (
           <p className="hint">
             最後 tick：{new Date(serviceStatus.lastTickEpochMs).toLocaleString()}

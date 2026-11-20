@@ -28,6 +28,7 @@
   - [x] P1-8f pipeline ingest fallback（watcher 無事件時改用 scanner）
   - [x] P1-8g pipeline batch 執行（單次多步 executor）
   - [x] P1-8h sync service 自動 ingest（每 tick watcher/scanner 入列）
+  - [x] P1-8i ingest backlog guard（pending 過高時暫停入列）
 - [ ] P1-9 三方比對與 executor
   - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
   - [x] P1-9b executor 單步執行骨架（claim planned → done）

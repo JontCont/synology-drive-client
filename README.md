@@ -37,7 +37,8 @@ This template should help get you started developing with Tauri, React and Types
   - background loop state in `src-tauri/src/sync_service.rs`
   - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
   - each tick runs ingest + one executor step (`storage::init` + watcher/scanner ingest + `executor::run_once`)
-  - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`) and counters (`queuedCount`, `processedCount`, `retryScheduledCount`, `failedCount`)
+  - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`) and counters (`queuedCount`, `ingestSkippedCount`, `processedCount`, `retryScheduledCount`, `failedCount`)
+  - ingest has backlog guard: when pending (`planned/processing/retryable`) reaches threshold, skip new ingestion
   - frontend panel for start/stop/status preview (auto refresh)
 - Local watcher skeleton:
   - notify-based watcher state in `src-tauri/src/watcher.rs`

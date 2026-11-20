@@ -16,6 +16,7 @@ use crate::watcher;
 struct ServiceMetrics {
     tick_count: u64,
     queued_count: u64,
+    ingest_skipped_count: u64,
     processed_count: u64,
     failed_count: u64,
     retry_scheduled_count: u64,
@@ -50,6 +51,7 @@ pub struct SyncServiceStatus {
     pub remote_path: Option<String>,
     pub tick_count: u64,
     pub queued_count: u64,
+    pub ingest_skipped_count: u64,
     pub processed_count: u64,
     pub failed_count: u64,
     pub retry_scheduled_count: u64,
@@ -113,7 +115,11 @@ impl SyncServiceState {
                                 let _ = storage::init(&app_for_thread)?;
                                 let queued = Self::ingest_once(&app_for_thread)?;
                                 if let Ok(mut m) = metrics_for_thread.lock() {
-                                    m.queued_count += queued as u64;
+                                    if queued == 0 {
+                                        m.ingest_skipped_count += 1;
+                                    } else {
+                                        m.queued_count += queued as u64;
+                                    }
                                 }
                                 executor::run_once(&app_for_thread)
                             })();
@@ -198,6 +204,7 @@ impl SyncServiceState {
                 remote_path: Some(running.remote_path.clone()),
                 tick_count: metrics.tick_count,
                 queued_count: metrics.queued_count,
+                ingest_skipped_count: metrics.ingest_skipped_count,
                 processed_count: metrics.processed_count,
                 failed_count: metrics.failed_count,
                 retry_scheduled_count: metrics.retry_scheduled_count,
@@ -218,6 +225,7 @@ impl SyncServiceState {
                 remote_path: None,
                 tick_count: 0,
                 queued_count: 0,
+                ingest_skipped_count: 0,
                 processed_count: 0,
                 failed_count: 0,
                 retry_scheduled_count: 0,
@@ -231,6 +239,10 @@ impl SyncServiceState {
     }
 
     fn ingest_once(app: &AppHandle) -> Result<usize, String> {
+        if Self::pending_backlog_count(app)? >= 200 {
+            return Ok(0);
+        }
+
         let watcher_state = app.state::<watcher::LocalWatcherState>();
         let mut paths = watcher_state.drain_event_paths(20)?;
         if paths.is_empty() {
@@ -264,5 +276,14 @@ impl SyncServiceState {
             queued += 1;
         }
         Ok(queued)
+    }
+
+    fn pending_backlog_count(app: &AppHandle) -> Result<i64, String> {
+        let stage_counts = storage::count_operations_by_stage(app)?;
+        Ok(stage_counts
+            .into_iter()
+            .filter(|it| matches!(it.stage.as_str(), "planned" | "processing" | "retryable"))
+            .map(|it| it.count)
+            .sum())
     }
 }
