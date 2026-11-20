@@ -18,6 +18,9 @@ This template should help get you started developing with Tauri, React and Types
   - file location: app config directory `settings.json`
   - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`
   - frontend has a basic settings form for editing/saving these fields
+- Remote contract skeleton:
+  - `RemoteProvider` trait and in-memory `FakeRemote` in `src-tauri/src/remote.rs`
+  - includes basic list/stat/read/write/delete/move/mkdir operations for contract testing
 
 ## Recommended IDE Setup
 
