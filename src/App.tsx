@@ -94,6 +94,7 @@ function App() {
   const [serviceLoading, setServiceLoading] = useState(false);
   const [watcherLoading, setWatcherLoading] = useState(false);
   const [opsLoading, setOpsLoading] = useState(false);
+  const [retryOpId, setRetryOpId] = useState("");
 
   useEffect(() => {
     invoke<AppConfig>("get_app_config")
@@ -417,6 +418,26 @@ function App() {
     }
   }
 
+  async function retryOperation(event: React.FormEvent) {
+    event.preventDefault();
+    if (!retryOpId.trim()) {
+      setError("請輸入 operation id。");
+      return;
+    }
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await invoke<OperationRow>("retry_sync_operation", { id: retryOpId.trim() });
+      await refreshOperations();
+      setMessage("operation 已重設為 planned。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
   async function syncDefaultRoot() {
     setOpsLoading(true);
     setError(null);
@@ -587,6 +608,19 @@ function App() {
         ) : (
           <p className="hint">目前沒有 operation。</p>
         )}
+        <form className="config-form inline-form" onSubmit={retryOperation}>
+          <label>
+            重試 operation id
+            <input
+              value={retryOpId}
+              onChange={(event) => setRetryOpId(event.currentTarget.value)}
+              placeholder="例如 op-1730000000000"
+            />
+          </label>
+          <button type="submit" disabled={opsLoading}>
+            {opsLoading ? "處理中..." : "重設為 planned"}
+          </button>
+        </form>
       </section>
 
       <section className="panel">

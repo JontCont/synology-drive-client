@@ -51,6 +51,17 @@ fn list_sync_operations(
 }
 
 #[tauri::command]
+fn retry_sync_operation(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<storage::OperationRow, String> {
+    if id.trim().is_empty() {
+        return Err("operation id 不可為空".to_string());
+    }
+    storage::update_operation_stage(&app, &id, "planned")
+}
+
+#[tauri::command]
 fn run_sync_executor_once(app: tauri::AppHandle) -> Result<executor::ExecutorRunResult, String> {
     executor::run_once(&app)
 }
@@ -233,6 +244,7 @@ pub fn run() {
             get_sync_storage_info,
             enqueue_sync_operation,
             list_sync_operations,
+            retry_sync_operation,
             run_sync_executor_once,
             run_sync_cycle_once,
             sync_default_root_from_config,

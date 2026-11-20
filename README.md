@@ -44,7 +44,7 @@ This template should help get you started developing with Tauri, React and Types
   - frontend panel for watcher start/stop/status preview (auto refresh)
 - Operation queue skeleton:
   - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
-  - commands: `enqueue_sync_operation`, `list_sync_operations`
+  - commands: `enqueue_sync_operation`, `list_sync_operations`, `retry_sync_operation`
   - frontend panel to add sample operation and preview recent rows
 - Executor skeleton:
   - single-step executor in `src-tauri/src/executor.rs`
