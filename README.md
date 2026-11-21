@@ -98,6 +98,12 @@ GitHub Actions workflows are configured under `.github/workflows/`:
 - [Multi-Language (i18n) Plan](docs/i18n-plan.md)
 - [Architecture & Development Plan](docs/plan.md)
 
+### Linux GLib security backport
+
+Linux GTK/WebKit dependencies still require GLib 0.18. This project vendors the official MIT-licensed `glib` 0.18.5 crate and backports the upstream fix for **RUSTSEC-2024-0429**, without changing its public API. Cargo uses the local patched source; Linux CI tests the affected iterators with release optimizations enabled.
+
+Version-only scanners may still flag 0.18.5. See the [security audit](docs/security-audit.md#linux-glib-rustsec-2024-0429) for provenance, verification commands, and removal conditions. Do not remove the patch or dismiss the alert solely because Windows does not use GLib.
+
 ---
 
 ## License

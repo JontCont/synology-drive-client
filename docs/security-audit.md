@@ -111,3 +111,34 @@ npm run tauri -- build --debug --no-bundle
 - Git ignore 斷言通過：拒絕納入本機秘密／暫存，保留範例、公開簽章與 fixture。
 - 前端以假的 Tauri bridge 驗證通過：登入失敗及轉入 OTP 時清空密碼、OTP 失敗清空驗證碼、取消失敗仍清空欄位並顯示錯誤；HTTP NAS／區網設定在測試與儲存前被拒絕且不呼叫後端；HTTPS 設定可儲存且不登出；正式版不顯示開發工具。
 - 未使用真實 NAS 或執行同步操作；Windows 同步根註冊與回收筒測試維持既有 `ignored` 狀態，避免副作用。
+
+## Linux GLib RUSTSEC-2024-0429
+
+Dependabot 的 [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g) 是真實的相依套件漏洞，分級 **Medium**；不是 glib 0.18.5 的版本誤判。`VariantStrIter` 將不可變的 `&p` 傳給會修改指標的 C 函式，造成未定義行為，最佳化建置可能發生 NULL 解參照。尚未建立本應用程式的可利用呼叫路徑，不應宣稱已造成 RCE。
+
+- Windows 的應用程式相依圖不包含 GLib；Linux 的 Tauri → GTK／WebKit（另有 tray → libappindicator）相依鏈則包含它。本專案 CI 與發布流程包含 Linux，不能只以 Windows 不受影響結案。
+- 官方修補版本為 `>=0.20.0`，但 GTK／WebKit 的 0.18 相依要求不允許直接替換成 0.20。額外加入新版也不會移除舊版。
+- 採用本地回植：原始碼來自 crates.io 官方 `glib` 0.18.5 套件，SHA-256 為 `233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5`，與原本 lockfile 的 checksum 相符；保留原 MIT 授權與作者資訊，不使用第三方 fork。
+- 回植 [gtk-rs/gtk-rs-core#1343](https://github.com/gtk-rs/gtk-rs-core/pull/1343)，上游修正 commit 為 `b5a4071e439bef2b5eea76c3aa25e5ae84839e34`。正式碼僅將指標宣告改為 `let mut p`，並以 `&mut p` 傳入；另加入雙向字串迭代回歸測試。其他上游程式碼與 public API 不變。
+- [Cargo.toml](../src-tauri/Cargo.toml) 的 `[patch.crates-io]` 指向 [本地 GLib](../src-tauri/vendor/glib-0.18.5/)，整個相依鏈使用同一個已修補的 0.18.5；不是修改套件版本號偽裝升級，也不是關閉最佳化。
+- Linux CI 對本地 GLib 執行 `--release` 迭代器測試，使用獨立的測試 lockfile；一般應用程式的相依版本由原本的 app lockfile 管理。
+
+驗證命令：
+
+```powershell
+cargo tree --manifest-path src-tauri\Cargo.toml --locked --target x86_64-unknown-linux-gnu -i glib
+cargo tree --manifest-path src-tauri\Cargo.toml --locked --target x86_64-pc-windows-msvc -i glib
+cargo test --manifest-path src-tauri\vendor\glib-0.18.5\Cargo.toml --locked --release --lib variant_iter
+```
+
+最後一項需在有 GLib 開發套件的 Linux 環境執行。已在 Ubuntu 22.04、Rust 1.91.1 驗證：
+
+- 未修改的官方 0.18.5 在 `--release` 的 `variant_iter::tests::test_variant_iter_array` 測試重現 SIGSEGV；使用隔離測試原始碼且停用 core dump，不操作 NAS 或應用程式資料。
+- 本地修補版的 12 項 `variant_iter` 測試全部通過，涵蓋正向、反向、`nth`、`nth_back`、`last` 與耗盡情況。沿用上游既有的 34 個 compiler warnings，不以關閉警告或降低最佳化來處理漏洞。
+- Linux 的所有 GLib 相依均指向本地修補來源；Windows 應用程式圖仍不包含 GLib。
+- 完整 Linux 後端 `cargo check --locked --lib` 通過（含既有 compiler warnings）；未宣稱已測試 Linux 安裝包或真實 NAS。
+- Windows 後端測試：66 passed、0 failed、2 ignored；`cargo check --locked --release --lib` 通過。應用程式 lockfile 只有 GLib 的來源改變，其他相依版本均未升級。
+
+**Dependabot 處置：** 本地修補仍保留 `0.18.5` 的相容版本號，版本型掃描可能繼續提出警示。必須附上實際 Cargo 來源、上游修正與最佳化測試的證據才可說明已回植修復；不能把受影響的上游套件標成安全，也不新增全域 advisory ignore 規則。
+
+**移除條件：** 當穩定版 Tauri／GTK／WebKit 可以整體使用官方 `glib >=0.20.0`，更新並驗證相依鏈後，再刪除本地 patch、vendor 與專用回歸測試步驟。其他 GLib 漏洞仍需各自評估；此回植僅修復本 advisory。

@@ -31,6 +31,10 @@ tauri-plugin-dialog = "2"
 chrono = "0.4.45"
 trash = "5.4.0"
 
+[patch.crates-io]
+# Backport RUSTSEC-2024-0429 without changing GTK/WebKit's glib 0.18 API.
+glib = { path = "vendor/glib-0.18.5" }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
