@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod downloader;
 mod executor;
 mod remote;
 mod scanner;
@@ -505,12 +506,19 @@ async fn add_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
+    download_state: State<'_, downloader::DownloadState>,
     local_path: String,
     remote_path: String,
     mode: String,
 ) -> Result<config::AppConfig, String> {
     let cfg = config::add_folder(&app, &local_path, &remote_path, &mode)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
+    // 新增後立刻開始初次下載（僅上傳模式不從 NAS 下載）
+    if let Some(folder) = cfg.sync_folders.last() {
+        if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
+            let _ = download_state.start(&app, &folder.id);
+        }
+    }
     Ok(cfg)
 }
 
@@ -519,12 +527,22 @@ async fn update_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
+    download_state: State<'_, downloader::DownloadState>,
     id: String,
     mode: Option<String>,
     paused: Option<bool>,
 ) -> Result<config::AppConfig, String> {
-    let cfg = config::update_folder(&app, &id, mode, paused)?;
+    let cfg = config::update_folder(&app, &id, mode.clone(), paused)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
+    if paused == Some(true) {
+        download_state.cancel(&id);
+    }
+    // 繼續同步或切換成會下載的模式時，補做一次下載
+    if paused == Some(false) || mode.is_some() {
+        if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
+            let _ = download_state.start(&app, &id);
+        }
+    }
     Ok(cfg)
 }
 
@@ -533,11 +551,38 @@ async fn remove_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
+    download_state: State<'_, downloader::DownloadState>,
     id: String,
 ) -> Result<config::AppConfig, String> {
+    download_state.cancel(&id);
     let cfg = config::remove_folder(&app, &id)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     Ok(cfg)
+}
+
+#[tauri::command]
+async fn start_folder_download(
+    app: tauri::AppHandle,
+    auth_state: State<'_, auth::AuthState>,
+    download_state: State<'_, downloader::DownloadState>,
+    id: String,
+) -> Result<(), String> {
+    if auth_state.status()?.stage != "authenticated" {
+        return Err("請先登入 NAS".to_string());
+    }
+    download_state.start(&app, &id)
+}
+
+#[tauri::command]
+fn cancel_folder_download(download_state: State<'_, downloader::DownloadState>, id: String) {
+    download_state.cancel(&id);
+}
+
+#[tauri::command]
+fn get_download_progress(
+    download_state: State<'_, downloader::DownloadState>,
+) -> Vec<downloader::DownloadProgress> {
+    download_state.snapshot()
 }
 
 #[tauri::command]
@@ -637,8 +682,10 @@ async fn logout(
     auth_state: State<'_, auth::AuthState>,
     sync_state: State<'_, sync_service::SyncServiceState>,
     watcher_state: State<'_, watcher::LocalWatcherState>,
+    download_state: State<'_, downloader::DownloadState>,
 ) -> Result<auth::AuthStatus, String> {
     // 登出後不應在背景繼續同步
+    download_state.cancel_all();
     let _ = sync_state.stop();
     let _ = watcher_state.stop();
     auth_state.logout()
@@ -1043,6 +1090,7 @@ pub fn run() {
         .manage(auth::AuthState::new())
         .manage(sync_service::SyncServiceState::new())
         .manage(watcher::LocalWatcherState::new())
+        .manage(downloader::DownloadState::new())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -1094,6 +1142,9 @@ pub fn run() {
             pick_local_folder,
             add_sync_folder,
             ensure_local_watcher,
+            start_folder_download,
+            cancel_folder_download,
+            get_download_progress,
             update_sync_folder,
             remove_sync_folder,
             list_nas_folders,

@@ -39,6 +39,32 @@ type NasProbeResult = {
   message: string;
 };
 
+type DownloadProgress = {
+  folderId: string;
+  phase: "listing" | "downloading" | "done" | "cancelled" | "error" | string;
+  totalFiles: number;
+  doneFiles: number;
+  skippedFiles: number;
+  conflictCopies: number;
+  failedFiles: number;
+  totalBytes: number;
+  doneBytes: number;
+  currentFile: string | null;
+  lastError: string | null;
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
 // 以下路徑比對規則需與後端 config.rs 的 validate_new_folder 保持一致（後端為最終把關）
 const normalizeLocalPath = (p: string) =>
   p.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -315,6 +341,7 @@ function App() {
   const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [folderBusy, setFolderBusy] = useState(false);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState("30");
   const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
@@ -466,9 +493,48 @@ function App() {
     const timer = window.setInterval(() => {
       refreshServiceStatus().catch(() => undefined);
       refreshWatcherStatus().catch(() => undefined);
+      refreshDownloads().catch(() => undefined);
     }, 2000);
     return () => window.clearInterval(timer);
   }, []);
+
+  // 下載進度：偵測「進行中 → 結束」的變化並以 toast 通知
+  const previousDownloadPhases = useRef<Map<string, string>>(new Map());
+  const configRef = useRef<AppConfig | null>(null);
+  configRef.current = config;
+  async function refreshDownloads() {
+    const list = await invoke<DownloadProgress[]>("get_download_progress");
+    setDownloads(list);
+    for (const item of list) {
+      const prev = previousDownloadPhases.current.get(item.folderId);
+      previousDownloadPhases.current.set(item.folderId, item.phase);
+      const wasRunning = prev === "listing" || prev === "downloading";
+      if (!wasRunning || item.phase === "listing" || item.phase === "downloading") continue;
+      const name = configRef.current?.syncFolders.find((f) => f.id === item.folderId)?.name ?? "資料夾";
+      if (item.phase === "done" && item.failedFiles === 0) {
+        setMessage(`「${name}」已從 NAS 同步完成：下載 ${item.doneFiles} 個檔案`);
+      } else if (item.phase === "done") {
+        setWarning(`「${name}」同步完成，但有 ${item.failedFiles} 個檔案下載失敗`);
+      } else if (item.phase === "error") {
+        setError(`「${name}」下載失敗：${item.lastError ?? "未知錯誤"}`);
+      }
+    }
+  }
+
+  async function startFolderDownload(id: string) {
+    setError(null);
+    try {
+      await invoke("start_folder_download", { id });
+      await refreshDownloads();
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function cancelFolderDownload(id: string) {
+    await invoke("cancel_folder_download", { id }).catch((err) => setError(String(err)));
+    await refreshDownloads().catch(() => undefined);
+  }
 
   useEffect(() => {
     if (viewMode === "dashboard" && !isAuthenticated) {
@@ -3319,8 +3385,80 @@ function App() {
                               </span>
                               <span>{folder.remotePath}</span>
                             </div>
+                            {(() => {
+                              const dl = downloads.find((d) => d.folderId === folder.id);
+                              if (!dl) return null;
+                              const running = dl.phase === "listing" || dl.phase === "downloading";
+                              const handled = dl.doneFiles + dl.skippedFiles + dl.failedFiles;
+                              const percent =
+                                dl.totalFiles > 0
+                                  ? Math.min(100, Math.round((handled / dl.totalFiles) * 100))
+                                  : 0;
+                              return (
+                                <div className="download-status">
+                                  {running ? (
+                                    <div className="download-bar" aria-hidden="true">
+                                      <div
+                                        className={`download-bar-fill ${
+                                          dl.phase === "listing" ? "indeterminate" : ""
+                                        }`}
+                                        style={
+                                          dl.phase === "listing" ? undefined : { width: `${percent}%` }
+                                        }
+                                      />
+                                    </div>
+                                  ) : null}
+                                  <div className="download-text">
+                                    {dl.phase === "listing"
+                                      ? `正在讀取 NAS 檔案清單…（已發現 ${dl.totalFiles} 個檔案）`
+                                      : dl.phase === "downloading"
+                                        ? `從 NAS 下載中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}`
+                                        : dl.phase === "cancelled"
+                                          ? `已取消（已下載 ${dl.doneFiles} 個檔案）`
+                                          : dl.phase === "error"
+                                            ? `下載失敗：${dl.lastError ?? "未知錯誤"}`
+                                            : `已同步：下載 ${dl.doneFiles} 個、略過 ${dl.skippedFiles} 個${
+                                                dl.conflictCopies > 0
+                                                  ? `、衝突副本 ${dl.conflictCopies} 個`
+                                                  : ""
+                                              }${dl.failedFiles > 0 ? `、失敗 ${dl.failedFiles} 個` : ""}`}
+                                  </div>
+                                  {running && dl.currentFile ? (
+                                    <div className="download-current mono">{dl.currentFile}</div>
+                                  ) : null}
+                                  {!running && dl.failedFiles > 0 && dl.lastError ? (
+                                    <div className="download-current">最近錯誤：{dl.lastError}</div>
+                                  ) : null}
+                                </div>
+                              );
+                            })()}
                           </div>
                           <div className="folder-row-actions">
+                            {(() => {
+                              const dl = downloads.find((d) => d.folderId === folder.id);
+                              const running = dl?.phase === "listing" || dl?.phase === "downloading";
+                              if (running) {
+                                return (
+                                  <button
+                                    type="button"
+                                    className="btn btn-outline-danger btn-sm"
+                                    onClick={() => cancelFolderDownload(folder.id)}
+                                  >
+                                    取消下載
+                                  </button>
+                                );
+                              }
+                              return folder.mode !== "upload_only" && !folder.paused ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  disabled={folderBusy}
+                                  onClick={() => startFolderDownload(folder.id)}
+                                >
+                                  立即同步
+                                </button>
+                              ) : null;
+                            })()}
                             <select
                               className="input folder-mode-select"
                               value={folder.mode}

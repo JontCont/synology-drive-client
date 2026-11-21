@@ -41,6 +41,25 @@ pub trait AuthBackendAdapter: Send + Sync {
     fn list_remote_folders(&self, _path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
         Err("目前的認證方式不支援瀏覽 NAS 資料夾".to_string())
     }
+
+    /// 列出 NAS 資料夾底下的所有項目（檔案與資料夾，含分頁）
+    fn list_remote_entries(&self, _path: &str) -> Result<Vec<RemoteEntry>, String> {
+        Err("目前的認證方式不支援列出 NAS 檔案".to_string())
+    }
+
+    /// 下載 NAS 上的檔案並寫入 `dest`，回傳位元組數
+    fn download_remote_file(&self, _remote_path: &str, _dest: &std::path::Path) -> Result<u64, String> {
+        Err("目前的認證方式不支援下載 NAS 檔案".to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -153,6 +172,32 @@ fn parse_drive_folder_items(data: &serde_json::Value, parent: &str) -> Vec<Remot
         .unwrap_or_default();
     folders.sort_by_key(|f| f.name.to_lowercase());
     folders
+}
+
+/// 解析 `SYNO.SynologyDrive.Files list` 回應中的所有項目（檔案與資料夾）
+fn parse_drive_entries(data: &serde_json::Value, parent: &str) -> Vec<RemoteEntry> {
+    data.get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name").and_then(|n| n.as_str())?;
+                    let is_dir = item.get("type").and_then(|t| t.as_str()) == Some("dir");
+                    let size = item
+                        .get("size")
+                        .and_then(|s| s.as_u64())
+                        .or_else(|| item.pointer("/content/size").and_then(|s| s.as_u64()));
+                    Some(RemoteEntry {
+                        name: name.to_string(),
+                        path: join_remote_path(parent, name),
+                        is_dir,
+                        size,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 解析 `SYNO.SynologyDrive.TeamFolders list` 回應
@@ -272,6 +317,8 @@ struct RemoteSession {
 /// 伺服器回 error 403 代表需要 OTP，之後以相同帳密 + otp_code 重送。
 pub struct DsmAuthAdapter {
     agent: ureq::Agent,
+    /// 下載大檔不能受整體逾時限制，只限制連線與等待回應
+    download_agent: ureq::Agent,
     pending: Mutex<HashMap<String, PendingLogin>>,
     session: Mutex<Option<RemoteSession>>,
 }
@@ -283,8 +330,15 @@ impl DsmAuthAdapter {
             .http_status_as_error(false)
             .build()
             .into();
+        let download_agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build()
+            .into();
         Self {
             agent,
+            download_agent,
             pending: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
         }
@@ -335,6 +389,7 @@ impl DsmAuthAdapter {
     fn describe_failure(err: &DsmError) -> String {
         match err.code {
             119 => "NAS 登入已過期，請重新登入".to_string(),
+            -3 => "無法寫入本機檔案（權限不足、磁碟已滿或路徑無效）".to_string(),
             -1 => "伺服器回應格式不正確，請確認 NAS 主機位址是否為 DSM".to_string(),
             -2 => "無法連線到 NAS（網路錯誤、逾時或憑證無效），請檢查主機位址".to_string(),
             _ => err.message(),
@@ -372,19 +427,20 @@ impl DsmAuthAdapter {
         parse_dsm_data_response(&body)
     }
 
-    fn list_drive_directory(
+    fn list_drive_data(
         &self,
         origin: &str,
         sid: &str,
         path: &str,
-    ) -> Result<Vec<RemoteFolderEntry>, DsmError> {
+        offset: u32,
+    ) -> Result<serde_json::Value, DsmError> {
         let build = |path_param: String| {
             vec![
                 ("api", "SYNO.SynologyDrive.Files".to_string()),
                 ("version", "2".to_string()),
                 ("method", "list".to_string()),
                 ("path", path_param),
-                ("offset", "0".to_string()),
+                ("offset", offset.to_string()),
                 ("limit", DSM_LIST_LIMIT.to_string()),
                 ("sort_by", "\"name\"".to_string()),
                 ("sort_direction", "\"asc\"".to_string()),
@@ -392,12 +448,79 @@ impl DsmAuthAdapter {
         };
         // 此 API 的 requestFormat 為 JSON，字串需帶引號；失敗時退回不帶引號的寫法
         let quoted = serde_json::to_string(path).unwrap_or_else(|_| format!("\"{path}\""));
-        let data = match self.call_entry_api(origin, sid, &build(quoted)) {
-            Ok(data) => data,
-            Err(err) if err.code == 119 || err.code == -2 => return Err(err),
-            Err(_) => self.call_entry_api(origin, sid, &build(path.to_string()))?,
-        };
+        match self.call_entry_api(origin, sid, &build(quoted)) {
+            Ok(data) => Ok(data),
+            Err(err) if err.code == 119 || err.code == -2 => Err(err),
+            Err(_) => self.call_entry_api(origin, sid, &build(path.to_string())),
+        }
+    }
+
+    fn list_drive_directory(
+        &self,
+        origin: &str,
+        sid: &str,
+        path: &str,
+    ) -> Result<Vec<RemoteFolderEntry>, DsmError> {
+        let data = self.list_drive_data(origin, sid, path, 0)?;
         Ok(parse_drive_folder_items(&data, path))
+    }
+
+    fn list_drive_entries(
+        &self,
+        origin: &str,
+        sid: &str,
+        path: &str,
+    ) -> Result<Vec<RemoteEntry>, DsmError> {
+        let mut all = Vec::new();
+        let mut offset = 0u32;
+        loop {
+            let data = self.list_drive_data(origin, sid, path, offset)?;
+            let page = parse_drive_entries(&data, path);
+            let count = page.len() as u32;
+            all.extend(page);
+            if count < DSM_LIST_LIMIT {
+                return Ok(all);
+            }
+            offset += count;
+        }
+    }
+
+    /// 下載檔案內容到 `dest`；回應若是 JSON 代表 DSM 回報錯誤
+    fn fetch_drive_file(
+        &self,
+        origin: &str,
+        sid: &str,
+        path_param: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, DsmError> {
+        let url = format!("{origin}/webapi/entry.cgi");
+        let mut response = self
+            .download_agent
+            .get(&url)
+            .query("api", "SYNO.SynologyDrive.Files")
+            .query("version", "2")
+            .query("method", "download")
+            .query("path", path_param)
+            .query("_sid", sid)
+            .call()
+            .map_err(|_| DsmError { code: -2 })?;
+
+        let is_json = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("json"));
+        if is_json || !response.status().is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return match parse_dsm_data_response(&body) {
+                Ok(_) => Err(DsmError { code: -1 }),
+                Err(err) => Err(err),
+            };
+        }
+
+        let mut file = std::fs::File::create(dest).map_err(|_| DsmError { code: -3 })?;
+        std::io::copy(&mut response.body_mut().as_reader(), &mut file)
+            .map_err(|_| DsmError { code: -2 })
     }
 }
 
@@ -542,6 +665,29 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         }
         self.list_drive_directory(&origin, &sid, normalized)
             .map_err(|err| Self::describe_failure(&err))
+    }
+
+    fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
+        let (origin, sid) = self.current_session()?;
+        let normalized = path.trim().trim_end_matches('/');
+        if !normalized.starts_with('/') || normalized.split('/').any(|seg| seg == "..") {
+            return Err("NAS 路徑格式不正確".to_string());
+        }
+        self.list_drive_entries(&origin, &sid, normalized)
+            .map_err(|err| Self::describe_failure(&err))
+    }
+
+    fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
+        let (origin, sid) = self.current_session()?;
+        let quoted =
+            serde_json::to_string(remote_path).unwrap_or_else(|_| format!("\"{remote_path}\""));
+        let result = match self.fetch_drive_file(&origin, &sid, &quoted, dest) {
+            Err(err) if err.code != 119 && err.code != -2 && err.code != -3 => {
+                self.fetch_drive_file(&origin, &sid, remote_path, dest)
+            }
+            other => other,
+        };
+        result.map_err(|err| Self::describe_failure(&err))
     }
 
     fn logout_remote(&self) {
@@ -744,6 +890,20 @@ impl AuthState {
     pub fn complete_sso(&self, _request: SsoCallbackRequest) -> Result<AuthStatus, String> {
         // 尚未實作 token exchange / state / PKCE 驗證；在此之前不可僅憑 callback URL 就視為已登入
         Err("OIDC 單一登入尚未完成實作（缺少 token 交換驗證），目前請使用帳號密碼登入".to_string())
+    }
+
+    pub fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入 NAS".to_string());
+        }
+        self.adapter.list_remote_entries(path)
+    }
+
+    pub fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入 NAS".to_string());
+        }
+        self.adapter.download_remote_file(remote_path, dest)
     }
 
     pub fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
@@ -1002,6 +1162,120 @@ mod tests {
         let result = probe_nas_host("http://nas.example.com");
         assert!(!result.ok);
         assert!(result.latency_ms.is_none());
+    }
+
+    #[test]
+    fn drive_entries_parsing_keeps_files_with_size_and_marks_dirs() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"items":[{"name":"docs","type":"dir"},{"name":"a.txt","type":"file","size":12},{"name":"b.bin","type":"file"}]}"#,
+        )
+        .unwrap();
+        let entries = parse_drive_entries(&data, "/mydrive/Work/");
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].is_dir && entries[0].size.is_none());
+        assert_eq!(entries[1].path, "/mydrive/Work/a.txt");
+        assert_eq!(entries[1].size, Some(12));
+        assert!(!entries[2].is_dir && entries[2].size.is_none());
+    }
+
+    /// 依序回應預先指定內容的簡易假 HTTP 伺服器（每個連線回應一個項目），回傳 (網址, 收到的請求首行)
+    fn spawn_mock_server(
+        responses: Vec<(&'static str, Vec<u8>)>,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for (content_type, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let mut header_end = None;
+                while header_end.is_none() {
+                    let n = stream.read(&mut chunk).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let content_length = head
+                    .lines()
+                    .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                    .unwrap_or(0);
+                if let Some(end) = header_end {
+                    let mut have = buf.len() - (end + 4);
+                    while have < content_length {
+                        let n = stream.read(&mut chunk).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        have += n;
+                    }
+                }
+                let _ = tx.send(head.lines().next().unwrap_or("").to_string());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (origin, rx)
+    }
+
+    #[test]
+    fn download_streams_file_and_detects_json_errors() {
+        let payload = vec![7u8; 5000];
+        let (origin, requests) = spawn_mock_server(vec![
+            ("application/octet-stream", payload.clone()),
+            ("application/json", br#"{"success":false,"error":{"code":119}}"#.to_vec()),
+        ]);
+        let adapter = DsmAuthAdapter::new();
+        let dir = std::env::temp_dir().join(format!("synodl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ok_path = dir.join("ok.bin");
+        let bytes = adapter
+            .fetch_drive_file(&origin, "SID123", "\"/mydrive/a b.bin\"", &ok_path)
+            .expect("download should succeed");
+        assert_eq!(bytes, 5000);
+        assert_eq!(std::fs::read(&ok_path).unwrap(), payload);
+        let request_line = requests.recv().unwrap();
+        assert!(request_line.starts_with("GET /webapi/entry.cgi?"));
+        assert!(request_line.contains("method=download"));
+        assert!(request_line.contains("_sid=SID123"));
+
+        let err_path = dir.join("err.bin");
+        let err = adapter
+            .fetch_drive_file(&origin, "SID123", "\"/x\"", &err_path)
+            .unwrap_err();
+        assert_eq!(err, DsmError { code: 119 });
+        assert!(!err_path.exists(), "JSON error must not leave a file behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listing_follows_pagination_until_short_page() {
+        let page = |count: usize, start: usize| {
+            let items: Vec<String> = (start..start + count)
+                .map(|i| format!(r#"{{"name":"f{i}","type":"file","size":1}}"#))
+                .collect();
+            format!(r#"{{"success":true,"data":{{"items":[{}]}}}}"#, items.join(",")).into_bytes()
+        };
+        let (origin, _requests) = spawn_mock_server(vec![
+            ("application/json", page(DSM_LIST_LIMIT as usize, 0)),
+            ("application/json", page(2, DSM_LIST_LIMIT as usize)),
+        ]);
+        let adapter = DsmAuthAdapter::new();
+        let entries = adapter
+            .list_drive_entries(&origin, "SID", "/mydrive/Work")
+            .expect("listing should succeed");
+        assert_eq!(entries.len(), DSM_LIST_LIMIT as usize + 2);
+        assert_eq!(entries[0].path, "/mydrive/Work/f0");
     }
 
     #[test]
