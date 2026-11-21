@@ -378,6 +378,18 @@ function getStageBadgeClass(stage: string | null | undefined): string {
   }
 }
 
+function requireHttpsHost(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("請輸入有效的 HTTPS 主機網址。");
+  }
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+    throw new Error("NAS 與區網位址都必須使用 HTTPS，且網址不可包含帳號或密碼。");
+  }
+}
+
 function App() {
   const hasTauriBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const invoke = async <T,>(
@@ -393,6 +405,7 @@ function App() {
   const [viewMode, setViewMode] = useState<"login" | "dashboard">("login");
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
+  const [developmentToolsEnabled, setDevelopmentToolsEnabled] = useState(false);
   const [chartType, setChartType] = useState<"bar" | "line">("bar");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
@@ -562,6 +575,13 @@ function App() {
         .catch(() => setSnapshot(null)),
 
       refreshSyncQueue(),
+
+      invoke<boolean>("get_development_tools_enabled")
+        .then((enabled) => {
+          if (typeof enabled !== "boolean") throw new Error("開發工具能力回應格式不正確");
+          setDevelopmentToolsEnabled(enabled);
+        })
+        .catch((err) => setWarning(`無法確認開發工具能力：${String(err)}`)),
     ]).finally(() => {
       window.setTimeout(() => setInitialLoading(false), 320);
     });
@@ -920,6 +940,7 @@ function App() {
   async function testNasHost() {
     setHostTest({ loading: true, result: null });
     try {
+      requireHttpsHost(serverHost);
       const result = await invoke<NasProbeResult>("test_nas_host", { host: serverHost });
       setHostTest({ loading: false, result });
       if (serverHost.trim() === savedHost) {
@@ -950,6 +971,7 @@ function App() {
   async function testLanHost() {
     setLanTest({ loading: true, result: null });
     try {
+      requireHttpsHost(lanHost);
       const result = await invoke<NasProbeResult>("test_lan_host", { host: lanHost });
       setLanTest({ loading: false, result });
     } catch (err) {
@@ -971,6 +993,8 @@ function App() {
     setError(null);
     setMessage(null);
     try {
+      requireHttpsHost(trimmedHost);
+      if (includeLan && lanHost.trim()) requireHttpsHost(lanHost);
       const next = await invoke<AppConfig>("update_app_config", {
         update: {
           serverHost: trimmedHost,
@@ -1038,7 +1062,7 @@ function App() {
                 setLanHost(event.currentTarget.value);
                 setLanTest((prev) => ({ ...prev, result: null }));
               }}
-              placeholder="例如 http://192.168.0.18:5000/drive/"
+              placeholder="例如 https://nas.local:5001"
             />
             <button
               type="button"
@@ -1050,6 +1074,9 @@ function App() {
             </button>
           </div>
         </label>
+        <p className="cell-secondary">
+          區網連線也必須使用 HTTPS 與符合主機名稱的有效憑證；不支援 HTTP 或略過憑證驗證。
+        </p>
         <label className="form-field">
           <span>限定 Wi-Fi 名稱（選填）</span>
           <input
@@ -1089,8 +1116,6 @@ function App() {
           rememberLogin,
         },
       });
-      setOtpCode("");
-      setPassword("");
       setAuthResult(
         status,
         status.stage === "authenticated"
@@ -1100,6 +1125,8 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1117,10 +1144,10 @@ function App() {
         },
       });
       setAuthResult(status, "OTP 驗證完成，已成功登入。");
-      setOtpCode("");
     } catch (err) {
       setError(String(err));
     } finally {
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1131,11 +1158,11 @@ function App() {
     try {
       const status = await invoke<AuthStatus>("logout");
       setAuthStatus(status);
-      setPassword("");
-      setOtpCode("");
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1147,13 +1174,13 @@ function App() {
     try {
       const status = await invoke<AuthStatus>("logout");
       setAuthStatus(status);
-      setPassword("");
-      setOtpCode("");
       setMessage("已登出帳號。");
       setViewMode("login");
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -2155,7 +2182,7 @@ function App() {
               }`}
             />
           </button>
-          {!import.meta.env.PROD && (
+          {developmentToolsEnabled && !import.meta.env.PROD && (
             <button
               type="button"
               className={`nav-item ${activeTab === "devtools" ? "active" : ""}`}
@@ -3231,7 +3258,7 @@ function App() {
                   {renderNasHostFields()}
                   {renderLanFields()}
                   <p className="cell-secondary">
-                    區網直連不經過外部代理；Wi-Fi 名稱可用逗號分隔，留空時只要連得到區網位址就使用。
+                    區網直連須使用 HTTPS 與有效憑證；Wi-Fi 名稱可用逗號分隔，留空時也不會放寬憑證驗證。
                   </p>
                   <div className="button-row">
                     <button type="submit" className="btn btn-primary" disabled={saving}>
@@ -3948,7 +3975,8 @@ function App() {
                     <h4>區網直連與 Wi-Fi 條件</h4>
                     <p>
                       如果外網連線有經過反向代理（例如 Cloudflare 有單檔 100 MB 上傳限制），可在「環境設定」選填區網位址來加速大檔傳輸。
-                      Wi-Fi 名稱可用逗號分隔多個 SSID；留空時，只要區網位址可連通就會自動切換為區網直連。
+                      區網網址同樣必須使用 HTTPS 與符合主機名稱的受信任憑證；舊 HTTP 設定會停用並使用一般 NAS 位址。
+                      Wi-Fi 名稱可用逗號分隔多個 SSID；留空時也不會略過 TLS 驗證。
                     </p>
                   </div>
 
@@ -4057,7 +4085,7 @@ function App() {
               </section>
             </article>
           )}
-          {!import.meta.env.PROD && !initialLoading && !tabSwitching && activeTab === "devtools" && (
+          {developmentToolsEnabled && !import.meta.env.PROD && !initialLoading && !tabSwitching && activeTab === "devtools" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">

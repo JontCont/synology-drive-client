@@ -13,12 +13,17 @@ This template should help get you started developing with Tauri, React and Types
   - default capability only (`core:default`)
   - no opener capability/plugin
   - CSP enabled in `src-tauri/tauri.conf.json`
+  - primary and LAN connections require HTTPS and trusted, hostname-matching certificates; legacy HTTP LAN settings are disabled without rewriting them, falling back to the primary NAS origin
+  - authenticated requests do not follow redirects; Drive downloads, uploads and folder creation pass the SID through the DSM `id` cookie rather than URL parameters
+  - retained OTP passwords use zeroizing storage, expire after five minutes and are cleaned in the background; submitted frontend credentials are cleared even on errors
+  - security findings, false positives and validation limitations are documented in [the security audit](docs/security-audit.md)
 - Config skeleton:
   - backend commands: `get_app_config`, `update_app_config`
   - file location: app config directory `settings.json`
   - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`, `ingestBacklogLimit`
   - frontend has a basic settings form for editing/saving these fields
 - Remote contract skeleton:
+  - commands in this section are development-only (`debug_assertions`); ordinary release builds do not register them
   - `RemoteProvider` trait and in-memory `FakeRemote` in `src-tauri/src/remote.rs`
   - includes basic list/stat/read/write/delete/move/mkdir operations for contract testing
   - command: `run_fake_remote_probe` for contract smoke checks (mkdir/write/read/move/delete/not-found)
@@ -32,7 +37,7 @@ This template should help get you started developing with Tauri, React and Types
   - challenge-based password login against real Synology DSM (`SYNO.API.Auth` at `<origin>/webapi/auth.cgi`, HTTPS only, certificate verified): step 1 sends `username` + `password`; DSM error 403 becomes `MfaRequired { challenge_id }`, and step 2 re-submits with `otp_code` (max 3 attempts per challenge). NAS host comes from `settings.json` `serverHost`.
   - dedicated login page with `一般登入` and NAS `配置` tabs; only DSM account/password login with OTP when required is supported
   - dashboard `設定檔` shows read-only account identity, a separate connection form block for NAS host, LAN host and Wi-Fi names (with connection tests), and window-size presets. Saving connection settings preserves the active login and does not navigate to the login page. Changing window size preserves unsaved connection edits. LAN configuration and window-size presets live here rather than in sync settings.
-  - developer Pipeline/Executor controls live in `同步設定`; the real sync queue stays in `操作佇列與監看`.
+  - developer Pipeline/Executor controls live in `開發工具`, shown only when both frontend and Rust backend are in development mode; release builds omit test/fault-injection IPC. The real sync queue stays in `操作佇列與監看`.
   - overview status counts can be switched between Bar (default) and Line charts; both show the real sync queue's waiting/running/done/failed totals across all folders, refreshed every two seconds independently of table limits and folder/status filters, not background operation records or a time-series history
   - queue counts include file and directory operations but exclude unchanged files, so they can differ from folder file-progress counts; queue read failures are displayed explicitly rather than as zero activity
   - sync-folder paths stay on one line, abbreviate intermediate directories while retaining the root and last two levels, and expose the unmodified full path on hover

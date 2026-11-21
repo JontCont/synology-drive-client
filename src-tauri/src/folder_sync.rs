@@ -399,6 +399,19 @@ pub fn sanitize_segment(name: &str) -> String {
     }
 }
 
+fn is_reserved_windows_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    stem.strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            let mut chars = suffix.chars();
+            matches!(chars.next(), Some('1'..='9' | '¹' | '²' | '³')) && chars.next().is_none()
+        })
+}
+
 /// 由 NAS 路徑換算本機路徑；路徑不在 `remote_root` 之下時回傳 None
 #[cfg(test)]
 pub fn local_path_for(local_root: &Path, remote_root: &str, remote_path: &str) -> Option<PathBuf> {
@@ -642,7 +655,7 @@ pub fn build_plan(
     remote: &[RemoteNode],
     local: &[LocalNode],
     baseline: &Baseline,
-) -> Vec<PlanItem> {
+) -> Result<Vec<PlanItem>, String> {
     let can_download = mode != config::SYNC_MODE_UPLOAD_ONLY;
     let can_upload = mode != config::SYNC_MODE_DOWNLOAD_ONLY;
     let delete_remote = sync_deletes && can_upload;
@@ -662,7 +675,19 @@ pub fn build_plan(
         if segments.is_empty() {
             continue;
         }
-        remote_by_key.insert(key_of(&segments), (node, segments));
+        if segments.iter().any(|segment| is_reserved_windows_name(segment)) {
+            return Err(format!("NAS 項目包含 Windows 保留名稱，請先重新命名：{}", node.path));
+        }
+        let key = key_of(&segments);
+        if let Some((existing, _)) = remote_by_key.get(&key) {
+            if existing.path != node.path {
+                return Err(format!(
+                    "NAS 檔名映射到相同的本機路徑，請先重新命名：{} 與 {}",
+                    existing.path, node.path
+                ));
+            }
+        }
+        remote_by_key.insert(key, (node, segments));
     }
     let mut local_by_key: HashMap<String, &LocalNode> = HashMap::new();
     for node in local {
@@ -753,7 +778,7 @@ pub fn build_plan(
         };
         (rank(a), &a.key).cmp(&(rank(b), &b.key))
     });
-    items
+    Ok(items)
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
@@ -889,7 +914,7 @@ fn run_sync(
 
     // 2) 比對產生計畫
     let mut baseline = sync_state::load(app, &folder.id);
-    let plan = build_plan(&folder.mode, folder.sync_deletes, &remote_root, &remote, &local, &baseline);
+    let plan = build_plan(&folder.mode, folder.sync_deletes, &remote_root, &remote, &local, &baseline)?;
 
     // 保護：一次要刪除的檔案佔同步紀錄的一半以上時，多半是列表異常或資料夾被整個搬走/中斷連線，
     // 不執行任何刪除，避免誤刪整個資料夾
@@ -1331,6 +1356,35 @@ mod tests {
     }
 
     #[test]
+    fn reserved_windows_names_stop_planning_instead_of_colliding_with_other_files() {
+        for name in ["CON", "con.txt", "PRN.", "AUX", "NUL.txt", "COM1", "LPT9.log", "COM¹.txt"] {
+            let remote = vec![RemoteNode {
+                path: format!("/mydrive/W/{name}"),
+                is_dir: false,
+                size: Some(1),
+            }];
+            assert!(build_plan(BI, false, "/mydrive/W", &remote, &[], &Baseline::default())
+                .unwrap_err().contains("保留名稱"));
+        }
+        for name in ["company.txt", "COM10.txt", "報價.xlsx"] {
+            assert!(!is_reserved_windows_name(name));
+        }
+    }
+
+    #[test]
+    fn different_nas_names_cannot_silently_replace_one_plan_entry() {
+        for names in [["a:b.txt", "a_b.txt"], ["Report.txt", "report.txt"]] {
+            let remote: Vec<RemoteNode> = names.iter().map(|name| RemoteNode {
+                path: format!("/mydrive/W/{name}"),
+                is_dir: false,
+                size: Some(1),
+            }).collect();
+            assert!(build_plan(BI, false, "/mydrive/W", &remote, &[], &Baseline::default())
+                .unwrap_err().contains("相同的本機路徑"));
+        }
+    }
+
+    #[test]
     fn maps_remote_path_to_local_path_without_escaping_root() {
         let root = Path::new("D:\\Sync");
         let mapped = local_path_for(root, "/mydrive/Work/", "/mydrive/Work/sub/a:b.txt").unwrap();
@@ -1444,7 +1498,7 @@ mod tests {
             rn("/mydrive/W/old", true, None),
             rn("/mydrive/W/old/a.txt", false, Some(5)),
         ];
-        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline);
+        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline).unwrap();
         let find = |plan: &[PlanItem], key: &str| plan.iter().find(|i| i.key == key).unwrap().action.clone();
         assert_eq!(find(&plan, "old/a.txt"), Action::DeleteRemote);
         assert_eq!(find(&plan, "old"), Action::DeleteRemoteDir);
@@ -1454,7 +1508,7 @@ mod tests {
         // 網站上同時新增了檔案：資料夾不能刪，該檔案與資料夾都補回本機
         let mut remote = remote;
         remote.push(rn("/mydrive/W/old/new.txt", false, Some(3)));
-        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline);
+        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline).unwrap();
         assert_eq!(find(&plan, "old/new.txt"), Action::Download);
         assert_eq!(find(&plan, "old"), Action::CreateLocalDir);
     }
@@ -1465,12 +1519,12 @@ mod tests {
         baseline.files.insert("old/a.txt".to_string(), base(5, 1_000, 5));
         baseline.dirs.insert("old".to_string());
         let local = vec![ln(&["old"], true, 0, 0), ln(&["old", "a.txt"], false, 5, 1_000)];
-        let plan = build_plan(BI, true, "/mydrive/W", &[], &local, &baseline);
+        let plan = build_plan(BI, true, "/mydrive/W", &[], &local, &baseline).unwrap();
         let find = |plan: &[PlanItem], key: &str| plan.iter().find(|i| i.key == key).unwrap().action.clone();
         assert_eq!(find(&plan, "old/a.txt"), Action::DeleteLocal);
         assert_eq!(find(&plan, "old"), Action::DeleteLocalDir);
 
-        let plan = build_plan(UP, true, "/mydrive/W", &[], &local, &baseline);
+        let plan = build_plan(UP, true, "/mydrive/W", &[], &local, &baseline).unwrap();
         assert_eq!(find(&plan, "old/a.txt"), Action::Upload);
         assert_eq!(find(&plan, "old"), Action::CreateRemoteDir);
     }
@@ -1524,7 +1578,7 @@ mod tests {
             ln(&["new", "b.txt"], false, 7, 100),
             ln(&["SAME.txt"], false, 4, 100),
         ];
-        let plan = build_plan(BI, false, "/mydrive/W/", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W/", &remote, &local, &Baseline::default()).unwrap();
         let find = |key: &str| plan.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("missing {key}"));
 
         assert_eq!(find("docs").action, Action::CreateLocalDir);
@@ -1547,7 +1601,7 @@ mod tests {
         // NAS 上的 "a:b.txt" 下載時被清理成 "a_b.txt"，之後不可被當成新檔案再上傳一次
         let remote = vec![rn("/mydrive/W/a:b.txt", false, Some(4))];
         let local = vec![ln(&["a_b.txt"], false, 4, 100)];
-        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].action, Action::RecordBaseline);
         assert_eq!(plan[0].remote_path, "/mydrive/W/a:b.txt");
@@ -1602,7 +1656,7 @@ mod tests {
             ln(&["up.txt"], false, 9, 100),
             ln(&["newdir"], true, 0, 0),
         ];
-        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         let (queue, positions) = build_queue("f", &plan);
         // same.txt 兩邊一致（只記錄）不進佇列；其餘三項：資料夾、下載、上傳
         assert_eq!(positions.len(), plan.len());
@@ -1644,7 +1698,7 @@ mod tests {
     fn plan_flags_file_vs_folder_name_clash() {
         let remote = vec![rn("/mydrive/W/x", true, None)];
         let local = vec![ln(&["x"], false, 1, 1)];
-        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(plan[0].action, Action::TypeMismatch);
     }
 
@@ -1652,10 +1706,10 @@ mod tests {
     fn one_way_modes_do_not_create_folders_on_the_other_side() {
         let remote = vec![rn("/mydrive/W/r", true, None)];
         let local = vec![ln(&["l"], true, 0, 0)];
-        let up = build_plan(UP, false, "/mydrive/W", &remote, &local, &Baseline::default());
+        let up = build_plan(UP, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(up.iter().find(|i| i.key == "l").unwrap().action, Action::CreateRemoteDir);
         assert_eq!(up.iter().find(|i| i.key == "r").unwrap().action, Action::Noop);
-        let down = build_plan(DOWN, false, "/mydrive/W", &remote, &local, &Baseline::default());
+        let down = build_plan(DOWN, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(down.iter().find(|i| i.key == "l").unwrap().action, Action::Noop);
         assert_eq!(down.iter().find(|i| i.key == "r").unwrap().action, Action::CreateLocalDir);
     }

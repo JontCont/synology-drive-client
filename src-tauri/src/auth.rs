@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 use crate::remembered_login::{CredentialSessionStore, SavedSession, SessionStore};
 
 pub enum SessionRestoreError {
@@ -39,6 +40,10 @@ pub trait AuthBackendAdapter: Send + Sync {
 
     /// 登出時通知伺服器銷毀 session（盡力而為）
     fn logout_remote(&self) {}
+
+    fn cancel_pending_login(&self) -> Result<(), String> {
+        Ok(())
+    }
 
     fn export_session(&self) -> Result<(String, String), String> {
         Err("目前的認證方式不支援記住登入".to_string())
@@ -172,7 +177,7 @@ fn parse_dsm_login_response(body: &str) -> Result<String, DsmError> {
 }
 
 /// 將使用者設定的 Host（可能帶有 `/drive/` 之類路徑）正規化為 `https://host[:port]`
-fn normalize_dsm_origin(host: &str) -> Result<String, String> {
+pub(crate) fn normalize_dsm_origin(host: &str) -> Result<String, String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
         return Err("尚未設定 NAS 主機位址，請先到「配置」填寫".to_string());
@@ -181,10 +186,21 @@ fn normalize_dsm_origin(host: &str) -> Result<String, String> {
         .strip_prefix("https://")
         .ok_or_else(|| "NAS 主機必須使用 https://".to_string())?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.contains('@') || authority.contains(' ') {
+    if authority.is_empty() || authority.contains('@') || authority.chars().any(char::is_whitespace) {
         return Err("NAS 主機位址格式不正確".to_string());
     }
     Ok(format!("https://{authority}"))
+}
+
+fn validate_remote_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/')
+        || path.trim_end_matches('/').is_empty()
+        || path.contains('\0')
+        || path.split('/').any(|segment| segment == ".." || segment == ".")
+    {
+        return Err("NAS 路徑格式不正確".to_string());
+    }
+    Ok(())
 }
 
 /// 解析 DSM 一般 API 回應，成功時回傳 `data`
@@ -367,11 +383,19 @@ pub fn probe_origin(origin: &str, timeout_secs: u64) -> NasProbeResult {
     }
 }
 
+const OTP_CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
+const OTP_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+
 struct PendingLogin {
     origin: String,
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     attempts: u8,
+    expires_at: Instant,
+}
+
+fn prune_pending_logins(pending: &mut HashMap<String, PendingLogin>, now: Instant) {
+    pending.retain(|_, login| login.expires_at > now);
 }
 
 struct RemoteSession {
@@ -390,18 +414,35 @@ pub struct DsmAuthAdapter {
     lan_origin: Mutex<Option<String>>,
     /// 觀察到被前端代理（例如 Cloudflare）拒絕的最小檔案大小；之後不小於此大小的檔案直接略過，不再重傳
     upload_size_limit: Mutex<Option<u64>>,
-    pending: Mutex<HashMap<String, PendingLogin>>,
+    pending: Arc<Mutex<HashMap<String, PendingLogin>>>,
     session: Mutex<Option<RemoteSession>>,
 }
 
 impl DsmAuthAdapter {
     pub fn new() -> Self {
+        let pending = Arc::new(Mutex::new(HashMap::<String, PendingLogin>::new()));
+        let cleanup = Arc::downgrade(&pending);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(OTP_CLEANUP_INTERVAL);
+            let Some(pending) = cleanup.upgrade() else {
+                break;
+            };
+            match pending.lock() {
+                Ok(mut logins) => prune_pending_logins(&mut logins, Instant::now()),
+                Err(poisoned) => {
+                    poisoned.into_inner().clear();
+                    break;
+                }
+            };
+        });
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(15)))
+            .max_redirects(0)
             .http_status_as_error(false)
             .build()
             .into();
         let download_agent: ureq::Agent = ureq::Agent::config_builder()
+            .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .http_status_as_error(false)
@@ -409,6 +450,7 @@ impl DsmAuthAdapter {
             .into();
         // 上傳完成後 NAS 還要寫入、建立版本與索引，大檔案回應會比較慢
         let upload_agent: ureq::Agent = ureq::Agent::config_builder()
+            .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_recv_response(Some(Duration::from_secs(600)))
             .http_status_as_error(false)
@@ -420,7 +462,7 @@ impl DsmAuthAdapter {
             upload_agent,
             lan_origin: Mutex::new(None),
             upload_size_limit: Mutex::new(None),
-            pending: Mutex::new(HashMap::new()),
+            pending,
             session: Mutex::new(None),
         }
     }
@@ -629,7 +671,7 @@ impl DsmAuthAdapter {
             .query("files", &files)
             .query("force_download", "true")
             .query("json_error", "true")
-            .query("_sid", sid)
+            .header("Cookie", &format!("id={sid}"))
             .call()
             .map_err(|_| DsmError { code: -2 })?;
 
@@ -715,7 +757,7 @@ impl DsmAuthAdapter {
                 "conflict_action",
                 if new_version { "version" } else { "autorename" },
             )
-            .query("_sid", sid)
+            .header("Cookie", &format!("id={sid}"))
             .header(
                 "Content-Type",
                 &format!("multipart/form-data; boundary={boundary}"),
@@ -743,7 +785,7 @@ impl DsmAuthAdapter {
             .query("path", path_param)
             .query("type", "folder")
             .query("conflict_action", "autorename")
-            .query("_sid", sid)
+            .header("Cookie", &format!("id={sid}"))
             .send_empty()
             .map_err(|_| DsmError { code: -2 })?;
         let body = response.body_mut().read_to_string().unwrap_or_default();
@@ -785,6 +827,13 @@ impl DsmAuthAdapter {
 }
 
 impl AuthBackendAdapter for DsmAuthAdapter {
+    fn cancel_pending_login(&self) -> Result<(), String> {
+        self.pending.lock()
+            .map_err(|_| "登入狀態鎖定失敗".to_string())?
+            .clear();
+        Ok(())
+    }
+
     fn export_session(&self) -> Result<(String, String), String> {
         let session = self.session.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
         let session = session.as_ref().ok_or_else(|| "尚未登入 NAS".to_string())?;
@@ -817,6 +866,10 @@ impl AuthBackendAdapter for DsmAuthAdapter {
             return Err("密碼不可為空".to_string());
         }
         let origin = normalize_dsm_origin(host)?;
+        self.pending
+            .lock()
+            .map_err(|_| "登入狀態鎖定失敗".to_string())?
+            .clear();
 
         match self.request_login(&origin, username, password, None) {
             Ok(sid) => {
@@ -842,8 +895,9 @@ impl AuthBackendAdapter for DsmAuthAdapter {
                     PendingLogin {
                         origin,
                         username: username.to_string(),
-                        password: password.to_string(),
+                        password: Zeroizing::new(password.to_string()),
                         attempts: 0,
+                        expires_at: Instant::now() + OTP_CHALLENGE_TTL,
                     },
                 );
                 Ok(PrimaryAuthOutcome::MfaRequired {
@@ -870,6 +924,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
                 .pending
                 .lock()
                 .map_err(|_| "登入狀態鎖定失敗".to_string())?;
+            prune_pending_logins(&mut pending, Instant::now());
             let entry = pending
                 .get_mut(challenge_id)
                 .filter(|p| p.username == username)
@@ -938,9 +993,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
             return Ok(roots);
         }
 
-        if !normalized.starts_with('/') || normalized.split('/').any(|seg| seg == "..") {
-            return Err("NAS 路徑格式不正確".to_string());
-        }
+        validate_remote_path(normalized)?;
         self.list_drive_directory(&origin, &sid, normalized)
             .map_err(|err| Self::describe_list_failure(&err))
     }
@@ -951,6 +1004,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         remote_path: &str,
         new_version: bool,
     ) -> Result<(), String> {
+        validate_remote_path(remote_path)?;
         let (origin, sid) = self.current_session()?;
         let size = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
         let blocked_at = self.upload_size_limit.lock().ok().and_then(|l| *l);
@@ -974,6 +1028,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
     }
 
     fn create_remote_folder(&self, remote_path: &str) -> Result<(), String> {
+        validate_remote_path(remote_path)?;
         let (origin, sid) = self.current_session()?;
         let mut result = self.make_drive_folder(&origin, &sid, remote_path);
         if matches!(&result, Err(e) if e.code != 119 && e.code != -2) {
@@ -986,10 +1041,8 @@ impl AuthBackendAdapter for DsmAuthAdapter {
     fn delete_remote_path(&self, remote_path: &str) -> Result<(), String> {
         let (origin, sid) = self.current_session()?;
         let normalized = remote_path.trim().trim_end_matches('/');
-        if !normalized.starts_with('/')
-            || normalized.matches('/').count() < 2
-            || normalized.split('/').any(|seg| seg == "..")
-        {
+        validate_remote_path(normalized)?;
+        if normalized.matches('/').count() < 2 {
             return Err("NAS 路徑格式不正確，拒絕刪除".to_string());
         }
         let mut result = self.trash_drive_path(&origin, &sid, normalized);
@@ -1008,9 +1061,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
     fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
         let (origin, sid) = self.current_session()?;
         let normalized = path.trim().trim_end_matches('/');
-        if !normalized.starts_with('/') || normalized.split('/').any(|seg| seg == "..") {
-            return Err("NAS 路徑格式不正確".to_string());
-        }
+        validate_remote_path(normalized)?;
         let list = || self.list_drive_entries(&origin, &sid, normalized);
         // 檔案剛被搬動或正在寫入時，偶爾會短暫回報找不到；稍等再試一次，仍失敗才中止（不能略過，否則會被當成整個資料夾被刪除）
         let result = match list() {
@@ -1033,6 +1084,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         remote_path: &str,
         dest: &std::path::Path,
     ) -> Result<u64, String> {
+        validate_remote_path(remote_path)?;
         let (origin, sid) = self.current_session()?;
         self.fetch_drive_file(&origin, &sid, remote_path, dest)
             .map_err(|err| Self::describe_download_failure(&err))
@@ -1100,7 +1152,7 @@ pub struct AuthStatus {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PasswordLoginRequest {
     pub username: String,
@@ -1109,7 +1161,7 @@ pub struct PasswordLoginRequest {
     pub remember_login: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OtpRequest {
     pub otp_code: String,
@@ -1326,6 +1378,7 @@ impl AuthState {
 
     pub fn logout(&self) -> Result<AuthStatus, String> {
         let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
+        self.adapter.cancel_pending_login()?;
         self.session_store.clear()?;
         self.adapter.logout_remote();
         *stage = AuthStage::Idle;
@@ -1366,6 +1419,83 @@ impl AuthState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_otp_challenges_are_removed_before_any_login_request() {
+        let adapter = DsmAuthAdapter::new();
+        let now = Instant::now();
+        let login = |expires_at| PendingLogin {
+            origin: "https://nas.example.com".to_string(),
+            username: "fixture-user".to_string(),
+            password: Zeroizing::new("dummy-password".to_string()),
+            attempts: 0,
+            expires_at,
+        };
+        {
+            let mut pending = adapter.pending.lock().unwrap();
+            pending.insert("expired".to_string(), login(now - Duration::from_secs(1)));
+            pending.insert("valid".to_string(), login(now + OTP_CHALLENGE_TTL));
+        }
+        let result = adapter.verify_otp_challenge("fixture-user", "expired", "123456");
+        assert!(result.unwrap_err().contains("已失效"));
+        let pending = adapter.pending.lock().unwrap();
+        assert!(!pending.contains_key("expired"));
+        assert!(pending.contains_key("valid"));
+        drop(pending);
+        adapter.logout_remote();
+        assert!(adapter.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn abandoned_otp_challenges_are_cleaned_without_user_activity() {
+        let adapter = DsmAuthAdapter::new();
+        adapter.pending.lock().unwrap().insert("expired".to_string(), PendingLogin {
+            origin: "https://nas.example.com".to_string(),
+            username: "fixture-user".to_string(),
+            password: Zeroizing::new("dummy-password".to_string()),
+            attempts: 0,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        });
+        let deadline = Instant::now() + OTP_CLEANUP_INTERVAL * 2;
+        while !adapter.pending.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "expired password was not removed automatically");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn cancelling_otp_drops_password_even_when_saved_session_cleanup_fails() {
+        let adapter = DsmAuthAdapter::new();
+        let pending = Arc::clone(&adapter.pending);
+        pending.lock().unwrap().insert("challenge".to_string(), PendingLogin {
+            origin: "https://nas.example.com".to_string(),
+            username: "fixture-user".to_string(),
+            password: Zeroizing::new("dummy-password".to_string()),
+            attempts: 0,
+            expires_at: Instant::now() + OTP_CHALLENGE_TTL,
+        });
+        let state = AuthState::with_components(Box::new(adapter), Box::new(MemorySessionStore {
+            fail_clear: true,
+            ..MemorySessionStore::default()
+        }));
+        assert!(state.logout().is_err());
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_remote_paths_fail_before_session_or_file_access() {
+        let adapter = DsmAuthAdapter::new();
+        for path in ["relative/file", "/", "/mydrive/../file", "/mydrive/./file", "/mydrive/\0file"] {
+            assert!(adapter.upload_remote_file(std::path::Path::new("missing-file"), path, false)
+                .unwrap_err().contains("路徑格式"));
+            assert!(adapter.create_remote_folder(path).unwrap_err().contains("路徑格式"));
+            assert!(adapter.download_remote_file(path, std::path::Path::new("unused"))
+                .unwrap_err().contains("路徑格式"));
+        }
+        assert!(validate_remote_path("/mydrive/報價 a.txt").is_ok());
+        assert!(normalize_dsm_origin("http://nas.example.com").is_err());
+        assert!(normalize_dsm_origin("https://user:password@nas.example.com").is_err());
+    }
 
     #[derive(Clone, Default)]
     pub(super) struct MemorySessionStore {
@@ -1741,7 +1871,7 @@ mod tests {
                         have += n;
                     }
                 }
-                let _ = tx.send(head.lines().next().unwrap_or("").to_string());
+                let _ = tx.send(head.to_string());
                 let header = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
@@ -1776,7 +1906,7 @@ mod tests {
                 assert!(adapter.export_session().is_err());
             }
             for _ in 0..response_count {
-                assert_eq!(requests.recv().unwrap(), "POST /webapi/entry.cgi HTTP/1.1");
+                assert_eq!(requests.recv().unwrap().lines().next(), Some("POST /webapi/entry.cgi HTTP/1.1"));
             }
         }
     }
@@ -1814,7 +1944,8 @@ mod tests {
         assert!(request_line.starts_with("GET /webapi/entry.cgi?"));
         assert!(request_line.contains("method=download"));
         assert!(request_line.contains("json_error=true"));
-        assert!(request_line.contains("_sid=SID123"));
+        assert!(!request_line.lines().next().unwrap().contains("_sid"));
+        assert!(request_line.to_ascii_lowercase().contains("cookie: id=sid123"));
         // files 參數是 JSON 陣列（URL 編碼後）
         assert!(request_line.contains("files=%5B%22%2Fmydrive%2Fa%20b.bin%22%5D")
             || request_line.contains("files=%5B%22/mydrive/a%20b.bin%22%5D"));
@@ -1866,6 +1997,21 @@ mod tests {
             .expect("listing should succeed");
         assert_eq!(entries.len(), DSM_LIST_LIMIT as usize + 2);
         assert_eq!(entries[0].path, "/mydrive/Work/f0");
+    }
+
+    #[test]
+    fn authenticated_download_does_not_follow_redirects() {
+        let (origin, requests) = spawn_mock_server(vec![
+            ("302 Found", "text/plain", "Location: /redirected\r\n", Vec::new()),
+            ("200 OK", "application/octet-stream", "", vec![1, 2, 3]),
+        ]);
+        let adapter = DsmAuthAdapter::new();
+        let dest = std::env::temp_dir().join(format!("syno-redirect-{}.bin", std::process::id()));
+        assert!(adapter.fetch_drive_file(&origin, "dummy-sid", "/mydrive/file", &dest).is_err());
+        assert!(!dest.exists());
+        let request = requests.recv().unwrap();
+        assert!(request.to_ascii_lowercase().contains("cookie: id=dummy-sid"));
+        assert!(requests.recv_timeout(Duration::from_millis(100)).is_err());
     }
 
     #[test]
@@ -1924,7 +2070,8 @@ mod tests {
         assert!(head.contains("method=upload"));
         assert!(head.contains("type=file"));
         assert!(head.contains("conflict_action=version"));
-        assert!(head.contains("_sid=SID9"));
+        assert!(!head.lines().next().unwrap().contains("_sid"));
+        assert!(head.to_ascii_lowercase().contains("cookie: id=sid9"));
         assert!(head.to_lowercase().contains("content-type: multipart/form-data; boundary="));
 
         let text_start = String::from_utf8_lossy(&body[..200]).to_string();
@@ -1938,7 +2085,7 @@ mod tests {
 
     #[test]
     fn upload_and_folder_errors_are_reported() {
-        let (origin, _requests) = spawn_mock_server(vec![
+        let (origin, requests) = spawn_mock_server(vec![
             (
                 "200 OK",
                 "application/json",
@@ -1962,6 +2109,12 @@ mod tests {
             Err(DsmError { code: 1003 })
         );
         assert_eq!(adapter.make_drive_folder(&origin, "S", "/mydrive/x"), Ok(()));
+        let upload_request = requests.recv().unwrap();
+        let create_request = requests.recv().unwrap();
+        for request in [upload_request, create_request] {
+            assert!(!request.lines().next().unwrap().contains("_sid"));
+            assert!(request.to_ascii_lowercase().contains("cookie: id=s"));
+        }
         // 本機檔案不存在要回報本機錯誤而不是連線錯誤
         assert_eq!(
             adapter.put_drive_file(&origin, "S", "/mydrive/x/b.txt", &dir.join("none.txt"), false),

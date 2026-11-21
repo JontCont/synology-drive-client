@@ -1,197 +1,113 @@
 # Synology Drive Client 資安與機密外洩體檢報告
 
-> **一句話結論：密碼與機密沒有外洩。**  
-> 我們檢查了完整的 Git 歷史（97 個 commits、共 285 個 refs）與前後端所有程式碼，**沒有發現任何真實密碼、Token、API Key、Private Key 或真實外網 NAS 網址**。  
-> 不過在「區網連線安全」、「Session 傳遞方式」與「`.gitignore` 防呆」上，有幾個值得優先補起來的風險。
+> **複核結論：本次檢查未識別真實憑證外洩，但不能據此保證「從未外洩」。**
+> 原報告將部分防呆、可靠性與本機診斷問題誤列為漏洞，亦將登入驗證與設定儲存混為一談。
+> 本次修正確認的傳輸風險與相關防護缺口，以下保留各項結論及誤判原因。
 
-- **檢查基準：** `HEAD`（`3bd0620`），不包含未提交的工作區修改（`README.md`、`src/App.tsx`）
-- **稽核方式：** 4 個平行 Subagents 分工檢查（Git 歷史掃描、前端 `src/`、後端 `src-tauri/`、文件與設定檔）
+- **複核日期：** 2026-11-21。
+- **複核基準：** `c2a540b`，以及本報告隨附的安全修正。原報告的 `3bd0620` 不是目前版本。
+- **方法：** 對原報告逐項核對程式碼、公開 Synology API 文件、模擬 HTTP 請求與既有測試。
+- **限制：** 未使用真實 NAS 帳密、未操作使用者目前的登入與同步，也未將程式碼或憑證送至外部掃描服務。
 
----
+## 逐項複核與處理結果
 
-## 目錄
+| # | 原項目 | 複核分級 | 處理結果與說明 |
+| --- | --- | --- | --- |
+| 1 | 區網 HTTP 與寬鬆主機判斷 | High，確認風險 | 區網設定與既有設定的自動選路均強制 HTTPS；移除任意單字主機名稱的判定。憑證驗證維持開啟，不回退到 HTTP。 |
+| 2 | SID 放在下載、上傳與建立資料夾 URL | Medium，確認暴露途徑 | 三種請求改用 `Cookie: id=<sid>`，不再把 `_sid` 放在 URL；禁止自動重新導向，避免將登入資料送至另一個端點。沒有證據顯示先前已被存取紀錄洩漏。 |
+| 3 | 前端未檢查 HTTPS | 原 Medium 分級不成立；防呆不足 | 原本後端「登入」已拒絕 HTTP，但「儲存設定」未檢查。現已在儲存端與前端測試／儲存時一併驗證 HTTPS，並更正區網提示。 |
+| 4 | `cmd /C netsh` 命令注入 | 誤判 | 指令及參數固定，SSID 或使用者輸入沒有拼接進命令。未建立命令注入的利用條件；保留既有 UTF-8 中文 SSID 處理。改用 WLAN API 是另項改善，不是漏洞修補。 |
+| 5 | OTP 等待時密碼長期留在記憶體 | Low，防護缺口 | 保留密碼與 OTP 重送用的副本改用 `Zeroizing<String>`；challenge 有效期限 5 分鐘，過期拒絕送出，背景每 5 秒清除過期資料。取消、登出與重新登入會清除待驗證密碼。 |
+| 6 | Release 註冊開發／故障注入 IPC | Low，防護缺口 | 開發命令、handler 註冊與直接相依的資料庫測試 helpers 均以 `cfg(debug_assertions)` 限制。前端再檢查後端能力，不能只靠隱藏按鈕。 |
+| 7 | 登入失敗仍保留前端密碼 | Low，防護缺口 | 每次登入送出後在 `finally` 清空密碼與 OTP；OTP 送出、取消及登出失敗時亦清除對應欄位。 |
+| 8 | 顯示原始錯誤等於機密外洩 | 誤判 | 顯示本機路徑或 SQLite 診斷並不等於洩漏 SID／密碼；未識別憑證型錯誤。React 將字串當文字渲染，不是 HTML 注入。保留明確錯誤提示，不以靜默失敗掩蓋問題。 |
+| 9 | Windows 保留名稱 | 可靠性問題，非已證實的安全漏洞 | 同步計畫拒絕保留裝置名稱（含副檔名與大小寫變體），不以可能碰撞的字串替代；不同 NAS 名稱若映射至相同本機名稱，也會明確中止計畫。 |
+| 10 | 部分遠端操作未檢查 `..` | 防禦一致性缺口；未證實權限繞過 | 上傳、下載、建立、刪除與列舉共用路徑驗證，拒絕相對路徑、`.`、`..` 與 NUL。檔案操作在取得 session 或存取本機檔案前驗證。NAS 權限仍由 NAS 決定。 |
+| 11 | 缺少秘密檔 ignore 規則 | 原 High 分級為誤判 | 缺少規則只是未來誤提交風險，不能證明已有秘密外洩。已補 `.env`、私鑰、密碼容器等規則；保留清理過的範例、公開憑證與公開簽章。 |
+| 12 | 缺少資料庫／暫存 ignore 規則 | 原 Medium 分級為誤判 | 真正的資料庫位於應用程式資料目錄，下載暫存位於同步資料夾，不會必然出現在 repo。已補資料庫、journal、下載暫存規則，並允許明確的測試 fixture。 |
+| 13 | 範本命名、編輯器及產生檔 | 非安全漏洞 | 命名屬品牌／維護事項，產品名稱亦已有自訂；不因此修改套件名稱或任意忽略發布需要的產生檔。只補與本機暫存相關的 ignore 規則。 |
 
-- [總覽儀表板](#總覽儀表板)
-- [Group 1｜密碼與機密有沒有外洩？（Git 歷史與測試資料）](#group-1密碼與機密有沒有外洩git-歷史與測試資料)
-- [Group 2｜網路連線與 Session 安全（最需要優先處理）](#group-2網路連線與-session-安全最需要優先處理)
-- [Group 3｜本機儲存、記憶體與系統呼叫](#group-3本機儲存記憶體與系統呼叫)
-- [Group 4｜檔案同步與路徑安全](#group-4檔案同步與路徑安全)
-- [Group 5｜Git 防呆與開發環境衛生](#group-5git-防呆與開發環境衛生)
-- [Group 6｜已經做對的安全防護](#group-6已經做對的安全防護)
-- [優先處理清單（Action Checklist）](#優先處理清單action-checklist)
+## 網路與登入修正
 
----
+### HTTPS 是必要條件，不是 Wi-Fi 名稱或「看起來像 DSM」
 
-## 總覽儀表板
+實作：[lan.rs](../src-tauri/src/lan.rs)、[auth.rs](../src-tauri/src/auth.rs)、[config.rs](../src-tauri/src/config.rs)、[App.tsx](../src/App.tsx)。
 
-| 風險等級 | 數量 | 一句話看懂重點 |
-| --- | :---: | --- |
-| **Critical** | 0 | 無重大立即危害（無硬編碼密碼或私鑰外洩） |
-| **High** | 2 | 區網直連在特定條件下可能走明文 `http://`；`.gitignore` 未擋 `.env` 與金鑰檔 |
-| **Medium** | 4 | `_sid` 放在 URL 參數；`cmd /C` 呼叫 `netsh`；前端未擋 `http://`；`.gitignore` 漏 `.db` |
-| **Low** | 6 | 2FA 密碼未清記憶體；Windows 保留檔名檢查；Release 含測試 IPC；前端錯誤與 state |
-| **Info** | 3 | `192.168.0.18` 範例 IP 確認；單元測試假資料；Git 作者與範本文字 |
+- 舊的 HTTP 區網設定不會自動改寫成另一個連接埠，也不會傳送 SID；選路會停用該區網設定並使用一般 NAS 位址。
+- 要啟用區網 HTTPS，主機名稱須與憑證相符，憑證鏈亦須受 HTTP 客戶端信任。單純把 `http` 改成 `https` 或改成 IP 不保證憑證有效。
+- Wi-Fi 清單僅是選路條件，不是認證 NAS 的方法；沒有清單時也不會放寬 TLS。
+- 攻擊者必須能攔截或冒充使用者**已設定的 HTTP 區網端點**，並非任何同網段設備回應 JSON 就會被選中。全新設定預設沒有區網位址。
+- 不提供跳過憑證驗證、明文降級或重新導向後重送憑證的相容模式。
 
----
+### SID 的替代傳遞方式
 
-## Group 1｜密碼與機密有沒有外洩？（Git 歷史與測試資料）
+依據 Synology 官方文件：
 
-這一段回答最核心的問題：**「現在把這個 repo 推上去或公開，會不會洩漏帳號密碼？」**
+- [DSM Login Web API Guide：API 使用方式](https://kb.synology.com/en-global/DG/DSM_Login_Web_API_Guide/2)
+- [DSM Login Web API Guide：登入與 session 格式](https://kb.synology.com/en-global/DG/DSM_Login_Web_API_Guide/3)
 
-### 檢查範圍與結果
+DSM 支援將登入 session ID 放在 HTTP cookie 的 `id` 欄位；帶入 session cookie 時可不提供 `_sid` 參數。本次沿用原 session ID，以明確的 Cookie header 驗證下載、串流上傳及建立資料夾，不改用語義不同的 `X-SYNO-TOKEN`。
 
-- **Git 歷史全掃描：** 檢查了 `main` 的 97 個 commits 與所有 refs 共 285 個 commits（包含已刪除的檔案、舊版 OIDC 程式碼與 commit messages），並執行高熵字串掃描。
-- **敏感檔案檢查：** 確認從未 commit 過 `.env`、`*.pem`、`*.key`、`credentials*` 等檔案。
-- **外網位址檢查：** 未發現任何真實的 `.synology.me`、`quickconnect.to` 網址或真實帳號密碼。
+其餘原先以 POST form 傳送 `_sid` 的 API 維持原行為；記住登入的資料格式也不變。測試檢查實際請求標頭、URL、下載內容與 multipart 長度，不只檢查函式名稱。
 
-### 唯一需要你確認的小項目（Info）
+**殘餘風險：** Cookie 與 POST body 仍含機密；管理者不得把它們寫入代理／NAS 的診斷紀錄。本次沒有在使用者的真實 NAS 上執行相容性測試。
 
-1. **區網範例 IP `192.168.0.18`**
-   - **出現在哪：** `src/App.tsx:3717`（輸入框提示）、`src-tauri/src/config.rs`（註解）、`src-tauri/src/lan.rs`（錯誤提示與單元測試）、`docs/tasks.md`（最早於 commit `a164fe1`）。
-   - **為什麼要注意：** 雖然這只是內網 IP（外網連不到），但如果 `192.168.0.18` 剛好是你真實家裡 NAS 的 IP 且不想公開，建議改成通用範例（例如 `192.168.1.100`）。
-2. **單元測試內的假帳號與假 Token**
-   - **出現在哪：** `src-tauri/src/auth.rs`（`"alice"`、`"secret"`、`https://nas.example.com`）、`src-tauri/src/remembered_login.rs`（`"dummy-test-session-not-a-real-credential"`）、`src-tauri/src/config.rs`（`"https://old.example.com"`）。
-   - **結論：** 全部是寫死的測試假資料，沒有風險。
-3. **Git Commit 作者資訊**
-   - **說明：** Commit 紀錄包含標準 Git 作者署名（`John Conte <information9527@gmail.com>`），屬正常開發紀錄。
+## 密碼生命週期
 
----
+- OTP 等待密碼及其重送副本於釋放時清除；沒有新增密碼或 OTP 的磁碟儲存。
+- 明確取消 OTP 原本已走登出清理，不應描述成「所有取消都保留密碼」。本次加上未操作時的過期清理，亦確保儲存 session 刪除失敗時仍先清除待驗證密碼。
+- 移除包含密碼／OTP 的 request 型別的 `Debug` 衍生，降低未來誤記錄機密的機會。
+- JavaScript、IPC 序列化及 HTTP 函式庫可能產生暫時副本；清空 React state 與 `Zeroizing` **不保證整個程序記憶體完全無機密**。
+- Windows Credential Manager 仍僅保存 session，不保存 NAS 密碼或 OTP。
 
-## Group 2｜網路連線與 Session 安全（最需要優先處理）
+## 正式版與開發工具
 
-這個區塊關注的是：**「資料與登入憑證在網路上傳輸時，會不會被偷看或記在 Log 裡？」**
+實作：[lib.rs](../src-tauri/src/lib.rs)、[storage.rs](../src-tauri/src/storage.rs)、[App.tsx](../src/App.tsx)。
 
-### 1. [High] 區網直連允許明文 `http://` 且主機判斷過於寬鬆
+以下 IPC 在一般 release profile 不編譯、不註冊：
 
-- **問題在哪：**
-  - `src-tauri/src/lan.rs:15-51, 97-135`（`normalize_lan_origin`、`is_private_host`、`refresh`）
-  - `src-tauri/src/auth.rs:278-288, 522-530`（`parse_api_info_response`、`DsmAuthAdapter::current_session`）
-- **白話情境（為什麼危險）：**
-  - 目前區網位址 `lan_host` 允許使用不加密的 `http://`。
-  - 同時，`is_private_host` 把「任何沒有 `.` 的單字網域」（`!lower.contains('.')`）都當成區網主機。
-  - 最關鍵的是：當使用者**沒有設定允許的 Wi-Fi 名稱**（`lan_wifi_names` 為空，也是預設值）時，程式在**任何網路環境**（例如咖啡廳、飯店公共 Wi-Fi）都會嘗試探測 `lan_host`。只要同網段有偽造設備回應 `/webapi/query.cgi`，客戶端就會自動切換成明文 `http://`，把你的有效 `_sid`（登入憑證）與上傳的檔案赤裸裸送出去。
-- **怎麼修：**
-  1. `lan_host` 預設要求 `https://`；若真要支援 `http://`，應加上明確的開關與高風險警示。
-  2. 如果 `lan_wifi_names` 是空的，不要自動切換到明文 `http://` 區網連線。
-  3. 移除 `is_private_host` 裡的 `!lower.contains('.')`。
+`seed_demo_operations`、`seed_fault_matrix_operations`、`run_fault_matrix_once`、`run_fault_matrix_fast`、`force_due_retryable_operations`、`run_fake_remote_probe`、`run_and_store_fake_remote_probe`、`load_last_remote_probe_report`、`list_remote_probe_history`、`export_last_remote_probe_markdown`。
 
-### 2. [Medium] 部分 Drive API 把 `_sid` 放在網址（URL Query String）
+- 一般驗證、設定、同步、監看及狀態診斷保留。
+- 假 operation 會寫進**應用程式的資料庫**，不是完全隔離的測試資料庫；舊報告對這點的描述不準確。
+- `get_development_tools_enabled` 回報後端建置模式，前端仍同時要求開發模式才能顯示工具。
+- 若自行為 release 啟用 `debug_assertions`，便不再符合上述「一般 release」條件。
+- CSP／capabilities 不代表所有自訂 IPC 都已細分授權；本次以真正的 handler 閘控限制開發指令。
 
-- **問題在哪：** `src-tauri/src/auth.rs:623-633`（`fetch_drive_file`）、`706-718`（`put_drive_file`）、`737-746`（`make_drive_folder`）
-- **白話情境：**
-  - 登入與一般 API 都有乖乖把帳密或 `_sid` 放在 `POST` body 裡，但下載、上傳、建立資料夾這三個地方是把 `?_sid=...` 直接接在網址後面。
-  - 網址列參數很容易被經過的反向代理（例如 Cloudflare、Nginx）或 NAS 的存取紀錄（access log）完整存下來，等於把通行證留在 log 裡。
-- **怎麼修：** 改由 `Cookie: id=<sid>` / `X-SYNO-TOKEN` header 或 POST form body 傳遞（視 Synology Drive API 支援情況而定）。
+## 路徑與同步資料完整性
 
-### 3. [Medium] 前端輸入主機時未強制檢查 `https://`
+實作：[folder_sync.rs](../src-tauri/src/folder_sync.rs)、[auth.rs](../src-tauri/src/auth.rs)。
 
-- **問題在哪：** `src/App.tsx:878-968`（`testNasHost`、`saveHostConfig`、`testLanHost`、`saveLanConfig`）、`src/App.tsx:3717`
-- **白話情境：**
-  - 後端主機設定雖然會擋非 `https://`，但前端沒有先驗證，而且區網輸入框的提示文字寫著 `例如 http://192.168.0.18:5000/drive/`，很容易引導一般使用者填進 `http://`。
-- **怎麼修：** 前端送出前檢查必須為 `https://`，並把 placeholder 改為 `https://` 範例。
+- 保留名稱與映射碰撞會中止計畫並指出需重新命名的 NAS 項目，不會悄悄忽略或選其中一個檔案。
+- 正常 Unicode 名稱、既有單一檔名清理、雙向／單向同步與刪除策略保持原行為。
+- 遠端 `..` 檢查是防禦一致性，不應宣稱其缺漏已能繞過 NAS 的 ACL。
+- 本機掃描跳過 symlink，**不等於**後續寫入具有完整 no-follow 或 TOCTOU 防護；原報告的保證應限縮。若同步目錄可被其他不可信本機使用者修改，仍需另行設計原子檔案柄與路徑隔離。
 
----
+## Git 歷史與機密檢查的正確解讀
 
-## Group 3｜本機儲存、記憶體與系統呼叫
+複核對 `c2a540b` 可達的 557 個唯一 Git blobs 進行模式檢查，未識別真實私鑰、已知供應商 token 格式或含憑證的 URL；識別到的 credential 字面值是明確的單元測試資料。該基準的 `main` 有 110 個可達 commits、所有 refs 合計有 312 個可達 commits，**refs 數量與 commits 數量不可混用**。
 
-這個區塊關注的是：**「程式跑在使用者電腦上時，密碼和系統權限管得好不好？」**
+這不是「所有機密一定不存在」的證明：任意格式的秘密、不可達物件、外部副本及其他版本不在這個保證內。公開前仍應執行有遮罩輸出的秘密掃描，並自行確認環境設定與截圖。
 
-### 1. [Medium] 偵測 Wi-Fi 名稱時透過 `cmd /C` 呼叫 `netsh`
+- 測試中的假帳號、範例網域與假 SID 不需輪替。
+- 私有 IP 範例不是公開登入憑證，也不能僅憑範例推定使用者真實網路配置。
+- Git 作者署名是一般中繼資料，不是 NAS 憑證；本次不改寫 Git 歷史。
+- [.gitignore](../.gitignore) 是誤提交防呆，不會移除已追蹤的秘密，也不能辨識任意檔案內的敏感內容。
+- 公開 `.crt`、`.cer`、`.sig`、`.key.pub` 不因副檔名被視為私鑰；新增規則刻意不一律忽略它們。
 
-- **問題在哪：** `src-tauri/src/lan.rs:66-78`（`current_wifi_ssids`）
-- **說明：** 程式執行 `Command::new("cmd").args(["/C", "chcp 65001>nul & netsh wlan show interfaces"])`。因為指令字串完全寫死、沒有任何外部輸入，**目前沒有命令注入漏洞**；但實務上不需要多繞一層 `cmd.exe` 與依賴 `PATH`。
-- **怎麼修：** 改為直接呼叫 `%SystemRoot%\System32\netsh.exe`，並於 Rust 端處理編碼或改用 Win32 WLAN API。
+## 驗證紀錄
 
-### 2. [Low] 2FA 等待驗證期間，明文密碼暫存於記憶體且未清除
+驗證命令：
 
-- **問題在哪：** `src-tauri/src/auth.rs:370-375, 835-848`（`PendingLogin`、`authenticate_password`）
-- **說明：** 登入遇到兩步驟驗證（OTP）時，程式會把剛輸入的密碼暫存在 `PendingLogin` 結構中，等使用者輸入 OTP 後再一起送出。如果使用者中途關掉畫面放棄登入，這段明文密碼會留在記憶體裡，且沒有自動過期清除。
-- **怎麼修：** 使用 `zeroize` crate 在結構體釋放時清除記憶體，並加上短時間 TTL 過期機制。
+```powershell
+cargo test --manifest-path src-tauri\Cargo.toml --lib
+cargo check --manifest-path src-tauri\Cargo.toml --release --locked --lib
+npm run build
+npm run tauri -- build --debug --no-bundle
+```
 
-### 3. [Low] Release 正式版仍包含測試與故障注入用的 IPC 指令
-
-- **問題在哪：** `src-tauri/src/lib.rs:1304-1305, 1314-1318, 1329-1331`
-- **說明：** 如 `seed_demo_operations`、`run_fault_matrix_once`、`run_fake_remote_probe` 等開發/測試專用指令，目前在 `tauri::generate_handler!` 無條件註冊。雖然它們只影響本機測試狀態，但正式版不應該留著這些介面。
-- **怎麼修：** 加上 `#[cfg(debug_assertions)]` 或 Cargo feature flag，只在開發模式編譯。
-
-### 4. [Low] 前端登入失敗時未清空密碼輸入框 state
-
-- **問題在哪：** `src/App.tsx:433, 970-1001`（`loginByPassword`）
-- **說明：** `setPassword("")` 只寫在登入成功的路徑，若登入失敗，密碼會留在 React state（JS heap）直到使用者修改或關閉視窗。
-- **怎麼修：** 視 UX 需求在 `finally` 或切換分頁時清空 `password` 與 `otpCode`。
-
-### 5. [Low] 前端直接把後端原始錯誤字串顯示在畫面上
-
-- **問題在哪：** `src/App.tsx` 多處 `setError(String(err))` 與 `lastError`
-- **說明：** 若後端回傳包含本機檔案路徑或 SQLite 細節的錯誤訊息，會直接顯示於 UI toast（使用者截圖回報問題時可能順便拍到本機資訊）。
-- **怎麼修：** 後端回傳對使用者友善的錯誤訊息，或由前端依錯誤代碼對照顯示。
-
----
-
-## Group 4｜檔案同步與路徑安全
-
-這個區塊關注的是：**「如果遠端 NAS 被駭或檔名很奇怪，會不會蓋掉電腦裡不該碰的檔案？」**
-
-- **做得很好的地方：**
-  - `folder_sync::sanitize_segment`（`src-tauri/src/folder_sync.rs:385-400`）已正確過濾路徑分隔符號、控制字元與 `.` / `..`。
-  - `scan_local`（`src-tauri/src/folder_sync.rs:786`）會自動跳過 symbolic links，避免透過 symlink 讀取同步資料夾以外的檔案。
-- **[Low] 可再補齊的小缺口：**
-  1. `sanitize_segment` 尚未過濾 Windows 保留裝置名稱（`CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`），若遠端出現這類檔名可能造成本機 I/O 異常。
-  2. `src-tauri/src/auth.rs:948-984, 1031-1039`（`upload_remote_file`、`create_remote_folder`、`download_remote_file`）缺少 `..` 區段檢查（其餘列舉與刪除函式已有檢查，建議補齊以維持一致性）。
-
----
-
-## Group 5｜Git 防呆與開發環境衛生
-
-這個區塊關注的是：**「未來繼續開發時，會不會不小心把機密或垃圾檔案 commit 上去？」**
-
-### 1. [High] `.gitignore` 缺少 `.env` 與金鑰/憑證檔案規則
-
-- **位置：** `.gitignore:1-24`、`src-tauri/.gitignore:1-7`
-- **說明：** 目前只寫了 `*.local`，並沒有忽略 `.env`、`.env.*`（例如 `.env.production`），也沒有忽略 `*.key`、`*.pem`、`*.p12`、`*.pfx`、`*.crt`、`*.cer`、`*.sig`、`*.secret`。未來若本機建立環境設定檔或 Tauri 自動更新簽章金鑰，很容易不小心被 `git add .` 加進去。
-
-### 2. [Medium] `.gitignore` 缺少本機資料庫與暫存檔規則
-
-- **位置：** `.gitignore:1-24`
-- **說明：** 程式會產生 SQLite 資料庫與 `.synodl-part` 下載暫存檔，但 `.gitignore` 未忽略 `*.db`、`*.db-*`、`*.sqlite`、`*.sqlite3`、`*.synodl-part`。
-
-### 3. [Low / Info] 其他整理項目
-
-- `.gitignore` 可補上 `*.tsbuildinfo`、`Thumbs.db`、`desktop.ini`；`src-tauri/.gitignore` 可考慮忽略整個 `/gen/`。
-- `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`README.md` 仍保留部分 Tauri 預設範本字樣（如 `"tauri-app"`、`authors = ["you"]`），正式發布前可一併更新。
-
----
-
-## Group 6｜已經做對的安全防護
-
-這份專案其實已經避開了許多桌面應用程式常見的地雷，以下是已驗證通過的項目：
-
-| 防護項目 | 實作方式與驗證位置 |
-| --- | --- |
-| **密碼不落地儲存** | 使用 `keyring` v3（Windows Credential Manager）僅保存 session token，不存明文密碼（`src-tauri/src/remembered_login.rs:18-62`） |
-| **嚴格 TLS 憑證驗證** | `ureq` 維持預設 HTTPS 憑證檢查，沒有關閉驗證的後門（`src-tauri/src/auth.rs:321-325, 399-416`） |
-| **防範 SQL Injection** | 所有 SQLite 查詢皆使用參數化綁定（`src-tauri/src/storage.rs`） |
-| **無前端 XSS / 危險呼叫** | 無 `dangerouslySetInnerHTML`、`eval`、`localStorage` 存 token，也無 `console.log` 印出敏感資訊（`src/`） |
-| **最小權限原則 & CSP** | Tauri `capabilities/default.json` 僅開 `core:default`；`tauri.conf.json:23` 已設嚴格 CSP |
-| **Log 不外洩機密** | 後端無 `println!` / `dbg!`，HTTP 傳輸錯誤會轉成不透明錯誤碼，不會把含 `_sid` 的網址直接丟進錯誤訊息 |
-
----
-
-## 優先處理清單（Action Checklist）
-
-建議依影響程度分三批處理：
-
-### P0｜建議立即補上（Low Effort / High Impact）
-- [ ] 更新 `.gitignore`，加入 `.env`、`.env.*`、`*.key`、`*.pem`、`*.sig`、`*.db`、`*.sqlite*`、`*.synodl-part` 等規則
-- [ ] 收緊區網直連條件（`src-tauri/src/lan.rs`）：移除 `!lower.contains('.')`、未設定 `lan_wifi_names` 時不自動切換明文 `http://`、或預設要求 `https://`
-
-### P1｜近期修正
-- [ ] 檢查 `fetch_drive_file` / `put_drive_file` / `make_drive_folder`（`src-tauri/src/auth.rs`）是否可改用 Header / POST body 傳遞 `_sid`，避免留在網址參數
-- [ ] 將 `src-tauri/src/lan.rs` 的 `cmd /C netsh` 改為直接呼叫 `System32\netsh.exe`
-- [ ] 前端（`src/App.tsx`）補上 `https://` 檢查並更新 `lanHost` 的 `http://` 範例提示
-- [ ] 確認 `192.168.0.18` 範例 IP 是否需要替換
-
-### P2｜有空再收斂
-- [ ] 2FA `PendingLogin` 密碼加上 `zeroize` 與 TTL 過期機制
-- [ ] Release build 使用 `#[cfg(debug_assertions)]` 隱藏測試與故障注入用 IPC commands
-- [ ] 補齊 Windows 保留檔名過濾與 `auth.rs` 路徑 `..` 一致性檢查
+- 後端測試通過：65 passed、0 failed、2 ignored。涵蓋 Cookie 而非 URL SID、精確 multipart 串流、禁止重新導向、HTTP 區網拒絕、OTP 過期與取消清理、路徑驗證、保留名稱與映射碰撞。
+- Release `cargo check --locked --lib`、前端型別檢查與建置、桌面 debug 建置均通過。
+- Git ignore 斷言通過：拒絕納入本機秘密／暫存，保留範例、公開簽章與 fixture。
+- 前端以假的 Tauri bridge 驗證通過：登入失敗及轉入 OTP 時清空密碼、OTP 失敗清空驗證碼、取消失敗仍清空欄位並顯示錯誤；HTTP NAS／區網設定在測試與儲存前被拒絕且不呼叫後端；HTTPS 設定可儲存且不登出；正式版不顯示開發工具。
+- 未使用真實 NAS 或執行同步操作；Windows 同步根註冊與回收筒測試維持既有 `ignored` 狀態，避免副作用。

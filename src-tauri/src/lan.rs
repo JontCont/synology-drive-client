@@ -11,17 +11,12 @@ use crate::{auth, config};
 
 const LAN_PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// 把使用者填的區網位址正規化為 `http(s)://host[:port]`；只接受私有網路位址，避免把登入憑證送到外部主機
+/// 區網連線同樣要求 HTTPS 與有效憑證，只接受私有網路位址。
 pub fn normalize_lan_origin(host: &str) -> Result<String, String> {
     let trimmed = host.trim();
-    let (scheme, rest) = if let Some(rest) = trimmed.strip_prefix("http://") {
-        ("http", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("https://") {
-        ("https", rest)
-    } else {
-        return Err("區網位址必須以 http:// 或 https:// 開頭，例如 http://192.168.0.18:5000/drive/".to_string());
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let origin = auth::normalize_dsm_origin(trimmed)
+        .map_err(|_| "區網位址必須使用有效的 https:// 網址與受信任憑證，例如 https://nas.local:5001".to_string())?;
+    let authority = origin.trim_start_matches("https://");
     if authority.is_empty() || authority.contains('@') || authority.contains(' ') || authority.contains('[') {
         return Err("區網位址格式不正確".to_string());
     }
@@ -35,7 +30,7 @@ pub fn normalize_lan_origin(host: &str) -> Result<String, String> {
             "區網位址必須是私有網路位址（192.168.x.x、10.x.x.x、172.16-31.x.x）或 .local 主機名稱".to_string(),
         );
     }
-    Ok(format!("{scheme}://{authority}"))
+    Ok(origin)
 }
 
 fn is_private_host(host: &str) -> bool {
@@ -47,7 +42,6 @@ fn is_private_host(host: &str) -> bool {
         || lower.ends_with(".local")
         || lower.ends_with(".lan")
         || lower.ends_with(".home.arpa")
-        || !lower.contains('.')
 }
 
 /// 從 `netsh wlan show interfaces` 的輸出取出目前連線的 Wi-Fi 名稱（SSID）
@@ -141,18 +135,22 @@ mod tests {
     #[test]
     fn lan_origin_accepts_private_hosts_only() {
         assert_eq!(
-            normalize_lan_origin(" http://192.168.0.18:5000/drive/ ").as_deref(),
-            Ok("http://192.168.0.18:5000")
+            normalize_lan_origin(" https://192.168.1.100:5001/drive/ ").as_deref(),
+            Ok("https://192.168.1.100:5001")
         );
         assert_eq!(normalize_lan_origin("https://10.0.0.5").as_deref(), Ok("https://10.0.0.5"));
-        assert_eq!(normalize_lan_origin("http://172.20.1.2:5000").as_deref(), Ok("http://172.20.1.2:5000"));
-        assert_eq!(normalize_lan_origin("http://nas.local:5000").as_deref(), Ok("http://nas.local:5000"));
-        assert!(normalize_lan_origin("http://8.8.8.8:5000").is_err());
-        assert!(normalize_lan_origin("http://172.32.0.1").is_err());
-        assert!(normalize_lan_origin("http://nas.example.com").is_err());
-        assert!(normalize_lan_origin("192.168.0.18:5000").is_err());
-        assert!(normalize_lan_origin("http://user@192.168.0.18").is_err());
-        assert!(normalize_lan_origin("http://192.168.0.18:abc").is_err());
+        assert_eq!(normalize_lan_origin("https://172.20.1.2:5001").as_deref(), Ok("https://172.20.1.2:5001"));
+        assert_eq!(normalize_lan_origin("https://nas.local:5001").as_deref(), Ok("https://nas.local:5001"));
+        assert!(normalize_lan_origin("https://8.8.8.8:5001").is_err());
+        assert!(normalize_lan_origin("https://172.32.0.1").is_err());
+        assert!(normalize_lan_origin("https://nas.example.com").is_err());
+        assert!(normalize_lan_origin("https://nas:5001").is_err());
+        assert!(normalize_lan_origin("192.168.1.100:5001").is_err());
+        assert!(normalize_lan_origin("https://user@192.168.1.100").is_err());
+        assert!(normalize_lan_origin("https://192.168.1.100:abc").is_err());
+        for host in ["http://192.168.1.100:5000", "http://nas.local:5000", "http://nas:5000"] {
+            assert!(normalize_lan_origin(host).is_err());
+        }
     }
 
     #[test]

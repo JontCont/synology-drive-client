@@ -516,6 +516,7 @@ pub fn update_conflict_status<R: Runtime>(
         .map_err(|e| format!("回讀 conflict 狀態失敗：{e}"))
 }
 
+#[cfg(debug_assertions)]
 pub fn seed_demo_operations<R: Runtime>(
     app: &AppHandle<R>,
     count: u32,
@@ -547,6 +548,7 @@ pub fn seed_demo_operations<R: Runtime>(
     Ok(rows)
 }
 
+#[cfg(debug_assertions)]
 pub fn seed_fault_matrix_operations<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<OperationRow>, String> {
@@ -861,6 +863,7 @@ pub fn schedule_operation_retry<R: Runtime>(
         .map_err(|e| format!("回讀 operation retry 狀態失敗：{e}"))
 }
 
+#[cfg(debug_assertions)]
 pub fn force_due_retryable_operations<R: Runtime>(
     app: &AppHandle<R>,
     limit: u32,

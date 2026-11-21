@@ -12,6 +12,38 @@ dist
 dist-ssr
 *.local
 
+# Local secrets (sanitized examples and public signing material remain tracked)
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+*.key
+*key*.pem
+*private*.pem
+*.p12
+*.pfx
+*.secret
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+
+# Local runtime data
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+!**/tests/fixtures/*.db
+!**/tests/fixtures/*.sqlite
+!**/tests/fixtures/*.sqlite3
+*.synodl-part
+*.tsbuildinfo
+Thumbs.db
+desktop.ini
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -22,3 +54,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# docs
+docs/*

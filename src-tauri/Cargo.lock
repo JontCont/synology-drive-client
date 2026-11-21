@@ -3990,6 +3990,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "trash",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
