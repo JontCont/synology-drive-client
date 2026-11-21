@@ -32,8 +32,6 @@ struct RunningService {
     stop_tx: Sender<()>,
     handle: JoinHandle<()>,
     interval_seconds: u32,
-    local_sync_path: String,
-    remote_path: String,
     metrics: Arc<Mutex<ServiceMetrics>>,
 }
 
@@ -47,8 +45,6 @@ pub struct SyncServiceState {
 pub struct SyncServiceStatus {
     pub running: bool,
     pub interval_seconds: Option<u32>,
-    pub local_sync_path: Option<String>,
-    pub remote_path: Option<String>,
     pub tick_count: u64,
     pub queued_count: u64,
     pub ingest_skipped_count: u64,
@@ -69,21 +65,12 @@ impl SyncServiceState {
         }
     }
 
-    pub fn start(
-        &self,
-        app: AppHandle,
-        interval_seconds: u32,
-        local_sync_path: String,
-        remote_path: String,
-    ) -> Result<SyncServiceStatus, String> {
+    pub fn start(&self, app: AppHandle, interval_seconds: u32) -> Result<SyncServiceStatus, String> {
         if interval_seconds == 0 {
             return Err("輪詢間隔必須大於 0 秒".to_string());
         }
-        if local_sync_path.trim().is_empty() {
-            return Err("尚未設定本機同步資料夾".to_string());
-        }
-        if remote_path.trim().is_empty() {
-            return Err("尚未設定遠端路徑".to_string());
+        if config::active_folders(&config::load(&app)?).is_empty() {
+            return Err("尚未新增同步資料夾（或全部已暫停），請先到「同步設定」新增".to_string());
         }
 
         let mut guard = self
@@ -178,8 +165,6 @@ impl SyncServiceState {
             stop_tx,
             handle,
             interval_seconds,
-            local_sync_path,
-            remote_path,
             metrics,
         });
 
@@ -220,8 +205,6 @@ impl SyncServiceState {
             Ok(SyncServiceStatus {
                 running: true,
                 interval_seconds: Some(running.interval_seconds),
-                local_sync_path: Some(running.local_sync_path.clone()),
-                remote_path: Some(running.remote_path.clone()),
                 tick_count: metrics.tick_count,
                 queued_count: metrics.queued_count,
                 ingest_skipped_count: metrics.ingest_skipped_count,
@@ -241,8 +224,6 @@ impl SyncServiceState {
             Ok(SyncServiceStatus {
                 running: false,
                 interval_seconds: None,
-                local_sync_path: None,
-                remote_path: None,
                 tick_count: 0,
                 queued_count: 0,
                 ingest_skipped_count: 0,
@@ -260,8 +241,12 @@ impl SyncServiceState {
 
     fn ingest_once(app: &AppHandle) -> Result<usize, String> {
         let cfg = config::load(app)?;
-        if cfg.sync_mode == config::SYNC_MODE_DOWNLOAD_ONLY {
-            // 僅下載模式不接收本機變更
+        // 僅下載模式與暫停中的資料夾不接收本機變更
+        let ingest_folders: Vec<&config::SyncFolder> = config::active_folders(&cfg)
+            .into_iter()
+            .filter(|f| f.mode != config::SYNC_MODE_DOWNLOAD_ONLY)
+            .collect();
+        if ingest_folders.is_empty() {
             return Ok(0);
         }
         if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
@@ -269,18 +254,30 @@ impl SyncServiceState {
         }
 
         let watcher_state = app.state::<watcher::LocalWatcherState>();
-        let mut paths = watcher_state.drain_event_paths(20)?;
-        if paths.is_empty() {
-            if let Some(root) = config::load(app)?.local_sync_path {
-                paths = scanner::collect_local_paths(&root, 20)?;
+        let mut entries: Vec<(String, String)> = watcher_state
+            .drain_event_paths(20)?
+            .into_iter()
+            .filter_map(|path| {
+                let folder = config::folder_for_path(&cfg.sync_folders, &path)?;
+                ingest_folders
+                    .iter()
+                    .any(|f| f.id == folder.id)
+                    .then(|| (folder.id.clone(), path))
+            })
+            .collect();
+        if entries.is_empty() {
+            for folder in &ingest_folders {
+                for path in scanner::collect_local_paths(&folder.local_path, 20)? {
+                    entries.push((folder.id.clone(), path));
+                }
             }
         }
-        if paths.is_empty() {
+        if entries.is_empty() {
             return Ok(0);
         }
 
         let mut queued = 0;
-        for (idx, path) in paths.iter().enumerate() {
+        for (idx, (root_id, path)) in entries.iter().enumerate() {
             if storage::has_active_operation_for_path(app, "scan_local_path", path)? {
                 continue;
             }
@@ -293,7 +290,7 @@ impl SyncServiceState {
                         .as_millis(),
                     idx
                 ),
-                root_id: "default-root".to_string(),
+                root_id: root_id.clone(),
                 item_id: None,
                 op_type: "scan_local_path".to_string(),
                 from_path: Some(path.clone()),

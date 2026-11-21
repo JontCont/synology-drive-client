@@ -10,20 +10,58 @@ type OidcConfig = {
   scopes: string | null;
 };
 
+type SyncFolder = {
+  id: string;
+  name: string;
+  localPath: string;
+  remotePath: string;
+  mode: SyncMode;
+  paused: boolean;
+};
+
 type AppConfig = {
   serverHost?: string | null;
-  localSyncPath: string | null;
-  remotePath: string | null;
+  syncFolders: SyncFolder[];
   pollIntervalSeconds: number;
   ingestBacklogLimit: number;
   oidc?: OidcConfig;
   windowPreset?: "wide" | "compact";
-  syncMode?: SyncMode;
 };
 
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
 
 type NasFolderEntry = { name: string; path: string };
+
+// 以下路徑比對規則需與後端 config.rs 的 validate_new_folder 保持一致（後端為最終把關）
+const normalizeLocalPath = (p: string) =>
+  p.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+const normalizeRemotePath = (p: string) => p.trim().replace(/\/+$/, "").toLowerCase();
+const isWithinPath = (child: string, parent: string) =>
+  parent === "" || child === parent || child.startsWith(`${parent}/`);
+
+type PathRelation = { kind: "covered" | "contains"; folderName: string };
+
+function pathRelation(
+  folders: SyncFolder[],
+  path: string,
+  normalize: (p: string) => string,
+  pick: (f: SyncFolder) => string,
+): PathRelation | null {
+  const target = normalize(path);
+  if (!target) return null;
+  for (const folder of folders) {
+    const other = normalize(pick(folder));
+    if (isWithinPath(target, other)) return { kind: "covered", folderName: folder.name };
+    if (isWithinPath(other, target)) return { kind: "contains", folderName: folder.name };
+  }
+  return null;
+}
+
+function describeRelation(side: string, relation: PathRelation): string {
+  return relation.kind === "covered"
+    ? `此${side}資料夾已包含在「${relation.folderName}」的同步範圍內，不需要重複加入`
+    : `此${side}資料夾包含了已同步的「${relation.folderName}」，請先移除它，或改選其他資料夾`;
+}
 
 const SYNC_MODES: { id: SyncMode; label: string; arrow: string; desc: string }[] = [
   {
@@ -78,8 +116,6 @@ type SyncRootRow = {
 type SyncServiceStatus = {
   running: boolean;
   intervalSeconds: number | null;
-  localSyncPath: string | null;
-  remotePath: string | null;
   tickCount: number;
   queuedCount: number;
   ingestSkippedCount: number;
@@ -236,7 +272,6 @@ function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
-  const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [nasPicker, setNasPicker] = useState<{
     open: boolean;
     path: string;
@@ -266,8 +301,13 @@ function App() {
   const [message, setMessage] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
 
+  // 「新增同步資料夾」表單的草稿
+  const [addFolderOpen, setAddFolderOpen] = useState(false);
   const [localSyncPath, setLocalSyncPath] = useState("");
   const [remotePath, setRemotePath] = useState("");
+  const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState("30");
   const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
@@ -328,12 +368,9 @@ function App() {
   function applyConfigToState(value: AppConfig) {
     setConfig(value);
     setServerHost(value.serverHost ?? "");
-    setLocalSyncPath(value.localSyncPath ?? "");
-    setRemotePath(value.remotePath ?? "");
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
     setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
-    setSyncMode(value.syncMode ?? "bidirectional");
     if (value.oidc) {
       setOidcProviderName(value.oidc.providerName ?? "");
       setOidcIssuerUrl(value.oidc.issuerUrl ?? "");
@@ -472,21 +509,71 @@ function App() {
     try {
       const next = await invoke<AppConfig>("update_app_config", {
         update: {
-          localSyncPath,
-          remotePath,
           pollIntervalSeconds: parsedPoll,
           ingestBacklogLimit: parsedBacklog,
-          syncMode,
         },
       });
       applyConfigToState(next);
-      setSyncRoot(null);
       setMessage("設定已儲存。");
     } catch (err) {
       setError(String(err));
     } finally {
       setSaving(false);
     }
+  }
+
+  async function runFolderAction(action: () => Promise<AppConfig>, successMessage: string) {
+    setFolderBusy(true);
+    setError(null);
+    try {
+      applyConfigToState(await action());
+      setSyncRoot(null);
+      setMessage(successMessage);
+      await refreshWatcherStatus().catch(() => undefined);
+      return true;
+    } catch (err) {
+      setError(String(err));
+      return false;
+    } finally {
+      setFolderBusy(false);
+    }
+  }
+
+  async function addSyncFolder() {
+    const ok = await runFolderAction(
+      () =>
+        invoke<AppConfig>("add_sync_folder", {
+          localPath: localSyncPath,
+          remotePath,
+          mode: syncMode,
+        }),
+      "已新增同步資料夾。",
+    );
+    if (ok) {
+      setLocalSyncPath("");
+      setRemotePath("");
+      setSyncMode("bidirectional");
+      setAddFolderOpen(false);
+    }
+  }
+
+  function updateSyncFolder(id: string, patch: { mode?: SyncMode; paused?: boolean }) {
+    return runFolderAction(
+      () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
+      patch.paused === undefined
+        ? "已更新同步模式。"
+        : patch.paused
+          ? "已暫停此資料夾的同步。"
+          : "已繼續同步此資料夾。",
+    );
+  }
+
+  async function removeSyncFolder(id: string) {
+    setConfirmRemoveId(null);
+    await runFolderAction(
+      () => invoke<AppConfig>("remove_sync_folder", { id }),
+      "已移除同步資料夾（本機與 NAS 上的檔案不會被刪除）。",
+    );
   }
 
   async function browseLocalFolder() {
@@ -509,7 +596,7 @@ function App() {
   }
 
   function openNasPicker() {
-    loadNasFolders(remotePath.startsWith("/") ? remotePath : "");
+    loadNasFolders("");
   }
 
   function chooseNasFolder() {
@@ -1284,7 +1371,23 @@ function App() {
     value: stageCountMap.get(stage) ?? 0,
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
+  const syncFolders = config?.syncFolders ?? [];
   const syncModeArrow = SYNC_MODES.find((m) => m.id === syncMode)?.arrow ?? "⇄";
+  const modeArrow = (mode: SyncMode) => SYNC_MODES.find((m) => m.id === mode)?.arrow ?? "⇄";
+  const draftLocalRelation = localSyncPath
+    ? pathRelation(syncFolders, localSyncPath, normalizeLocalPath, (f) => f.localPath)
+    : null;
+  const draftRemoteRelation = remotePath
+    ? pathRelation(syncFolders, remotePath, normalizeRemotePath, (f) => f.remotePath)
+    : null;
+  const draftOverlapError = draftLocalRelation
+    ? describeRelation("本機", draftLocalRelation)
+    : draftRemoteRelation
+      ? describeRelation("NAS", draftRemoteRelation)
+      : null;
+  const nasPickerRelation = nasPicker.path
+    ? pathRelation(syncFolders, nasPicker.path, normalizeRemotePath, (f) => f.remotePath)
+    : null;
 
   const setupSteps: {
     label: string;
@@ -1295,16 +1398,12 @@ function App() {
   }[] = [
     { label: "登入 NAS", hint: "已完成", done: isAuthenticated },
     {
-      label: "設定本機同步資料夾",
-      hint: config?.localSyncPath || "例如 C:\\Users\\you\\SynologyDrive（資料夾需已存在）",
-      done: Boolean(config?.localSyncPath?.trim()),
-      action: "前往設定",
-      target: "settings",
-    },
-    {
-      label: "設定 NAS 遠端路徑",
-      hint: config?.remotePath || "例如 /Drive/SyncRoot",
-      done: Boolean(config?.remotePath?.trim()),
+      label: "新增同步資料夾",
+      hint:
+        syncFolders.length > 0
+          ? `已設定 ${syncFolders.length} 個同步資料夾`
+          : "在「同步設定」選擇本機與 NAS 資料夾及同步模式",
+      done: syncFolders.length > 0,
       action: "前往設定",
       target: "settings",
     },
@@ -2022,11 +2121,9 @@ function App() {
               {activeTab === "settings" && "同步設定"}
             </h1>
             <p className="page-subtitle">
-              {syncRoot
-                ? `${syncRoot.localPath} ⇄ ${syncRoot.remotePath}`
-                : config?.localSyncPath && config?.remotePath
-                  ? `${config.localSyncPath} ⇄ ${config.remotePath}`
-                  : "尚未設定預設同步路徑"}
+              {syncFolders.length > 0
+                ? `${syncFolders.length} 個同步資料夾（${syncFolders.filter((f) => !f.paused).length} 個啟用中）`
+                : "尚未新增同步資料夾"}
             </p>
           </div>
 
@@ -2128,17 +2225,34 @@ function App() {
                 ) : nasPicker.error ? (
                   <div className="alert alert-error">{nasPicker.error}</div>
                 ) : nasPicker.entries.length > 0 ? (
-                  nasPicker.entries.map((entry) => (
-                    <button
-                      key={entry.path}
-                      type="button"
-                      className="nas-folder-item"
-                      onClick={() => loadNasFolders(entry.path)}
-                    >
-                      <span aria-hidden="true">📁</span>
-                      <span>{entry.name}</span>
-                    </button>
-                  ))
+                  nasPicker.entries.map((entry) => {
+                    const relation = pathRelation(
+                      syncFolders,
+                      entry.path,
+                      normalizeRemotePath,
+                      (f) => f.remotePath,
+                    );
+                    const covered = relation?.kind === "covered";
+                    return (
+                      <button
+                        key={entry.path}
+                        type="button"
+                        className="nas-folder-item"
+                        disabled={covered}
+                        onClick={() => loadNasFolders(entry.path)}
+                      >
+                        <span aria-hidden="true">📁</span>
+                        <span>{entry.name}</span>
+                        {relation ? (
+                          <span className="badge badge-neutral nas-folder-tag">
+                            {covered
+                              ? `已包含於「${relation.folderName}」`
+                              : `內含已同步的「${relation.folderName}」`}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })
                 ) : (
                   <div className="empty-state">此資料夾底下沒有子資料夾</div>
                 )}
@@ -2147,12 +2261,17 @@ function App() {
                 已選：
                 <code className="mono">{nasPicker.path || "（請先進入一個資料夾）"}</code>
               </div>
+              {nasPickerRelation ? (
+                <div className="alert alert-warning" role="status">
+                  {describeRelation("NAS", nasPickerRelation)}
+                </div>
+              ) : null}
               <div className="button-row">
                 <button
                   type="button"
                   className="btn btn-primary"
                   style={{ flex: 1 }}
-                  disabled={!nasPicker.path || nasPicker.loading}
+                  disabled={!nasPicker.path || nasPicker.loading || Boolean(nasPickerRelation)}
                   onClick={chooseNasFolder}
                 >
                   選擇此資料夾
@@ -2443,7 +2562,7 @@ function App() {
                     <div className="stat-item">
                       <span className="stat-key">監看根目錄</span>
                       <span className="stat-val mono">
-                        {watcherStatus?.rootPath || config?.localSyncPath || "未設定"}
+                        {watcherStatus?.rootPath || "未啟動"}
                       </span>
                     </div>
                     <div className="stat-item">
@@ -3063,21 +3182,135 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">同步設定</h2>
-                    <p className="card-desc">選擇同步模式並指定本機與 NAS 資料夾</p>
+                    <h2 className="card-title">同步資料夾</h2>
+                    <p className="card-desc">
+                      每個資料夾可各自設定同步模式；已包含在某個資料夾底下的子資料夾不需要重複加入
+                    </p>
                   </div>
-                  <span className="badge badge-info sync-direction-badge">
-                    本機 {syncModeArrow} NAS
-                  </span>
+                  {!addFolderOpen ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={() => setAddFolderOpen(true)}
+                      disabled={!config}
+                    >
+                      ＋ 新增同步資料夾
+                    </button>
+                  ) : null}
                 </div>
+
                 {config ? (
-                  <form
-                    className="form-stack"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      saveConfig();
-                    }}
-                  >
+                  syncFolders.length > 0 ? (
+                    <div className="folder-list">
+                      {syncFolders.map((folder) => (
+                        <div
+                          key={folder.id}
+                          className={`folder-row ${folder.paused ? "paused" : ""}`}
+                        >
+                          <div className="folder-row-main">
+                            <div className="folder-row-title">
+                              <span
+                                className={`status-dot ${
+                                  folder.paused ? "status-idle" : "status-online"
+                                }`}
+                              />
+                              <strong>{folder.name}</strong>
+                              <span
+                                className={`badge ${
+                                  folder.paused ? "badge-neutral" : "badge-success"
+                                }`}
+                              >
+                                {folder.paused ? "已暫停" : "啟用中"}
+                              </span>
+                            </div>
+                            <div className="folder-row-paths mono">
+                              <span>{folder.localPath}</span>
+                              <span className="folder-row-arrow" aria-hidden="true">
+                                {modeArrow(folder.mode)}
+                              </span>
+                              <span>{folder.remotePath}</span>
+                            </div>
+                          </div>
+                          <div className="folder-row-actions">
+                            <select
+                              className="input folder-mode-select"
+                              value={folder.mode}
+                              disabled={folderBusy}
+                              aria-label={`${folder.name} 的同步模式`}
+                              onChange={(event) =>
+                                updateSyncFolder(folder.id, {
+                                  mode: event.currentTarget.value as SyncMode,
+                                })
+                              }
+                            >
+                              {SYNC_MODES.map((mode) => (
+                                <option key={mode.id} value={mode.id}>
+                                  {mode.label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={folderBusy}
+                              onClick={() =>
+                                updateSyncFolder(folder.id, { paused: !folder.paused })
+                              }
+                            >
+                              {folder.paused ? "繼續" : "暫停"}
+                            </button>
+                            {confirmRemoveId === folder.id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="btn btn-outline-danger btn-sm"
+                                  disabled={folderBusy}
+                                  onClick={() => removeSyncFolder(folder.id)}
+                                >
+                                  確定移除
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={() => setConfirmRemoveId(null)}
+                                >
+                                  取消
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                disabled={folderBusy}
+                                onClick={() => setConfirmRemoveId(folder.id)}
+                              >
+                                移除
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : !addFolderOpen ? (
+                    <div className="empty-state">
+                      尚未新增同步資料夾，按右上角「＋ 新增同步資料夾」開始
+                    </div>
+                  ) : null
+                ) : (
+                  <div className="fb-skeleton-container" aria-busy="true">
+                    <div className="fb-skeleton fb-skeleton-input" />
+                    <div className="fb-skeleton fb-skeleton-input" />
+                  </div>
+                )}
+
+                {serviceStatus?.running ? (
+                  <span className="cell-secondary">
+                    資料夾變更會即時套用到本機監看；同步模式與暫停狀態會在下一輪同步生效
+                  </span>
+                ) : null}
+
+                {addFolderOpen ? (
+                  <div className="folder-add-panel">
                     <div className="sync-section">
                       <span className="sync-section-title">1. 同步模式</span>
                       <div className="preset-grid" role="radiogroup" aria-label="同步模式">
@@ -3155,10 +3388,56 @@ function App() {
                           </div>
                         </label>
                       </div>
+                      {draftOverlapError ? (
+                        <div className="alert alert-warning" role="status">
+                          {draftOverlapError}
+                        </div>
+                      ) : null}
                     </div>
 
-                    <details className="sync-advanced">
-                      <summary>進階（輪詢與佇列保護）</summary>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={
+                          folderBusy ||
+                          !localSyncPath ||
+                          !remotePath ||
+                          Boolean(draftOverlapError)
+                        }
+                        onClick={addSyncFolder}
+                      >
+                        {folderBusy ? "加入中..." : "加入同步資料夾"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => {
+                          setAddFolderOpen(false);
+                          setLocalSyncPath("");
+                          setRemotePath("");
+                        }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2 className="card-title">進階設定</h2>
+                <p className="card-desc">輪詢間隔與佇列保護上限（所有資料夾共用）</p>
+                {config ? (
+                  <form
+                    className="form-stack"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveConfig();
+                    }}
+                  >
+                    <details className="sync-advanced" open>
+                      <summary>輪詢與佇列保護</summary>
                       <div className="two-col-grid" style={{ marginTop: 12 }}>
                         <label className="form-field">
                           <span>輪詢間隔（秒）</span>
@@ -3187,11 +3466,11 @@ function App() {
 
                     <div className="button-row">
                       <button type="submit" className="btn btn-primary" disabled={saving}>
-                        {saving ? "儲存中..." : "儲存同步設定"}
+                        {saving ? "儲存中..." : "儲存進階設定"}
                       </button>
                       {serviceStatus?.running ? (
                         <span className="cell-secondary">
-                          同步服務運行中，變更模式或路徑後請停止再重新啟動才會生效
+                          輪詢間隔變更後，請停止再重新啟動同步服務才會生效
                         </span>
                       ) : null}
                     </div>

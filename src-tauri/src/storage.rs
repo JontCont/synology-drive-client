@@ -682,24 +682,37 @@ pub fn purge_operations_by_stage<R: Runtime>(
     Ok(deleted as u64)
 }
 
-pub fn claim_next_operation<R: Runtime>(app: &AppHandle<R>) -> Result<Option<OperationRow>, String> {
+pub fn claim_next_operation<R: Runtime>(
+    app: &AppHandle<R>,
+    excluded_root_ids: &[String],
+) -> Result<Option<OperationRow>, String> {
     let path = db_path(app)?;
     let mut conn = open_connection(&path)?;
     let tx = conn
         .transaction()
         .map_err(|e| format!("建立 operation 交易失敗：{e}"))?;
 
+    let exclusion = if excluded_root_ids.is_empty() {
+        String::new()
+    } else {
+        let placeholders = vec!["?"; excluded_root_ids.len()].join(",");
+        format!("AND root_id NOT IN ({placeholders})")
+    };
+    let query = format!(
+        "
+        SELECT id
+        FROM operations
+        WHERE (stage = 'planned'
+               OR (stage = 'retryable' AND next_retry_at IS NOT NULL AND next_retry_at <= CURRENT_TIMESTAMP))
+          {exclusion}
+        ORDER BY updated_at ASC
+        LIMIT 1
+        "
+    );
     let op_id: Option<String> = tx
         .query_row(
-            "
-            SELECT id
-            FROM operations
-            WHERE stage = 'planned'
-               OR (stage = 'retryable' AND next_retry_at IS NOT NULL AND next_retry_at <= CURRENT_TIMESTAMP)
-            ORDER BY updated_at ASC
-            LIMIT 1
-            ",
-            [],
+            &query,
+            rusqlite::params_from_iter(excluded_root_ids.iter()),
             |row| row.get(0),
         )
         .ok();

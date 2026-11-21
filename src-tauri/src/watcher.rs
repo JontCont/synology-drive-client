@@ -47,13 +47,14 @@ impl LocalWatcherState {
         }
     }
 
-    pub fn start(&self, root_path: String) -> Result<LocalWatcherStatus, String> {
-        if root_path.trim().is_empty() {
-            return Err("本機同步資料夾不可為空".to_string());
+    pub fn start(&self, root_paths: Vec<String>) -> Result<LocalWatcherStatus, String> {
+        if root_paths.is_empty() {
+            return Err("沒有可監看的同步資料夾，請先新增並啟用至少一個".to_string());
         }
-        if !Path::new(&root_path).exists() {
-            return Err("本機同步資料夾不存在".to_string());
+        if let Some(missing) = root_paths.iter().find(|p| !Path::new(p).exists()) {
+            return Err(format!("本機同步資料夾不存在：{missing}"));
         }
+        let root_path = root_paths.join(", ");
 
         let mut guard = self
             .inner
@@ -67,7 +68,6 @@ impl LocalWatcherState {
         let metrics_for_thread = Arc::clone(&metrics);
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (event_tx, event_rx) = mpsc::channel::<notify::Result<Event>>();
-        let root_path_for_thread = root_path.clone();
 
         let handle = thread::Builder::new()
             .name("local-watcher-loop".to_string())
@@ -82,11 +82,13 @@ impl LocalWatcherState {
                     Err(_) => return,
                 };
 
-                if watcher
-                    .watch(Path::new(&root_path_for_thread), RecursiveMode::Recursive)
-                    .is_err()
-                {
-                    return;
+                for root in &root_paths {
+                    if watcher
+                        .watch(Path::new(root), RecursiveMode::Recursive)
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
 
                 loop {

@@ -18,28 +18,41 @@ pub struct OidcConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SyncFolder {
+    pub id: String,
+    pub name: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub mode: String,
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(default)]
     pub server_host: Option<String>,
-    pub local_sync_path: Option<String>,
-    pub remote_path: Option<String>,
+    #[serde(default)]
+    pub sync_folders: Vec<SyncFolder>,
+    /// 舊版單一資料夾設定，僅用於讀取舊設定檔並在 `load` 時轉成 `sync_folders`
+    #[serde(default, skip_serializing)]
+    local_sync_path: Option<String>,
+    #[serde(default, skip_serializing)]
+    remote_path: Option<String>,
+    #[serde(default, skip_serializing)]
+    sync_mode: Option<String>,
     pub poll_interval_seconds: u32,
     pub ingest_backlog_limit: u32,
     #[serde(default)]
     pub oidc: OidcConfig,
     #[serde(default = "default_window_preset")]
     pub window_preset: String,
-    #[serde(default = "default_sync_mode")]
-    pub sync_mode: String,
 }
 
 pub const SYNC_MODE_BIDIRECTIONAL: &str = "bidirectional";
 pub const SYNC_MODE_UPLOAD_ONLY: &str = "upload_only";
 pub const SYNC_MODE_DOWNLOAD_ONLY: &str = "download_only";
-
-fn default_sync_mode() -> String {
-    SYNC_MODE_BIDIRECTIONAL.to_string()
-}
 
 pub fn is_valid_sync_mode(mode: &str) -> bool {
     matches!(
@@ -68,26 +81,135 @@ pub fn window_preset_size(preset: &str) -> Option<(f64, f64)> {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfigUpdate {
     pub server_host: Option<String>,
-    pub local_sync_path: Option<String>,
-    pub remote_path: Option<String>,
     pub poll_interval_seconds: Option<u32>,
     pub ingest_backlog_limit: Option<u32>,
     pub oidc: Option<OidcConfig>,
     pub window_preset: Option<String>,
-    pub sync_mode: Option<String>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server_host: None,
+            sync_folders: Vec::new(),
             local_sync_path: None,
             remote_path: None,
+            sync_mode: None,
             poll_interval_seconds: 30,
             ingest_backlog_limit: 200,
             oidc: OidcConfig::default(),
             window_preset: default_window_preset(),
-            sync_mode: default_sync_mode(),
+        }
+    }
+}
+
+fn normalize_local(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+fn normalize_remote(path: &str) -> String {
+    path.trim().trim_end_matches('/').to_lowercase()
+}
+
+/// `child` 等於 `parent` 或位於 `parent` 之下（皆為已正規化的路徑）
+fn is_within(child: &str, parent: &str) -> bool {
+    parent.is_empty()
+        || child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn last_segment(path: &str) -> Option<String> {
+    path.trim()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn check_overlap(
+    existing: &[SyncFolder],
+    exclude_id: Option<&str>,
+    new_path: &str,
+    side: &str,
+    normalize: fn(&str) -> String,
+    get: fn(&SyncFolder) -> &str,
+) -> Result<(), String> {
+    let new_norm = normalize(new_path);
+    for folder in existing.iter().filter(|f| Some(f.id.as_str()) != exclude_id) {
+        let other = normalize(get(folder));
+        if is_within(&new_norm, &other) {
+            return Err(format!(
+                "此{side}資料夾已包含在「{}」的同步範圍內，不需要重複加入",
+                folder.name
+            ));
+        }
+        if is_within(&other, &new_norm) {
+            return Err(format!(
+                "此{side}資料夾包含了已同步的「{}」，請先移除它，或改選其他資料夾",
+                folder.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 驗證新同步資料夾：選了父層就不能再選子層，反之亦然（本機與 NAS 兩側都檢查）
+pub fn validate_new_folder(
+    existing: &[SyncFolder],
+    local_path: &str,
+    remote_path: &str,
+) -> Result<(), String> {
+    if local_path.trim().is_empty() {
+        return Err("請選擇本機資料夾".to_string());
+    }
+    if normalize_remote(remote_path).is_empty() || !remote_path.trim().starts_with('/') {
+        return Err("請選擇 NAS 上的資料夾（不可選根目錄）".to_string());
+    }
+    check_overlap(existing, None, local_path, "本機", normalize_local, |f| {
+        &f.local_path
+    })?;
+    check_overlap(existing, None, remote_path, "NAS", normalize_remote, |f| {
+        &f.remote_path
+    })
+}
+
+/// 依路徑找出所屬的同步資料夾
+pub fn folder_for_path<'a>(folders: &'a [SyncFolder], path: &str) -> Option<&'a SyncFolder> {
+    let normalized = normalize_local(path);
+    folders
+        .iter()
+        .find(|f| is_within(&normalized, &normalize_local(&f.local_path)))
+}
+
+pub fn active_folders(config: &AppConfig) -> Vec<&SyncFolder> {
+    config.sync_folders.iter().filter(|f| !f.paused).collect()
+}
+
+fn migrate_legacy(config: &mut AppConfig) {
+    let local = config.local_sync_path.take().filter(|s| !s.trim().is_empty());
+    let remote = config.remote_path.take().filter(|s| !s.trim().is_empty());
+    let mode = config
+        .sync_mode
+        .take()
+        .filter(|m| is_valid_sync_mode(m))
+        .unwrap_or_else(|| SYNC_MODE_BIDIRECTIONAL.to_string());
+    if config.sync_folders.is_empty() {
+        if let (Some(local), Some(remote)) = (local, remote) {
+            config.sync_folders.push(SyncFolder {
+                id: "folder-1".to_string(),
+                name: last_segment(&local).unwrap_or_else(|| "同步資料夾".to_string()),
+                local_path: local,
+                remote_path: remote,
+                mode,
+                paused: false,
+            });
         }
     }
 }
@@ -107,8 +229,89 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Result<AppConfig, String> {
     }
 
     let raw = fs::read_to_string(&path).map_err(|e| format!("讀取設定檔失敗：{e}"))?;
-    let config: AppConfig =
+    let mut config: AppConfig =
         serde_json::from_str(&raw).map_err(|e| format!("設定檔格式錯誤：{e}"))?;
+    migrate_legacy(&mut config);
+    Ok(config)
+}
+
+fn write_config<R: Runtime>(app: &AppHandle<R>, config: &AppConfig) -> Result<(), String> {
+    let path = settings_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "無法解析設定檔目錄".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("建立設定目錄失敗：{e}"))?;
+    let serialized =
+        serde_json::to_string_pretty(config).map_err(|e| format!("序列化設定失敗：{e}"))?;
+    fs::write(&path, serialized).map_err(|e| format!("寫入設定檔失敗：{e}"))
+}
+
+pub fn add_folder<R: Runtime>(
+    app: &AppHandle<R>,
+    local_path: &str,
+    remote_path: &str,
+    mode: &str,
+) -> Result<AppConfig, String> {
+    if !is_valid_sync_mode(mode) {
+        return Err(format!("不支援的同步模式：{mode}"));
+    }
+    if !std::path::Path::new(local_path.trim()).is_dir() {
+        return Err("本機資料夾不存在".to_string());
+    }
+    let mut config = load(app)?;
+    validate_new_folder(&config.sync_folders, local_path, remote_path)?;
+
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    config.sync_folders.push(SyncFolder {
+        id: format!("folder-{millis}"),
+        name: last_segment(local_path)
+            .or_else(|| last_segment(remote_path))
+            .unwrap_or_else(|| "同步資料夾".to_string()),
+        local_path: local_path.trim().to_string(),
+        remote_path: remote_path.trim().trim_end_matches('/').to_string(),
+        mode: mode.to_string(),
+        paused: false,
+    });
+    write_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn update_folder<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    mode: Option<String>,
+    paused: Option<bool>,
+) -> Result<AppConfig, String> {
+    let mut config = load(app)?;
+    let folder = config
+        .sync_folders
+        .iter_mut()
+        .find(|f| f.id == id)
+        .ok_or_else(|| "找不到指定的同步資料夾".to_string())?;
+    if let Some(mode) = mode {
+        if !is_valid_sync_mode(&mode) {
+            return Err(format!("不支援的同步模式：{mode}"));
+        }
+        folder.mode = mode;
+    }
+    if let Some(paused) = paused {
+        folder.paused = paused;
+    }
+    write_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn remove_folder<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<AppConfig, String> {
+    let mut config = load(app)?;
+    let before = config.sync_folders.len();
+    config.sync_folders.retain(|f| f.id != id);
+    if config.sync_folders.len() == before {
+        return Err("找不到指定的同步資料夾".to_string());
+    }
+    write_config(app, &config)?;
     Ok(config)
 }
 
@@ -137,29 +340,6 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         };
     }
 
-    if let Some(local_sync_path) = update.local_sync_path {
-        config.local_sync_path = if local_sync_path.trim().is_empty() {
-            None
-        } else {
-            Some(local_sync_path)
-        };
-    }
-
-    if let Some(remote_path) = update.remote_path {
-        config.remote_path = if remote_path.trim().is_empty() {
-            None
-        } else {
-            Some(remote_path)
-        };
-    }
-
-    if let Some(sync_mode) = update.sync_mode {
-        if !is_valid_sync_mode(&sync_mode) {
-            return Err(format!("不支援的同步模式：{sync_mode}"));
-        }
-        config.sync_mode = sync_mode;
-    }
-
     if let Some(window_preset) = update.window_preset {
         if window_preset_size(&window_preset).is_none() {
             return Err(format!("不支援的視窗解析度預設：{window_preset}"));
@@ -180,15 +360,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         };
     }
 
-    let path = settings_path(app)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "無法解析設定檔目錄".to_string())?;
-    fs::create_dir_all(parent).map_err(|e| format!("建立設定目錄失敗：{e}"))?;
-    let serialized =
-        serde_json::to_string_pretty(&config).map_err(|e| format!("序列化設定失敗：{e}"))?;
-    fs::write(&path, serialized).map_err(|e| format!("寫入設定檔失敗：{e}"))?;
-
+    write_config(app, &config)?;
     Ok(config)
 }
 
@@ -196,14 +368,74 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
 mod tests {
     use super::*;
 
+    fn folder(id: &str, local: &str, remote: &str) -> SyncFolder {
+        SyncFolder {
+            id: id.to_string(),
+            name: id.to_string(),
+            local_path: local.to_string(),
+            remote_path: remote.to_string(),
+            mode: SYNC_MODE_BIDIRECTIONAL.to_string(),
+            paused: false,
+        }
+    }
+
     #[test]
-    fn legacy_settings_without_window_preset_default_to_wide() {
-        let raw = r#"{"localSyncPath":null,"remotePath":null,"pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
-        let config: AppConfig = serde_json::from_str(raw).expect("legacy config should parse");
+    fn legacy_single_folder_settings_migrate_to_folder_list() {
+        let raw = r#"{"localSyncPath":"D:\\Work","remotePath":"/mydrive/Work","syncMode":"upload_only","pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
+        let mut config: AppConfig = serde_json::from_str(raw).expect("legacy config should parse");
+        migrate_legacy(&mut config);
         assert_eq!(config.window_preset, WINDOW_PRESET_WIDE);
-        assert_eq!(config.sync_mode, SYNC_MODE_BIDIRECTIONAL);
+        assert_eq!(config.sync_folders.len(), 1);
+        assert_eq!(config.sync_folders[0].name, "Work");
+        assert_eq!(config.sync_folders[0].mode, SYNC_MODE_UPLOAD_ONLY);
+        assert!(config.local_sync_path.is_none());
+    }
+
+    #[test]
+    fn legacy_settings_without_paths_have_no_folders() {
+        let raw = r#"{"localSyncPath":null,"remotePath":null,"pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
+        let mut config: AppConfig = serde_json::from_str(raw).unwrap();
+        migrate_legacy(&mut config);
+        assert!(config.sync_folders.is_empty());
         assert!(is_valid_sync_mode("upload_only"));
         assert!(!is_valid_sync_mode("mirror"));
+    }
+
+    #[test]
+    fn parent_folder_blocks_child_on_both_sides() {
+        let existing = vec![folder("a", "D:\\Work", "/mydrive/Work")];
+        // 子層（本機）已被涵蓋
+        assert!(validate_new_folder(&existing, "D:\\Work\\Sub", "/mydrive/Other").is_err());
+        // 子層（NAS）已被涵蓋，且大小寫與結尾斜線不影響判斷
+        assert!(validate_new_folder(&existing, "E:\\Other", "/MyDrive/work/sub/").is_err());
+        // 同一路徑
+        assert!(validate_new_folder(&existing, "d:/work/", "/mydrive/Other").is_err());
+    }
+
+    #[test]
+    fn child_folder_blocks_parent_and_siblings_are_allowed() {
+        let existing = vec![folder("a", "D:\\Work\\Sub", "/mydrive/Work/Sub")];
+        // 想加入的父層包含已同步的子層
+        assert!(validate_new_folder(&existing, "D:\\Work", "/mydrive/Other").is_err());
+        assert!(validate_new_folder(&existing, "E:\\Other", "/mydrive/Work").is_err());
+        // 未被涵蓋的同層資料夾可以加入（名稱前綴相同但不是子層）
+        assert!(validate_new_folder(&existing, "D:\\Work\\Sub2", "/mydrive/Work/Sub2").is_ok());
+        assert!(validate_new_folder(&existing, "D:\\Work\\Other", "/mydrive/Other").is_ok());
+    }
+
+    #[test]
+    fn remote_root_is_rejected() {
+        assert!(validate_new_folder(&[], "D:\\Work", "/").is_err());
+        assert!(validate_new_folder(&[], "D:\\Work", "").is_err());
+        assert!(validate_new_folder(&[], "D:\\Work", "/mydrive/Work").is_ok());
+    }
+
+    #[test]
+    fn folder_lookup_by_path_respects_boundaries() {
+        let folders = vec![folder("a", "D:\\Work", "/x")];
+        assert!(folder_for_path(&folders, "D:\\Work\\doc.txt").is_some());
+        assert!(folder_for_path(&folders, "d:/work/sub/doc.txt").is_some());
+        assert!(folder_for_path(&folders, "D:\\Workshop\\doc.txt").is_none());
     }
 
     #[test]

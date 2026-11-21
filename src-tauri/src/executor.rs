@@ -16,7 +16,14 @@ pub struct ExecutorRunResult {
 }
 
 pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, String> {
-    let claimed = storage::claim_next_operation(app)?;
+    let cfg = config::load(app)?;
+    let paused_roots: Vec<String> = cfg
+        .sync_folders
+        .iter()
+        .filter(|f| f.paused)
+        .map(|f| f.id.clone())
+        .collect();
+    let claimed = storage::claim_next_operation(app, &paused_roots)?;
     let Some(claimed) = claimed else {
         return Ok(ExecutorRunResult {
             processed: false,
@@ -27,7 +34,21 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
         });
     };
 
-    let sync_mode = config::load(app)?.sync_mode;
+    // default-root 是示範/壓測資料使用的根，視為雙向
+    let sync_mode = match cfg.sync_folders.iter().find(|f| f.id == claimed.root_id) {
+        Some(folder) => folder.mode.clone(),
+        None if claimed.root_id == "default-root" => config::SYNC_MODE_BIDIRECTIONAL.to_string(),
+        None => {
+            let updated = storage::update_operation_outcome(app, &claimed.id, "done", None)?;
+            return Ok(ExecutorRunResult {
+                processed: true,
+                operation_id: Some(updated.id),
+                stage: Some(updated.stage),
+                outcome: "skipped".to_string(),
+                message: "所屬同步資料夾已移除，略過此項目".to_string(),
+            });
+        }
+    };
     if !sync_model::is_operation_allowed(&sync_mode, &claimed.op_type) {
         let updated = storage::update_operation_outcome(app, &claimed.id, "done", None)?;
         return Ok(ExecutorRunResult {

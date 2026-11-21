@@ -154,13 +154,11 @@ fn run_sync_cycle_once(app: tauri::AppHandle) -> Result<executor::ExecutorRunRes
 fn sync_default_root_from_config(app: tauri::AppHandle) -> Result<storage::SyncRootRow, String> {
     let _ = storage::init(&app)?;
     let cfg = config::load(&app)?;
-    let local = cfg
-        .local_sync_path
-        .ok_or_else(|| "尚未設定本機同步資料夾".to_string())?;
-    let remote = cfg
-        .remote_path
-        .ok_or_else(|| "尚未設定遠端路徑".to_string())?;
-    storage::upsert_default_sync_root(&app, &local, &remote)
+    let folder = cfg
+        .sync_folders
+        .first()
+        .ok_or_else(|| "尚未新增同步資料夾".to_string())?;
+    storage::upsert_default_sync_root(&app, &folder.local_path, &folder.remote_path)
 }
 
 #[tauri::command]
@@ -445,22 +443,16 @@ fn start_sync_service(
     }
 
     let cfg = config::load(&app)?;
-    let local_sync_path = cfg.local_sync_path.unwrap_or_default();
 
     // 同步服務依賴本機監看提供變更事件，因此一併啟動
     let started_watcher = if watcher_state.status()?.running {
         false
     } else {
-        watcher_state.start(local_sync_path.clone())?;
+        watcher_state.start(active_local_paths(&cfg))?;
         true
     };
 
-    match sync_state.start(
-        app,
-        cfg.poll_interval_seconds,
-        local_sync_path,
-        cfg.remote_path.unwrap_or_default(),
-    ) {
+    match sync_state.start(app, cfg.poll_interval_seconds) {
         Ok(status) => Ok(status),
         Err(err) => {
             if started_watcher {
@@ -469,6 +461,64 @@ fn start_sync_service(
             Err(err)
         }
     }
+}
+
+fn active_local_paths(cfg: &config::AppConfig) -> Vec<String> {
+    config::active_folders(cfg)
+        .into_iter()
+        .map(|f| f.local_path.clone())
+        .collect()
+}
+
+/// 同步資料夾清單變動後，若監看正在執行就以最新清單重啟（沒有可監看的資料夾時停止）
+fn refresh_watcher(app: &tauri::AppHandle, watcher_state: &watcher::LocalWatcherState) {
+    if !watcher_state.status().map(|s| s.running).unwrap_or(false) {
+        return;
+    }
+    let _ = watcher_state.stop();
+    if let Ok(cfg) = config::load(app) {
+        let roots = active_local_paths(&cfg);
+        if !roots.is_empty() {
+            let _ = watcher_state.start(roots);
+        }
+    }
+}
+
+#[tauri::command]
+async fn add_sync_folder(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    local_path: String,
+    remote_path: String,
+    mode: String,
+) -> Result<config::AppConfig, String> {
+    let cfg = config::add_folder(&app, &local_path, &remote_path, &mode)?;
+    refresh_watcher(&app, &watcher_state);
+    Ok(cfg)
+}
+
+#[tauri::command]
+async fn update_sync_folder(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    id: String,
+    mode: Option<String>,
+    paused: Option<bool>,
+) -> Result<config::AppConfig, String> {
+    let cfg = config::update_folder(&app, &id, mode, paused)?;
+    refresh_watcher(&app, &watcher_state);
+    Ok(cfg)
+}
+
+#[tauri::command]
+async fn remove_sync_folder(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    id: String,
+) -> Result<config::AppConfig, String> {
+    let cfg = config::remove_folder(&app, &id)?;
+    refresh_watcher(&app, &watcher_state);
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -494,7 +544,7 @@ fn start_local_watcher(
     watcher_state: State<'_, watcher::LocalWatcherState>,
 ) -> Result<watcher::LocalWatcherStatus, String> {
     let cfg = config::load(&app)?;
-    watcher_state.start(cfg.local_sync_path.unwrap_or_default())
+    watcher_state.start(active_local_paths(&cfg))
 }
 
 #[tauri::command]
@@ -677,10 +727,7 @@ fn scan_local_once_to_operations(
 ) -> Result<WatcherDrainResult, String> {
     let _ = storage::init(&app)?;
     let cfg = config::load(&app)?;
-    let root = cfg
-        .local_sync_path
-        .ok_or_else(|| "尚未設定本機同步資料夾".to_string())?;
-    let paths = scanner::collect_local_paths(&root, limit.unwrap_or(50))?;
+    let paths = scan_active_folders(&cfg, limit.unwrap_or(50))?;
     let operation_ids = enqueue_paths_as_operations(&app, paths)?;
     Ok(WatcherDrainResult {
         queued_count: operation_ids.len(),
@@ -700,9 +747,7 @@ fn run_pipeline_once(
     let mut paths = watcher_state.drain_event_paths(limit)?;
     if paths.is_empty() {
         source = "scanner".to_string();
-        if let Some(root) = config::load(&app)?.local_sync_path {
-            paths = scanner::collect_local_paths(&root, limit)?;
-        }
+        paths = scan_active_folders(&config::load(&app)?, limit)?;
     }
     let operation_ids = enqueue_paths_as_operations(&app, paths)?;
     let run_result = executor::run_once(&app)?;
@@ -728,9 +773,7 @@ fn run_pipeline_batch(
     let mut paths = watcher_state.drain_event_paths(limit)?;
     if paths.is_empty() {
         source = "scanner".to_string();
-        if let Some(root) = config::load(&app)?.local_sync_path {
-            paths = scanner::collect_local_paths(&root, limit)?;
-        }
+        paths = scan_active_folders(&config::load(&app)?, limit)?;
     }
     let operation_ids = enqueue_paths_as_operations(&app, paths)?;
 
@@ -825,6 +868,14 @@ fn run_fault_matrix_fast(
     })
 }
 
+fn scan_active_folders(cfg: &config::AppConfig, limit: u32) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+    for folder in config::active_folders(cfg) {
+        paths.extend(scanner::collect_local_paths(&folder.local_path, limit)?);
+    }
+    Ok(paths)
+}
+
 fn enqueue_paths_as_operations(
     app: &tauri::AppHandle,
     paths: Vec<String>,
@@ -841,8 +892,13 @@ fn enqueue_paths_as_operations(
         }
     }
 
+    let cfg = config::load(app)?;
     let mut operation_ids = Vec::new();
     for (idx, path) in unique_paths.iter().enumerate() {
+        // 不屬於任何同步資料夾的路徑不入列
+        let Some(folder) = config::folder_for_path(&cfg.sync_folders, path) else {
+            continue;
+        };
         if storage::has_active_operation_for_path(app, "scan_local_path", path)? {
             continue;
         }
@@ -856,7 +912,7 @@ fn enqueue_paths_as_operations(
         );
         let op = storage::NewOperation {
             id: id.clone(),
-            root_id: "default-root".to_string(),
+            root_id: folder.id.clone(),
             item_id: None,
             op_type: "scan_local_path".to_string(),
             from_path: Some(path.clone()),
@@ -899,13 +955,10 @@ async fn apply_window_preset(
         &app,
         config::AppConfigUpdate {
             server_host: None,
-            local_sync_path: None,
-            remote_path: None,
             poll_interval_seconds: None,
             ingest_backlog_limit: None,
             oidc: None,
             window_preset: Some(preset),
-            sync_mode: None,
         },
     )
 }
@@ -1008,6 +1061,9 @@ pub fn run() {
             update_app_config,
             apply_window_preset,
             pick_local_folder,
+            add_sync_folder,
+            update_sync_folder,
+            remove_sync_folder,
             list_nas_folders,
             init_sync_storage,
             get_sync_storage_info,
