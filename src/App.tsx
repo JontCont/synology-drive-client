@@ -1151,15 +1151,6 @@ function App() {
     }
   }
 
-  function triggerSkeletonPreview() {
-    setTabSwitching(true);
-    setLoginTabSwitching(true);
-    window.setTimeout(() => {
-      setTabSwitching(false);
-      setLoginTabSwitching(false);
-    }, 900);
-  }
-
   async function syncDefaultRoot() {
     setOpsLoading(true);
     setError(null);
@@ -1944,14 +1935,6 @@ function App() {
           </div>
 
           <div className="topbar-actions">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={triggerSkeletonPreview}
-              title="預覽 Facebook 骨架屏載入效果"
-            >
-              預覽載入動畫
-            </button>
             <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
               {authStatus?.stage === "authenticated"
                 ? `已登入 (${authStatus.username ?? "User"})`
