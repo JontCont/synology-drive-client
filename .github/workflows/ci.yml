@@ -53,3 +53,7 @@ jobs:
 
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Test optimized glib security backport
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo test --manifest-path src-tauri/vendor/glib-0.18.5/Cargo.toml --locked --release --lib variant_iter
