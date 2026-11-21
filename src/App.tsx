@@ -479,6 +479,37 @@ function App() {
     }
   }, [viewMode, isAuthenticated, initialLoading]);
 
+  // 登入前持續檢查已儲存的 NAS 主機是否存活，供登入頁燈號使用
+  const savedHostForProbe = config?.serverHost?.trim() || "";
+  const [savedHostProbe, setSavedHostProbe] = useState<{
+    loading: boolean;
+    result: NasProbeResult | null;
+  }>({ loading: false, result: null });
+  const probeSavedHost = () => {
+    if (!savedHostForProbe) {
+      setSavedHostProbe({ loading: false, result: null });
+      return;
+    }
+    setSavedHostProbe((prev) => ({ ...prev, loading: true }));
+    invoke<NasProbeResult>("test_nas_host", { host: savedHostForProbe })
+      .then((result) => setSavedHostProbe({ loading: false, result }))
+      .catch((err) =>
+        setSavedHostProbe({
+          loading: false,
+          result: { ok: false, latencyMs: null, driveAvailable: false, message: String(err) },
+        }),
+      );
+  };
+  useEffect(() => {
+    if (isAuthenticated || !savedHostForProbe) {
+      setSavedHostProbe({ loading: false, result: null });
+      return;
+    }
+    probeSavedHost();
+    const timer = window.setInterval(probeSavedHost, 30000);
+    return () => window.clearInterval(timer);
+  }, [savedHostForProbe, isAuthenticated]);
+
   // 登入後自動啟動本機監看（需要至少一個啟用中的同步資料夾）
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -490,6 +521,30 @@ function App() {
   // Whether Host and OIDC are currently configured in saved config
   const savedHost = config?.serverHost?.trim() || "";
   const isHostConfigured = Boolean(savedHost);
+
+  // 燈號：灰=未設定/檢查中、綠=可連線且有 Drive、黃=可連線但沒偵測到 Drive 或回應很慢、紅=無法連線
+  const SLOW_RESPONSE_MS = 2000;
+  const hostHealth: { dot: string; label: string } = (() => {
+    if (!isHostConfigured) return { dot: "status-idle", label: "尚未設定 NAS 主機" };
+    const probe = savedHostProbe.result;
+    if (!probe) {
+      return {
+        dot: savedHostProbe.loading ? "status-checking" : "status-idle",
+        label: "檢查連線中...",
+      };
+    }
+    if (!probe.ok) return { dot: "status-error", label: probe.message };
+    const slow = (probe.latencyMs ?? 0) > SLOW_RESPONSE_MS;
+    if (!probe.driveAvailable || slow) {
+      return {
+        dot: "status-warning",
+        label: slow
+          ? `${probe.message}（回應偏慢：${probe.latencyMs} ms）`
+          : probe.message,
+      };
+    }
+    return { dot: "status-online", label: `${probe.message}（${probe.latencyMs} ms）` };
+  })();
   const savedOidc = config?.oidc;
   const isOidcConfigured = Boolean(
     savedOidc?.issuerUrl?.trim() && savedOidc?.clientId?.trim()
@@ -628,6 +683,9 @@ function App() {
     try {
       const result = await invoke<NasProbeResult>("test_nas_host", { host: serverHost });
       setHostTest({ loading: false, result });
+      if (serverHost.trim() === savedHost) {
+        setSavedHostProbe({ loading: false, result });
+      }
     } catch (err) {
       setHostTest({
         loading: false,
@@ -1566,18 +1624,7 @@ function App() {
                 onClick={() => switchLoginTab("oidc-config")}
               >
                 <span>配置 (Host / OIDC)</span>
-                <span
-                  className={`tab-dot ${
-                    isHostConfigured || isOidcConfigured ? "status-online" : "status-idle"
-                  }`}
-                  title={
-                    isOidcConfigured
-                      ? "已配置 Host / OIDC"
-                      : isHostConfigured
-                        ? "已配置 NAS Host"
-                        : "尚未設定連線配置"
-                  }
-                />
+                <span className={`tab-dot ${hostHealth.dot}`} title={hostHealth.label} />
               </button>
             </div>
 
@@ -1610,12 +1657,8 @@ function App() {
               <div key="tab-standard" className="login-tab-panel animate-panel">
                 {/* Current Host indicator banner */}
                 <div className={`host-status-bar ${isHostConfigured ? "" : "host-status-required"}`}>
-                  <div className="host-status-info">
-                    <span
-                      className={`status-dot ${
-                        isHostConfigured ? "status-online" : "status-idle"
-                      }`}
-                    />
+                  <div className="host-status-info" title={hostHealth.label}>
+                    <span className={`status-dot ${hostHealth.dot}`} />
                     <span className="host-status-label">NAS 主機：</span>
                     <code className="mono host-status-value">
                       {isHostConfigured ? savedHost : "尚未設定（必填，請先至「配置」填寫）"}
@@ -1664,13 +1707,6 @@ function App() {
                         <span>{authLoading ? "登入驗證中..." : "登入"}</span>
                       </button>
                     </form>
-
-                    <div className="challenge-guide-chip">
-                      <span>
-                        登入流程：直接向 NAS（DSM）驗證帳密；若該帳號啟用兩步驟驗證，伺服器會要求
-                        OTP，驗證通過後才會進入系統。
-                      </span>
-                    </div>
                 </>
 
                 {/* Conditional OIDC Login Button: ONLY shown when OIDC is configured! */}
@@ -1752,30 +1788,9 @@ function App() {
               </div>
             )}
 
-            {/* OPTION 2: 配置 (分區 Blocks：NAS Host 區塊 + OIDC 單一登入區塊 + 使用說明) */}
+            {/* OPTION 2: 配置 (分區 Blocks：NAS Host 區塊 + OIDC 單一登入區塊) */}
             {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "oidc-config" && (
               <div key="tab-config" className="login-tab-panel animate-panel">
-                {/* How-to-use visual step guide block */}
-                <div className="config-guide-banner">
-                  <div className="config-guide-title">如何設定與使用？</div>
-                  <div className="config-steps-row">
-                    <div className="config-step-pill">
-                      <span className="step-num">1</span>
-                      <span>設定 NAS Host 連線位址</span>
-                    </div>
-                    <span className="step-arrow">→</span>
-                    <div className="config-step-pill">
-                      <span className="step-num">2</span>
-                      <span>（選填）設定 OIDC 參數</span>
-                    </div>
-                    <span className="step-arrow">→</span>
-                    <div className="config-step-pill">
-                      <span className="step-num">3</span>
-                      <span>回一般登入頁顯示按鈕</span>
-                    </div>
-                  </div>
-                </div>
-
                 {/* BLOCK 1: NAS Host Configuration Block */}
                 <div className="config-block">
                   <div className="config-block-header">

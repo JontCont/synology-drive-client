@@ -227,6 +227,31 @@ body {
   opacity: 0.5;
 }
 
+.status-warning {
+  background-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+
+.status-error {
+  background-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+}
+
+.status-checking {
+  background-color: var(--text-muted);
+  animation: status-pulse 1s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
 .nav-menu {
   display: flex;
   flex-direction: column;
@@ -1711,16 +1736,6 @@ body {
   white-space: nowrap;
 }
 
-.challenge-guide-chip {
-  font-size: 12px;
-  color: var(--text-muted);
-  background-color: var(--bg-subtle);
-  border: 1px solid var(--border-color);
-  border-radius: 9px;
-  padding: 8px 11px;
-  line-height: 1.45;
-}
-
 .btn-block {
   width: 100%;
 }
@@ -1848,61 +1863,7 @@ body {
   transform: translateX(2px);
 }
 
-/* Configuration Tab Visual Blocks (Host Block + OIDC Block + Step Guide) */
-.config-guide-banner {
-  background: linear-gradient(135deg, var(--accent-soft), transparent);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.config-guide-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--accent-text);
-}
-
-.config-steps-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.config-step-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.step-num {
-  width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  background-color: var(--accent);
-  color: #ffffff;
-  font-size: 11px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.step-arrow {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
+/* Configuration Tab Visual Blocks (Host Block + OIDC Block) */
 .config-block {
   background-color: var(--bg-subtle);
   border: 1px solid var(--border-color);
