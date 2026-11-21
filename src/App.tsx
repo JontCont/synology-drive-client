@@ -43,6 +43,21 @@ type NasProbeResult = {
   message: string;
 };
 
+function ConnectionTestResult({ result }: { result: NasProbeResult | null }) {
+  if (!result) return null;
+  return (
+    <div className={`alert ${result.ok ? "alert-success" : "alert-error"}`} role="status">
+      <div className="alert-content">
+        <span>
+          {result.ok ? "✓ " : "✕ "}
+          {result.message}
+          {result.latencyMs !== null ? `（${result.latencyMs} ms）` : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 type SyncProgress = {
   folderId: string;
   phase: "listing" | "syncing" | "done" | "cancelled" | "error" | string;
@@ -331,7 +346,7 @@ type FaultMatrixFastRunResult = {
   operationStageCounts: OperationStageCount[];
 };
 
-type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings";
+type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings" | "docs";
 type LoginViewTab = "standard" | "config";
 
 function getStageBadgeClass(stage: string | null | undefined): string {
@@ -467,7 +482,8 @@ function App() {
     setMessage(null);
     try {
       const next = await invoke<AppConfig>("apply_window_preset", { preset });
-      applyConfigToState(next);
+      setConfig(next);
+      setWindowPreset(next.windowPreset === "compact" ? "compact" : "wide");
       setMessage(`已套用視窗解析度：${preset === "wide" ? "寬版" : "精簡版"}`);
     } catch (err) {
       setError(String(err));
@@ -582,7 +598,7 @@ function App() {
   }, [queueFolderId, queueStatus, activeTab]);
 
   useEffect(() => {
-    if (activeTab === "settings" && isAuthenticated) refreshLanStatus().catch(() => undefined);
+    if (activeTab === "auth" && isAuthenticated) refreshLanStatus().catch(() => undefined);
   }, [activeTab, isAuthenticated]);
 
   // 下載進度：偵測「進行中 → 結束」的變化並以 toast 通知
@@ -899,8 +915,9 @@ function App() {
   async function refreshLanStatus() {
     try {
       setLanStatus(await invoke<LanStatus>("get_lan_status"));
-    } catch {
+    } catch (err) {
       setLanStatus(null);
+      setWarning(`區網狀態偵測失敗：${String(err)}`);
     }
   }
 
@@ -917,32 +934,7 @@ function App() {
     }
   }
 
-  async function saveLanConfig(event: React.FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const next = await invoke<AppConfig>("update_app_config", {
-        update: {
-          lanHost: lanHost.trim(),
-          lanWifiNames: lanWifiNames
-            .split(/[,，]/)
-            .map((name) => name.trim())
-            .filter(Boolean),
-        },
-      });
-      applyConfigToState(next);
-      setMessage(next.lanHost ? "已儲存區網位址。" : "已清除區網位址。");
-      await refreshLanStatus();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function saveHostConfig(event: React.FormEvent) {
+  async function saveHostConfig(event: React.FormEvent, includeLan = false) {
     event.preventDefault();
     const trimmedHost = serverHost.trim();
     if (!trimmedHost) {
@@ -956,15 +948,101 @@ function App() {
       const next = await invoke<AppConfig>("update_app_config", {
         update: {
           serverHost: trimmedHost,
+          ...(includeLan ? {
+            lanHost: lanHost.trim(),
+            lanWifiNames: lanWifiNames
+              .split(/[,，]/)
+              .map((name) => name.trim())
+              .filter(Boolean),
+          } : {}),
         },
       });
       applyConfigToState(next);
-      setMessage(`已儲存 NAS 連線主機：${trimmedHost}`);
+      setMessage(includeLan ? "連線設定已儲存，登入狀態保持不變。" : `已儲存 NAS 連線主機：${trimmedHost}`);
+      if (includeLan) await refreshLanStatus();
     } catch (err) {
       setError(String(err));
     } finally {
       setSaving(false);
     }
+  }
+
+  function renderNasHostFields() {
+    return (
+      <>
+        <label className="form-field">
+          <span>NAS Host / 伺服器網址</span>
+          <div className="inline-input-row">
+            <input
+              className="input mono"
+              value={serverHost}
+              disabled={saving}
+              onChange={(event) => {
+                setServerHost(event.currentTarget.value);
+                setHostTest((prev) => ({ ...prev, result: null }));
+              }}
+              placeholder="例如 https://nas.example.com:5001"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={saving || hostTest.loading || !serverHost.trim()}
+              onClick={testNasHost}
+            >
+              {hostTest.loading ? "測試中..." : "測試連線"}
+            </button>
+          </div>
+        </label>
+        <ConnectionTestResult result={hostTest.result} />
+      </>
+    );
+  }
+
+  function renderLanFields() {
+    return (
+      <>
+        <label className="form-field">
+          <span>區網位址（選填）</span>
+          <div className="inline-input-row">
+            <input
+              className="input mono"
+              value={lanHost}
+              disabled={saving}
+              onChange={(event) => {
+                setLanHost(event.currentTarget.value);
+                setLanTest((prev) => ({ ...prev, result: null }));
+              }}
+              placeholder="例如 http://192.168.0.18:5000/drive/"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={saving || lanTest.loading || !lanHost.trim()}
+              onClick={testLanHost}
+            >
+              {lanTest.loading ? "測試中..." : "測試連線"}
+            </button>
+          </div>
+        </label>
+        <label className="form-field">
+          <span>限定 Wi-Fi 名稱（選填）</span>
+          <input
+            className="input"
+            value={lanWifiNames}
+            disabled={saving}
+            onChange={(event) => setLanWifiNames(event.currentTarget.value)}
+            placeholder="例如 TP-Network（多個以逗號分隔；留空＝只要連得到區網位址就使用）"
+          />
+        </label>
+        <ConnectionTestResult result={lanTest.result} />
+        {lanStatus?.configured ? (
+          <div className="cell-secondary">
+            {lanStatus.message}
+            {lanStatus.ssid ? `（目前 Wi-Fi：${lanStatus.ssid}）` : ""}
+          </div>
+        ) : null}
+      </>
+    );
   }
 
   async function loginByPassword(event: React.FormEvent) {
@@ -1879,47 +1957,10 @@ function App() {
                   </div>
 
                   <form className="config-block-body" onSubmit={saveHostConfig}>
-                    <label className="form-field">
-                      <span>NAS Host / 伺服器網址</span>
-                      <div className="inline-input-row">
-                        <input
-                          className="input mono"
-                          value={serverHost}
-                          onChange={(event) => {
-                            setServerHost(event.currentTarget.value);
-                            setHostTest((prev) => ({ ...prev, result: null }));
-                          }}
-                          placeholder="例如 https://nas.example.com:5001"
-                        />
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          disabled={hostTest.loading || !serverHost.trim()}
-                          onClick={testNasHost}
-                        >
-                          {hostTest.loading ? "測試中..." : "測試連線"}
-                        </button>
-                        <button type="submit" className="btn btn-secondary" disabled={saving}>
-                          儲存 Host
-                        </button>
-                      </div>
-                    </label>
-                    {hostTest.result ? (
-                      <div
-                        className={`alert ${hostTest.result.ok ? "alert-success" : "alert-error"}`}
-                        role="status"
-                      >
-                        <div className="alert-content">
-                          <span>
-                            {hostTest.result.ok ? "✓ " : "✕ "}
-                            {hostTest.result.message}
-                            {hostTest.result.latencyMs !== null
-                              ? `（${hostTest.result.latencyMs} ms）`
-                              : ""}
-                          </span>
-                        </div>
-                      </div>
-                    ) : null}
+                    {renderNasHostFields()}
+                    <button type="submit" className="btn btn-secondary" disabled={saving}>
+                      儲存 Host
+                    </button>
                   </form>
                 </div>
 
@@ -2113,6 +2154,16 @@ function App() {
             </svg>
             <span>同步設定</span>
           </button>
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "docs" ? "active" : ""}`}
+            onClick={() => switchDashboardTab("docs")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 3h9l4 4v14H6a2 2 0 01-2-2V5a2 2 0 012-2zM14 3v5h5M8 12h7M8 16h7" />
+            </svg>
+            <span>文件說明</span>
+          </button>
         </nav>
 
         <div className="sidebar-footer">
@@ -2157,6 +2208,7 @@ function App() {
               {activeTab === "conflicts" && "同步衝突管理"}
               {activeTab === "auth" && "設定檔"}
               {activeTab === "settings" && "同步設定"}
+              {activeTab === "docs" && "文件說明"}
             </h1>
             <p className="page-subtitle">
               {syncFolders.length > 0
@@ -2828,201 +2880,6 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
-                    <p className="card-desc">
-                      手動觸發 Watcher 事件轉入、本機補掃描或單步/批次執行同步佇列
-                    </p>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      onClick={refreshOperations}
-                      disabled={opsLoading}
-                    >
-                      重新整理佇列
-                    </button>
-                  </div>
-                </div>
-
-                <div className="action-groups">
-                  <div className="action-group">
-                    <span className="action-group-label">
-                      同步服務：登入後自動啟動，通常不需要手動操作
-                    </span>
-                    <div className="button-row">
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={restartService}
-                        disabled={serviceLoading}
-                      >
-                        重新啟動同步服務
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={stopService}
-                        disabled={serviceLoading || !serviceStatus?.running}
-                      >
-                        停止同步服務
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="action-group">
-                    <span className="action-group-label">
-                      本機監看 (Watcher)：登入後自動啟動，通常不需要手動操作
-                    </span>
-                    <div className="button-row">
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={startWatcher}
-                        disabled={watcherLoading || watcherStatus?.running}
-                      >
-                        啟動本機監看
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={stopWatcher}
-                        disabled={watcherLoading || !watcherStatus?.running}
-                      >
-                        停止監看
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="action-group">
-                    <span className="action-group-label">事件入列與執行</span>
-                    <div className="button-row">
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={runPipelineBatch}
-                        disabled={opsLoading}
-                      >
-                        執行 Pipeline Batch
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={runPipelineOnce}
-                        disabled={opsLoading}
-                      >
-                        執行單次 Pipeline
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={runExecutorOnce}
-                        disabled={opsLoading}
-                      >
-                        單步 Executor
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={runSyncCycleOnce}
-                        disabled={opsLoading}
-                      >
-                        單次 Sync Cycle
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={drainWatcherEvents}
-                        disabled={opsLoading}
-                      >
-                        轉入 Watcher 事件
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={scanLocalOnce}
-                        disabled={opsLoading}
-                      >
-                        補掃描本機資料夾
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="action-group">
-                    <span className="action-group-label">開發壓測與故障矩陣演練 (Fault Matrix)</span>
-                    <div className="button-row">
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={addSampleOperation}
-                        disabled={opsLoading}
-                      >
-                        + 範例 Operation
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={addRetryableOperation}
-                        disabled={opsLoading}
-                      >
-                        + Retryable
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={addHardRetryableOperation}
-                        disabled={opsLoading}
-                      >
-                        + Hard Retry
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={seedDemoOperations}
-                        disabled={opsLoading}
-                      >
-                        批次新增 5 筆 Demo
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={seedFaultMatrixOperations}
-                        disabled={opsLoading}
-                      >
-                        灌入 Fault Matrix
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={runFaultMatrixOnce}
-                        disabled={opsLoading}
-                      >
-                        執行 Fault Matrix
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={runFaultMatrixFast}
-                        disabled={opsLoading}
-                      >
-                        快速演練 Fault Matrix Fast
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-sm"
-                        onClick={forceDueRetryable}
-                        disabled={opsLoading}
-                      >
-                        強制釋放 Retryable 到期
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-
-              <section className="card">
-                <div className="card-header">
-                  <div>
                     <h2 className="card-title">操作佇列清單 ({operations.length})</h2>
                     <p className="card-desc">
                       Stage 統計：
@@ -3278,40 +3135,12 @@ function App() {
                 <div className="card-header">
                   <div>
                     <h2 className="card-title">設定檔</h2>
-                    <p className="card-desc">檢視當前登入身分，或切換至登入頁與 NAS 連線配置</p>
+                    <p className="card-desc">目前登入帳號資訊（唯讀）</p>
                   </div>
                   <div className="button-row">
                     <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
                       Stage: {authStatus?.stage ?? "loading"}
                     </span>
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      onClick={() => {
-                        setLoginTab("standard");
-                        setViewMode("login");
-                      }}
-                    >
-                      開啟登入頁
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => {
-                        setLoginTab("config");
-                        setViewMode("login");
-                      }}
-                    >
-                      編輯 NAS 配置
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-outline-danger btn-sm"
-                      onClick={logout}
-                      disabled={authLoading}
-                    >
-                      登出帳號
-                    </button>
                   </div>
                 </div>
 
@@ -3324,6 +3153,69 @@ function App() {
                     <span className="stat-key">驗證方式</span>
                     <span className="stat-val">{authStatus?.method ?? "-"}</span>
                   </div>
+                </div>
+              </section>
+              <section className="config-block" aria-labelledby="profile-connection-title">
+                <div className="config-block-header">
+                  <div>
+                    <h2 id="profile-connection-title" className="config-block-title">NAS 連線設定</h2>
+                    <p className="config-block-desc">直接編輯與儲存，不會變更密碼或登出帳號</p>
+                  </div>
+                  {lanStatus?.configured ? (
+                    <span className={`badge ${lanStatus.active ? "badge-success" : "badge-neutral"}`}>
+                      {lanStatus.active ? "使用區網中" : "使用一般位址"}
+                    </span>
+                  ) : null}
+                </div>
+                <form
+                  className="config-block-body"
+                  aria-labelledby="profile-connection-title"
+                  onSubmit={(event) => saveHostConfig(event, true)}
+                >
+                  {renderNasHostFields()}
+                  {renderLanFields()}
+                  <p className="cell-secondary">
+                    區網直連不經過外部代理；Wi-Fi 名稱可用逗號分隔，留空時只要連得到區網位址就使用。
+                  </p>
+                  <div className="button-row">
+                    <button type="submit" className="btn btn-primary" disabled={saving}>
+                      {saving ? "儲存中..." : "儲存連線設定"}
+                    </button>
+                    <button type="button" className="btn btn-ghost" disabled={saving} onClick={refreshLanStatus}>
+                      重新偵測區網
+                    </button>
+                  </div>
+                </form>
+              </section>
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">視窗解析度</h2>
+                    <p className="card-desc">
+                      選擇桌面視窗版面，立即套用並於下次啟動時沿用；目前視窗大小：
+                      {windowSize.width} × {windowSize.height}
+                    </p>
+                  </div>
+                </div>
+                <div className="preset-grid" role="radiogroup" aria-label="視窗解析度">
+                  {WINDOW_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={windowPreset === preset.id}
+                      className={`preset-card ${windowPreset === preset.id ? "active" : ""}`}
+                      onClick={() => applyWindowPreset(preset.id)}
+                    >
+                      <span className={`preset-thumb preset-thumb-${preset.id}`} aria-hidden="true">
+                        <span />
+                        <span />
+                      </span>
+                      <span className="preset-label">{preset.label}</span>
+                      <span className="preset-size mono">{preset.size}</span>
+                      <span className="preset-desc">{preset.desc}</span>
+                    </button>
+                  ))}
                 </div>
               </section>
             </div>
@@ -3690,85 +3582,6 @@ function App() {
               </section>
 
               <section className="card">
-                <div className="card-header">
-                  <div>
-                    <h2 className="card-title">區網直連</h2>
-                    <p className="card-desc">
-                      在家裡的區網內改走 NAS 的區網位址傳輸：不經過 Cloudflare，沒有 100 MB 的單檔上傳上限，速度也快得多。登入仍使用「配置」裡的一般位址
-                    </p>
-                  </div>
-                  {lanStatus?.configured ? (
-                    <span className={`badge ${lanStatus.active ? "badge-success" : "badge-neutral"}`}>
-                      {lanStatus.active ? "使用區網中" : "使用一般位址"}
-                    </span>
-                  ) : null}
-                </div>
-                <form className="form-stack" onSubmit={saveLanConfig}>
-                  <label className="form-field">
-                    <span>區網位址（選填）</span>
-                    <div className="inline-input-row">
-                      <input
-                        className="input mono"
-                        value={lanHost}
-                        onChange={(event) => {
-                          setLanHost(event.currentTarget.value);
-                          setLanTest((prev) => ({ ...prev, result: null }));
-                        }}
-                        placeholder="例如 http://192.168.0.18:5000/drive/"
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={lanTest.loading || !lanHost.trim()}
-                        onClick={testLanHost}
-                      >
-                        {lanTest.loading ? "測試中..." : "測試連線"}
-                      </button>
-                    </div>
-                  </label>
-                  <label className="form-field">
-                    <span>限定 Wi-Fi 名稱（選填）</span>
-                    <input
-                      className="input"
-                      value={lanWifiNames}
-                      onChange={(event) => setLanWifiNames(event.currentTarget.value)}
-                      placeholder="例如 TP-Network（多個以逗號分隔；留空＝只要連得到區網位址就使用）"
-                    />
-                  </label>
-                  {lanTest.result ? (
-                    <div
-                      className={`alert ${lanTest.result.ok ? "alert-success" : "alert-error"}`}
-                      role="status"
-                    >
-                      <div className="alert-content">
-                        <span>
-                          {lanTest.result.ok ? "✓ " : "✕ "}
-                          {lanTest.result.message}
-                          {lanTest.result.latencyMs !== null
-                            ? `（${lanTest.result.latencyMs} ms）`
-                            : ""}
-                        </span>
-                      </div>
-                    </div>
-                  ) : null}
-                  {lanStatus?.configured ? (
-                    <div className="cell-secondary">
-                      {lanStatus.message}
-                      {lanStatus.ssid ? `（目前 Wi-Fi：${lanStatus.ssid}）` : ""}
-                    </div>
-                  ) : null}
-                  <div className="button-row">
-                    <button type="submit" className="btn btn-primary" disabled={saving}>
-                      儲存區網設定
-                    </button>
-                    <button type="button" className="btn btn-ghost" onClick={refreshLanStatus}>
-                      重新偵測
-                    </button>
-                  </div>
-                </form>
-              </section>
-
-              <section className="card">
                 <h2 className="card-title">進階設定</h2>
                 <p className="card-desc">同步排程、輪詢間隔、佇列保護上限與檔案總管整合</p>
                 <label className="checkbox-row">
@@ -3868,7 +3681,7 @@ function App() {
                       </button>
                       {serviceStatus?.running ? (
                         <span className="cell-secondary">
-                          輪詢間隔變更後，請到「操作佇列與監看」頁重新啟動同步服務才會生效
+                          輪詢間隔變更後，請使用此頁的控制台重新啟動同步服務才會生效
                         </span>
                       ) : null}
                     </div>
@@ -3880,6 +3693,201 @@ function App() {
                     <div className="fb-skeleton fb-skeleton-btn-sm" />
                   </div>
                 )}
+              </section>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
+                    <p className="card-desc">
+                      手動觸發 Watcher 事件轉入、本機補掃描或單步/批次執行同步佇列
+                    </p>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={refreshOperations}
+                      disabled={opsLoading}
+                    >
+                      重新整理佇列
+                    </button>
+                  </div>
+                </div>
+
+                <div className="action-groups">
+                  <div className="action-group">
+                    <span className="action-group-label">
+                      同步服務：登入後自動啟動，通常不需要手動操作
+                    </span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={restartService}
+                        disabled={serviceLoading}
+                      >
+                        重新啟動同步服務
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={stopService}
+                        disabled={serviceLoading || !serviceStatus?.running}
+                      >
+                        停止同步服務
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="action-group">
+                    <span className="action-group-label">
+                      本機監看 (Watcher)：登入後自動啟動，通常不需要手動操作
+                    </span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={startWatcher}
+                        disabled={watcherLoading || watcherStatus?.running}
+                      >
+                        啟動本機監看
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={stopWatcher}
+                        disabled={watcherLoading || !watcherStatus?.running}
+                      >
+                        停止監看
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="action-group">
+                    <span className="action-group-label">事件入列與執行</span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={runPipelineBatch}
+                        disabled={opsLoading}
+                      >
+                        執行 Pipeline Batch
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runPipelineOnce}
+                        disabled={opsLoading}
+                      >
+                        執行單次 Pipeline
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runExecutorOnce}
+                        disabled={opsLoading}
+                      >
+                        單步 Executor
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={runSyncCycleOnce}
+                        disabled={opsLoading}
+                      >
+                        單次 Sync Cycle
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={drainWatcherEvents}
+                        disabled={opsLoading}
+                      >
+                        轉入 Watcher 事件
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={scanLocalOnce}
+                        disabled={opsLoading}
+                      >
+                        補掃描本機資料夾
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="action-group">
+                    <span className="action-group-label">開發壓測與故障矩陣演練 (Fault Matrix)</span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addSampleOperation}
+                        disabled={opsLoading}
+                      >
+                        + 範例 Operation
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addRetryableOperation}
+                        disabled={opsLoading}
+                      >
+                        + Retryable
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={addHardRetryableOperation}
+                        disabled={opsLoading}
+                      >
+                        + Hard Retry
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={seedDemoOperations}
+                        disabled={opsLoading}
+                      >
+                        批次新增 5 筆 Demo
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={seedFaultMatrixOperations}
+                        disabled={opsLoading}
+                      >
+                        灌入 Fault Matrix
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={runFaultMatrixOnce}
+                        disabled={opsLoading}
+                      >
+                        執行 Fault Matrix
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={runFaultMatrixFast}
+                        disabled={opsLoading}
+                      >
+                        快速演練 Fault Matrix Fast
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={forceDueRetryable}
+                        disabled={opsLoading}
+                      >
+                        強制釋放 Retryable 到期
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </section>
 
               <div>
@@ -3932,38 +3940,6 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">視窗解析度</h2>
-                    <p className="card-desc">
-                      選擇桌面視窗版面，立即套用並於下次啟動時沿用；目前視窗大小：
-                      {windowSize.width} × {windowSize.height}
-                    </p>
-                  </div>
-                </div>
-                <div className="preset-grid" role="radiogroup" aria-label="視窗解析度">
-                  {WINDOW_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={windowPreset === preset.id}
-                      className={`preset-card ${windowPreset === preset.id ? "active" : ""}`}
-                      onClick={() => applyWindowPreset(preset.id)}
-                    >
-                      <span className={`preset-thumb preset-thumb-${preset.id}`} aria-hidden="true">
-                        <span />
-                        <span />
-                      </span>
-                      <span className="preset-label">{preset.label}</span>
-                      <span className="preset-size mono">{preset.size}</span>
-                      <span className="preset-desc">{preset.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              <section className="card">
-                <div className="card-header">
-                  <div>
                     <h2 className="card-title">系統診斷快照 (System Snapshot)</h2>
                     <p className="card-desc">
                       集中檢視設定、認證、背景服務、監看器與資料庫佇列聚合統計
@@ -3986,6 +3962,51 @@ function App() {
                 ) : (
                   <div className="empty-state">尚未載入系統快照。</div>
                 )}
+              </section>
+            </div>
+          )}
+          {!initialLoading && !tabSwitching && activeTab === "docs" && (
+            <div className="section-stack">
+              <section className="card">
+                <h2 className="card-title">快速開始</h2>
+                <ol>
+                  <li>在「設定檔」填寫 NAS 主機位址，依需要設定區網位址與 Wi-Fi 名稱。</li>
+                  <li>在「同步設定」新增本機與 NAS 資料夾配對，選擇同步方向。</li>
+                  <li>到「操作佇列與監看」查看真實同步進度、等待項目與失敗原因。</li>
+                </ol>
+              </section>
+              <section className="card">
+                <h2 className="card-title">連線與登入</h2>
+                <p className="card-desc">
+                  NAS 主機位址須使用 HTTPS 與有效憑證。區網位址為選填，Wi-Fi 名稱可用逗號分隔；
+                  留空時，只要區網位址可連線就會使用區網直連。
+                </p>
+                <p className="card-desc">
+                  「設定檔」可直接儲存連線設定，登入身分為唯讀；儲存不會重設密碼或立即登出。
+                  登入時若勾選「記住登入」，session 會安全存於 Windows 認證管理員，不保存密碼或 OTP。
+                  NAS session 過期或撤銷時，需要重新登入。
+                </p>
+              </section>
+              <section className="card">
+                <h2 className="card-title">同步方向與刪除</h2>
+                <ul>
+                  <li>雙向同步：本機與 NAS 的新增及修改互相同步。</li>
+                  <li>僅上傳：將本機的新增及修改傳到 NAS，不下載。</li>
+                  <li>僅下載：將 NAS 的變更下載到本機，不上傳。</li>
+                  <li>「刪除也同步」預設關閉；啟用前請確認同步方向與資料夾範圍。</li>
+                  <li>發生同步衝突時，到「同步衝突管理」確認檔案版本再處理。</li>
+                </ul>
+              </section>
+              <section className="card">
+                <h2 className="card-title">介面與背景運作</h2>
+                <p className="card-desc">
+                  視窗解析度在「設定檔」調整，立即套用並保留未儲存的連線輸入。
+                  關閉視窗只會縮到系統匣，不等於登出；從系統匣選擇「結束」才會關閉程式。
+                </p>
+                <p className="card-desc">
+                  Pipeline 與執行器控制台位於「同步設定」，用於開發診斷與模擬佇列；
+                  一般同步不需要操作這些控制項。
+                </p>
               </section>
             </div>
           )}
