@@ -3614,6 +3614,16 @@ function App() {
                               </span>
                               <span>{folder.remotePath}</span>
                             </div>
+                            {folder.mode === "upload_only" ? (
+                              <div className="cell-secondary">
+                                僅上傳模式：NAS 上新增的檔案不會下載到本機；要下載請改成「雙向同步」
+                              </div>
+                            ) : null}
+                            {folder.mode === "download_only" ? (
+                              <div className="cell-secondary">
+                                僅下載模式：本機新增或修改的檔案不會上傳到 NAS
+                              </div>
+                            ) : null}
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
                               if (!dl) return null;
