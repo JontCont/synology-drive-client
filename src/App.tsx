@@ -430,6 +430,7 @@ function App() {
   const [conflictStatusCounts, setConflictStatusCounts] = useState<ConflictStatusCount[]>([]);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const folderToRemove = config?.syncFolders.find((folder) => folder.id === confirmRemoveId) ?? null;
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -863,6 +864,7 @@ function App() {
     return runFolderAction(
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
       patch.syncDeletes !== undefined
+    if (removed) setConfirmRemoveId(null);
         ? patch.syncDeletes
           ? "已開啟「同步刪除」，下一輪同步起生效。"
           : "已關閉「同步刪除」。"
@@ -875,8 +877,7 @@ function App() {
   }
 
   async function removeSyncFolder(id: string) {
-    setConfirmRemoveId(null);
-    await runFolderAction(
+    const removed = await runFolderAction(
       () => invoke<AppConfig>("remove_sync_folder", { id }),
       "已移除同步資料夾（本機與 NAS 上的檔案不會被刪除）。",
     );
@@ -2234,6 +2235,46 @@ function App() {
                 ? `${syncFolders.length} 個同步資料夾（${syncFolders.filter((f) => !f.paused).length} 個啟用中）`
                 : "尚未新增同步資料夾"}
             </p>
+        {folderToRemove ? (
+          <div className="modal-overlay" role="presentation">
+            <div
+              className="modal-dialog animate-pop"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="remove-folder-title"
+              aria-describedby="remove-folder-description"
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && !folderBusy) setConfirmRemoveId(null);
+              }}
+            >
+              <h2 id="remove-folder-title" className="modal-title">移除同步資料夾</h2>
+              <p id="remove-folder-description" className="modal-desc">
+                確定移除「{folderToRemove.name}」的同步配對？本機與 NAS 上的檔案不會被刪除。
+              </p>
+              {error ? <div className="alert alert-error" role="alert">{error}</div> : null}
+              <div className="button-row button-row-end">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  autoFocus
+                  disabled={folderBusy}
+                  onClick={() => setConfirmRemoveId(null)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline-danger"
+                  disabled={folderBusy}
+                  onClick={() => removeSyncFolder(folderToRemove.id)}
+                >
+                  {folderBusy ? "移除中..." : "確定移除"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
           </div>
 
           <div className="topbar-actions">
@@ -3428,34 +3469,17 @@ function App() {
                             >
                               {folder.paused ? "繼續" : "暫停"}
                             </button>
-                            {confirmRemoveId === folder.id ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="btn btn-outline-danger btn-sm"
-                                  disabled={folderBusy}
-                                  onClick={() => removeSyncFolder(folder.id)}
-                                >
-                                  確定移除
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost btn-sm"
-                                  onClick={() => setConfirmRemoveId(null)}
-                                >
-                                  取消
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-sm"
-                                disabled={folderBusy}
-                                onClick={() => setConfirmRemoveId(folder.id)}
-                              >
-                                移除
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled={folderBusy}
+                              onClick={() => {
+                                setError(null);
+                                setConfirmRemoveId(folder.id);
+                              }}
+                            >
+                              移除
+                            </button>
                           </div>
                         </div>
                       ))}
