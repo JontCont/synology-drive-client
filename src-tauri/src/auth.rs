@@ -461,6 +461,16 @@ impl DsmAuthAdapter {
         }
     }
 
+    /// 列出資料夾的錯誤說明：Drive 檔案 API 的錯誤碼（例如 1003）與登入錯誤碼意義不同
+    fn describe_list_failure(err: &DsmError) -> String {
+        match err.code {
+            105 | 106 | 107 => "NAS 登入權限不足或已過期，請重新登入".to_string(),
+            1002 | 1003 => format!("NAS 找不到這個資料夾，或沒有存取權限（錯誤碼 {}）", err.code),
+            119 | -1 | -2 | -3 => Self::describe_failure(err),
+            code => format!("NAS 回報列出檔案失敗（錯誤碼 {code}）"),
+        }
+    }
+
     fn describe_failure(err: &DsmError) -> String {
         match err.code {
             119 => "NAS 登入已過期，請重新登入".to_string(),
@@ -858,7 +868,7 @@ impl AuthBackendAdapter for DsmAuthAdapter {
             return Err("NAS 路徑格式不正確".to_string());
         }
         self.list_drive_directory(&origin, &sid, normalized)
-            .map_err(|err| Self::describe_failure(&err))
+            .map_err(|err| Self::describe_list_failure(&err))
     }
 
     fn upload_remote_file(
@@ -927,8 +937,16 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         if !normalized.starts_with('/') || normalized.split('/').any(|seg| seg == "..") {
             return Err("NAS 路徑格式不正確".to_string());
         }
-        self.list_drive_entries(&origin, &sid, normalized)
-            .map_err(|err| Self::describe_failure(&err))
+        let list = || self.list_drive_entries(&origin, &sid, normalized);
+        // 檔案剛被搬動或正在寫入時，偶爾會短暫回報找不到；稍等再試一次，仍失敗才中止（不能略過，否則會被當成整個資料夾被刪除）
+        let result = match list() {
+            Err(err) if err.code == 1002 || err.code == 1003 => {
+                std::thread::sleep(Duration::from_secs(2));
+                list()
+            }
+            other => other,
+        };
+        result.map_err(|err| format!("無法列出 NAS 資料夾 {normalized}：{}", Self::describe_list_failure(&err)))
     }
 
     fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
