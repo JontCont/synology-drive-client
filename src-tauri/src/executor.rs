@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Runtime};
 
-use crate::storage;
+use crate::{config, storage, sync_model};
 
 const RETRYABLE_MAX_ATTEMPTS: i64 = 3;
 
@@ -26,6 +26,18 @@ pub fn run_once<R: Runtime>(app: &AppHandle<R>) -> Result<ExecutorRunResult, Str
             message: "目前沒有 planned operation".to_string(),
         });
     };
+
+    let sync_mode = config::load(app)?.sync_mode;
+    if !sync_model::is_operation_allowed(&sync_mode, &claimed.op_type) {
+        let updated = storage::update_operation_outcome(app, &claimed.id, "done", None)?;
+        return Ok(ExecutorRunResult {
+            processed: true,
+            operation_id: Some(updated.id),
+            stage: Some(updated.stage),
+            outcome: "skipped".to_string(),
+            message: format!("依同步模式（{sync_mode}）略過 {}", claimed.op_type),
+        });
+    }
 
     if claimed.op_type == "upload_retry" {
         if claimed.attempts < 2 {

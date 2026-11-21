@@ -76,9 +76,39 @@ pub fn decide_action(
     }
 }
 
+/// 依同步模式判斷某類 operation 是否允許執行。
+/// 單向模式只搬運資料（上傳或下載），永遠不執行刪除與改名，避免對目的端造成刪除效果；
+/// 僅下載模式也不接收本機變更。
+pub fn is_operation_allowed(mode: &str, op_type: &str) -> bool {
+    match mode {
+        "upload_only" => matches!(
+            op_type,
+            "upload" | "upload_retry" | "upload_retry_hard" | "scan_local_path"
+        ),
+        "download_only" => op_type == "download",
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decide_action, SyncAction, VersionedSnapshot};
+    use super::{decide_action, is_operation_allowed, SyncAction, VersionedSnapshot};
+
+    #[test]
+    fn sync_mode_policy_blocks_delete_in_one_way_modes() {
+        for op in ["upload", "download", "delete", "rename", "scan_local_path"] {
+            assert!(is_operation_allowed("bidirectional", op));
+        }
+        assert!(is_operation_allowed("upload_only", "upload"));
+        assert!(is_operation_allowed("upload_only", "scan_local_path"));
+        assert!(!is_operation_allowed("upload_only", "download"));
+        assert!(!is_operation_allowed("upload_only", "delete"));
+        assert!(!is_operation_allowed("upload_only", "rename"));
+        assert!(is_operation_allowed("download_only", "download"));
+        assert!(!is_operation_allowed("download_only", "upload"));
+        assert!(!is_operation_allowed("download_only", "delete"));
+        assert!(!is_operation_allowed("download_only", "scan_local_path"));
+    }
 
     fn snap(exists: bool, version: Option<&str>, hash: Option<&str>) -> VersionedSnapshot {
         VersionedSnapshot {

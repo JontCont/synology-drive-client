@@ -12,6 +12,7 @@ use crate::remote::RemoteProvider;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -896,8 +897,21 @@ async fn apply_window_preset(
             ingest_backlog_limit: None,
             oidc: None,
             window_preset: Some(preset),
+            sync_mode: None,
         },
     )
+}
+
+#[tauri::command]
+async fn pick_local_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let picked = app.dialog().file().blocking_pick_folder();
+    match picked {
+        Some(path) => path
+            .into_path()
+            .map(|p| Some(p.to_string_lossy().to_string()))
+            .map_err(|e| format!("無法解析所選資料夾：{e}")),
+        None => Ok(None),
+    }
 }
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
@@ -933,6 +947,7 @@ pub fn notify_if_background<R: Runtime>(app: &tauri::AppHandle<R>, title: &str, 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(auth::AuthState::new())
         .manage(sync_service::SyncServiceState::new())
         .manage(watcher::LocalWatcherState::new())
@@ -984,6 +999,7 @@ pub fn run() {
             get_app_config,
             update_app_config,
             apply_window_preset,
+            pick_local_folder,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,

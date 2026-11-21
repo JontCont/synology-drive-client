@@ -260,6 +260,10 @@ impl SyncServiceState {
 
     fn ingest_once(app: &AppHandle) -> Result<usize, String> {
         let cfg = config::load(app)?;
+        if cfg.sync_mode == config::SYNC_MODE_DOWNLOAD_ONLY {
+            // 僅下載模式不接收本機變更
+            return Ok(0);
+        }
         if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
             return Ok(0);
         }

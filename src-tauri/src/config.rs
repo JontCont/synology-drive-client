@@ -29,6 +29,23 @@ pub struct AppConfig {
     pub oidc: OidcConfig,
     #[serde(default = "default_window_preset")]
     pub window_preset: String,
+    #[serde(default = "default_sync_mode")]
+    pub sync_mode: String,
+}
+
+pub const SYNC_MODE_BIDIRECTIONAL: &str = "bidirectional";
+pub const SYNC_MODE_UPLOAD_ONLY: &str = "upload_only";
+pub const SYNC_MODE_DOWNLOAD_ONLY: &str = "download_only";
+
+fn default_sync_mode() -> String {
+    SYNC_MODE_BIDIRECTIONAL.to_string()
+}
+
+pub fn is_valid_sync_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        SYNC_MODE_BIDIRECTIONAL | SYNC_MODE_UPLOAD_ONLY | SYNC_MODE_DOWNLOAD_ONLY
+    )
 }
 
 pub const WINDOW_PRESET_WIDE: &str = "wide";
@@ -57,6 +74,7 @@ pub struct AppConfigUpdate {
     pub ingest_backlog_limit: Option<u32>,
     pub oidc: Option<OidcConfig>,
     pub window_preset: Option<String>,
+    pub sync_mode: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -69,6 +87,7 @@ impl Default for AppConfig {
             ingest_backlog_limit: 200,
             oidc: OidcConfig::default(),
             window_preset: default_window_preset(),
+            sync_mode: default_sync_mode(),
         }
     }
 }
@@ -134,6 +153,13 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         };
     }
 
+    if let Some(sync_mode) = update.sync_mode {
+        if !is_valid_sync_mode(&sync_mode) {
+            return Err(format!("不支援的同步模式：{sync_mode}"));
+        }
+        config.sync_mode = sync_mode;
+    }
+
     if let Some(window_preset) = update.window_preset {
         if window_preset_size(&window_preset).is_none() {
             return Err(format!("不支援的視窗解析度預設：{window_preset}"));
@@ -175,6 +201,9 @@ mod tests {
         let raw = r#"{"localSyncPath":null,"remotePath":null,"pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
         let config: AppConfig = serde_json::from_str(raw).expect("legacy config should parse");
         assert_eq!(config.window_preset, WINDOW_PRESET_WIDE);
+        assert_eq!(config.sync_mode, SYNC_MODE_BIDIRECTIONAL);
+        assert!(is_valid_sync_mode("upload_only"));
+        assert!(!is_valid_sync_mode("mirror"));
     }
 
     #[test]

@@ -18,7 +18,31 @@ type AppConfig = {
   ingestBacklogLimit: number;
   oidc?: OidcConfig;
   windowPreset?: "wide" | "compact";
+  syncMode?: SyncMode;
 };
+
+type SyncMode = "bidirectional" | "upload_only" | "download_only";
+
+const SYNC_MODES: { id: SyncMode; label: string; arrow: string; desc: string }[] = [
+  {
+    id: "bidirectional",
+    label: "雙向同步",
+    arrow: "⇄",
+    desc: "本機與 NAS 的變更互相同步，刪除也會同步",
+  },
+  {
+    id: "upload_only",
+    label: "僅上傳（本機 → NAS）",
+    arrow: "→",
+    desc: "只把本機新增與修改的檔案上傳到 NAS，不下載、不刪除",
+  },
+  {
+    id: "download_only",
+    label: "僅下載（NAS → 本機）",
+    arrow: "←",
+    desc: "只把 NAS 的變更下載到本機，不上傳、不刪除",
+  },
+];
 
 const WINDOW_PRESETS: { id: "wide" | "compact"; label: string; size: string; desc: string }[] = [
   { id: "wide", label: "寬版", size: "1160 × 768", desc: "圖表整行顯示，服務與監看兩欄並排" },
@@ -210,6 +234,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
+  const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [windowSize, setWindowSize] = useState({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -299,6 +324,7 @@ function App() {
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
     setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
+    setSyncMode(value.syncMode ?? "bidirectional");
     if (value.oidc) {
       setOidcProviderName(value.oidc.providerName ?? "");
       setOidcIssuerUrl(value.oidc.issuerUrl ?? "");
@@ -441,6 +467,7 @@ function App() {
           remotePath,
           pollIntervalSeconds: parsedPoll,
           ingestBacklogLimit: parsedBacklog,
+          syncMode,
         },
       });
       applyConfigToState(next);
@@ -450,6 +477,15 @@ function App() {
       setError(String(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function browseLocalFolder() {
+    try {
+      const picked = await invoke<string | null>("pick_local_folder");
+      if (picked) setLocalSyncPath(picked);
+    } catch (err) {
+      setError(String(err));
     }
   }
 
@@ -1220,6 +1256,7 @@ function App() {
     value: stageCountMap.get(stage) ?? 0,
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
+  const syncModeArrow = SYNC_MODES.find((m) => m.id === syncMode)?.arrow ?? "⇄";
 
   const setupSteps: {
     label: string;
@@ -2905,37 +2942,95 @@ function App() {
           {/* TAB 5: SETTINGS & DIAGNOSTICS */}
           {!initialLoading && !tabSwitching && activeTab === "settings" && (
             <div className="section-stack">
-              <div className="two-col-grid">
-                <section className="card">
-                  <h2 className="card-title">同步資料夾與效能設定</h2>
-                  <p className="card-desc">設定本機與遠端 NAS 對應路徑、輪詢間隔與佇列保護上限</p>
-                  {config ? (
-                    <form
-                      className="form-stack"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        saveConfig();
-                      }}
-                    >
-                      <label className="form-field">
-                        <span>本機同步資料夾路徑</span>
-                        <input
-                          className="input mono"
-                          value={localSyncPath}
-                          onChange={(event) => setLocalSyncPath(event.currentTarget.value)}
-                          placeholder="例如 C:\Users\you\SynologyDrive"
-                        />
-                      </label>
-                      <label className="form-field">
-                        <span>遠端 NAS 同步路徑</span>
-                        <input
-                          className="input mono"
-                          value={remotePath}
-                          onChange={(event) => setRemotePath(event.currentTarget.value)}
-                          placeholder="例如 /Drive/SyncRoot"
-                        />
-                      </label>
-                      <div className="two-col-grid">
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">同步設定</h2>
+                    <p className="card-desc">選擇同步模式並指定本機與 NAS 資料夾</p>
+                  </div>
+                  <span className="badge badge-info sync-direction-badge">
+                    本機 {syncModeArrow} NAS
+                  </span>
+                </div>
+                {config ? (
+                  <form
+                    className="form-stack"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveConfig();
+                    }}
+                  >
+                    <div className="sync-section">
+                      <span className="sync-section-title">1. 同步模式</span>
+                      <div className="preset-grid" role="radiogroup" aria-label="同步模式">
+                        {SYNC_MODES.map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={syncMode === mode.id}
+                            className={`preset-card ${syncMode === mode.id ? "active" : ""}`}
+                            onClick={() => setSyncMode(mode.id)}
+                          >
+                            <span className="sync-mode-arrow" aria-hidden="true">
+                              {mode.arrow}
+                            </span>
+                            <span className="preset-label">{mode.label}</span>
+                            <span className="preset-desc">{mode.desc}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {syncMode !== "bidirectional" ? (
+                        <div className="info-box">
+                          <div className="info-box-text">
+                            單向同步只搬運資料，不會執行刪除或改名；
+                            {syncMode === "upload_only"
+                              ? "NAS 上的變更不會下載到本機。"
+                              : "本機的變更不會上傳到 NAS。"}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="sync-section">
+                      <span className="sync-section-title">2. 資料夾</span>
+                      <div className="sync-folder-row">
+                        <label className="form-field" style={{ flex: 1 }}>
+                          <span>本機資料夾</span>
+                          <div className="inline-input-row">
+                            <input
+                              className="input mono"
+                              value={localSyncPath}
+                              onChange={(event) => setLocalSyncPath(event.currentTarget.value)}
+                              placeholder="例如 C:\Users\you\SynologyDrive"
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={browseLocalFolder}
+                            >
+                              瀏覽…
+                            </button>
+                          </div>
+                        </label>
+                        <span className="sync-folder-arrow" aria-hidden="true">
+                          {syncModeArrow}
+                        </span>
+                        <label className="form-field" style={{ flex: 1 }}>
+                          <span>NAS 遠端資料夾</span>
+                          <input
+                            className="input mono"
+                            value={remotePath}
+                            onChange={(event) => setRemotePath(event.currentTarget.value)}
+                            placeholder="例如 /Drive/SyncRoot"
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <details className="sync-advanced">
+                      <summary>進階（輪詢與佇列保護）</summary>
+                      <div className="two-col-grid" style={{ marginTop: 12 }}>
                         <label className="form-field">
                           <span>輪詢間隔（秒）</span>
                           <input
@@ -2959,21 +3054,29 @@ function App() {
                           />
                         </label>
                       </div>
-                      <div className="button-row">
-                        <button type="submit" className="btn btn-primary" disabled={saving}>
-                          {saving ? "儲存中..." : "儲存同步設定"}
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <div className="fb-skeleton-container" aria-busy="true">
-                      <div className="fb-skeleton fb-skeleton-input" />
-                      <div className="fb-skeleton fb-skeleton-input" />
-                      <div className="fb-skeleton fb-skeleton-btn-sm" />
-                    </div>
-                  )}
-                </section>
+                    </details>
 
+                    <div className="button-row">
+                      <button type="submit" className="btn btn-primary" disabled={saving}>
+                        {saving ? "儲存中..." : "儲存同步設定"}
+                      </button>
+                      {serviceStatus?.running ? (
+                        <span className="cell-secondary">
+                          同步服務運行中，變更模式或路徑後請停止再重新啟動才會生效
+                        </span>
+                      ) : null}
+                    </div>
+                  </form>
+                ) : (
+                  <div className="fb-skeleton-container" aria-busy="true">
+                    <div className="fb-skeleton fb-skeleton-input" />
+                    <div className="fb-skeleton fb-skeleton-input" />
+                    <div className="fb-skeleton fb-skeleton-btn-sm" />
+                  </div>
+                )}
+              </section>
+
+              <div>
                 <section className="card">
                   <h2 className="card-title">SQLite 儲存引擎與 Sync Root</h2>
                   <p className="card-desc">管理本機狀態資料庫 Schema 與預設同步根目錄映射</p>
