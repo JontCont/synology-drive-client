@@ -1124,15 +1124,16 @@ function App() {
     setServiceStatus(status);
   }
 
-  async function startService() {
+  async function restartService() {
     setServiceLoading(true);
     setError(null);
     setMessage(null);
     try {
+      await invoke<SyncServiceStatus>("stop_sync_service");
       const status = await invoke<SyncServiceStatus>("start_sync_service");
       setServiceStatus(status);
       await refreshWatcherStatus().catch(() => undefined);
-      setMessage("同步服務已啟動（本機監看已一併啟動）。");
+      setMessage("同步服務已重新啟動。");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1688,13 +1689,6 @@ function App() {
       done: syncFolders.length > 0,
       action: "前往設定",
       target: "settings",
-    },
-    {
-      label: "啟動同步服務",
-      hint: serviceStatus?.running ? "同步服務運行中" : "在「操作佇列與監看」頁右上角啟動",
-      done: Boolean(serviceStatus?.running),
-      action: "前往啟動",
-      target: "operations",
     },
   ];
 
@@ -2418,26 +2412,6 @@ function App() {
                 前往登入頁
               </button>
             )}
-            {activeTab !== "overview" &&
-              (serviceStatus?.running ? (
-                <button
-                  type="button"
-                  className="btn btn-outline-danger btn-sm"
-                  onClick={stopService}
-                  disabled={serviceLoading}
-                >
-                  停止同步服務
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={startService}
-                  disabled={serviceLoading}
-                >
-                  啟動同步服務
-                </button>
-              ))}
           </div>
         </header>
 
@@ -3063,7 +3037,7 @@ function App() {
                 ) : (
                   <div className="empty-state">
                     {syncQueue.waiting + syncQueue.running + syncQueue.failed + syncQueue.done === 0
-                      ? "目前沒有待同步的項目。新增資料夾、按「立即同步」或啟動同步服務後，比對出的項目會顯示在這裡"
+                      ? "目前沒有待同步的項目。新增資料夾、按「立即同步」或等同步服務自動執行後，比對出的項目會顯示在這裡"
                       : "沒有符合篩選條件的項目"}
                   </div>
                 )}
@@ -3095,6 +3069,30 @@ function App() {
                 </div>
 
                 <div className="action-groups">
+                  <div className="action-group">
+                    <span className="action-group-label">
+                      同步服務：登入後自動啟動，通常不需要手動操作
+                    </span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={restartService}
+                        disabled={serviceLoading}
+                      >
+                        重新啟動同步服務
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={stopService}
+                        disabled={serviceLoading || !serviceStatus?.running}
+                      >
+                        停止同步服務
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="action-group">
                     <span className="action-group-label">
                       本機監看 (Watcher)：登入後自動啟動，通常不需要手動操作
@@ -3943,7 +3941,7 @@ function App() {
                       </button>
                       {serviceStatus?.running ? (
                         <span className="cell-secondary">
-                          輪詢間隔變更後，請停止再重新啟動同步服務才會生效
+                          輪詢間隔變更後，請到「操作佇列與監看」頁重新啟動同步服務才會生效
                         </span>
                       ) : null}
                     </div>
