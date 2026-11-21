@@ -51,6 +51,22 @@ pub trait AuthBackendAdapter: Send + Sync {
     fn download_remote_file(&self, _remote_path: &str, _dest: &std::path::Path) -> Result<u64, String> {
         Err("目前的認證方式不支援下載 NAS 檔案".to_string())
     }
+
+    /// 上傳本機檔案到 NAS 的 `remote_path`（含檔名）。`new_version` 為 true 時，若 NAS 已有同名檔案，
+    /// 會把舊內容保留為歷史版本再寫入；為 false 時永不覆蓋（同名則由 NAS 自動改名）
+    fn upload_remote_file(
+        &self,
+        _local_path: &std::path::Path,
+        _remote_path: &str,
+        _new_version: bool,
+    ) -> Result<(), String> {
+        Err("目前的認證方式不支援上傳檔案到 NAS".to_string())
+    }
+
+    /// 在 NAS 建立資料夾（`remote_path` 為完整路徑）
+    fn create_remote_folder(&self, _remote_path: &str) -> Result<(), String> {
+        Err("目前的認證方式不支援在 NAS 建立資料夾".to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -386,6 +402,18 @@ impl DsmAuthAdapter {
         }
     }
 
+    /// 上傳/建立資料夾的錯誤說明
+    fn describe_upload_failure(err: &DsmError) -> String {
+        match err.code {
+            119 | -2 | -3 => Self::describe_failure(err),
+            -1 => "NAS 回應了無法辨識的內容（上傳 API 可能與此 DSM 版本不相容）".to_string(),
+            105 | 106 | 107 => "NAS 登入權限不足或已過期，請重新登入".to_string(),
+            1002 | 1003 => "NAS 找不到目的資料夾，或沒有寫入權限".to_string(),
+            1004 | 1005 => "NAS 空間不足或超過配額".to_string(),
+            code => format!("NAS 回報上傳失敗（錯誤碼 {code}）"),
+        }
+    }
+
     /// 下載專用的錯誤說明：DSM 的下載/檔案錯誤碼與登入錯誤碼意義不同
     fn describe_download_failure(err: &DsmError) -> String {
         match err.code {
@@ -545,6 +573,81 @@ impl DsmAuthAdapter {
         std::io::copy(&mut response.body_mut().as_reader(), &mut file)
             .map_err(|_| DsmError { code: -2 })
     }
+    /// 組出 multipart/form-data 的前後段；檔案本體以串流方式夾在中間，不會整個讀進記憶體
+    fn multipart_parts(boundary: &str, file_name: &str) -> (Vec<u8>, Vec<u8>) {
+        let safe_name: String = file_name
+            .chars()
+            .map(|c| if c == '"' || c == '\r' || c == '\n' { '_' } else { c })
+            .collect();
+        let head = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        );
+        let tail = format!("\r\n--{boundary}--\r\n");
+        (head.into_bytes(), tail.into_bytes())
+    }
+
+    fn put_drive_file(
+        &self,
+        origin: &str,
+        sid: &str,
+        path_param: &str,
+        local_path: &std::path::Path,
+        new_version: bool,
+    ) -> Result<(), DsmError> {
+        let file = std::fs::File::open(local_path).map_err(|_| DsmError { code: -3 })?;
+        let len = file.metadata().map_err(|_| DsmError { code: -3 })?.len();
+        let file_name = local_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let boundary = format!("----SynoDriveClient{nanos}");
+        let (head, tail) = Self::multipart_parts(&boundary, &file_name);
+        let total = head.len() as u64 + len + tail.len() as u64;
+        let mut body = std::io::Read::chain(
+            std::io::Read::chain(std::io::Cursor::new(head), file),
+            std::io::Cursor::new(tail),
+        );
+
+        let url = format!("{origin}/webapi/entry.cgi");
+        let mut response = self
+            .download_agent
+            .post(&url)
+            .query("api", "SYNO.SynologyDrive.Files")
+            .query("version", "2")
+            .query("method", "upload")
+            .query("path", path_param)
+            .query("type", "file")
+            .query("conflict_action", if new_version { "version" } else { "autorename" })
+            .query("_sid", sid)
+            .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+            .header("Content-Length", &total.to_string())
+            .send(ureq::SendBody::from_reader(&mut body))
+            .map_err(|_| DsmError { code: -2 })?;
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        parse_dsm_data_response(&body).map(|_| ())
+    }
+
+    fn make_drive_folder(&self, origin: &str, sid: &str, path_param: &str) -> Result<(), DsmError> {
+        let url = format!("{origin}/webapi/entry.cgi");
+        let mut response = self
+            .agent
+            .put(&url)
+            .query("api", "SYNO.SynologyDrive.Files")
+            .query("version", "2")
+            .query("method", "create")
+            .query("path", path_param)
+            .query("type", "folder")
+            .query("conflict_action", "autorename")
+            .query("_sid", sid)
+            .send_empty()
+            .map_err(|_| DsmError { code: -2 })?;
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        parse_dsm_data_response(&body).map(|_| ())
+    }
 }
 
 impl AuthBackendAdapter for DsmAuthAdapter {
@@ -688,6 +791,32 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         }
         self.list_drive_directory(&origin, &sid, normalized)
             .map_err(|err| Self::describe_failure(&err))
+    }
+
+    fn upload_remote_file(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        new_version: bool,
+    ) -> Result<(), String> {
+        let (origin, sid) = self.current_session()?;
+        // 與已驗證的列表 API 相同：先用一般字串路徑，失敗再改用 JSON 引號字串
+        let mut result = self.put_drive_file(&origin, &sid, remote_path, local_path, new_version);
+        if matches!(&result, Err(e) if e.code != 119 && e.code != -2 && e.code != -3) {
+            let quoted = serde_json::to_string(remote_path).unwrap_or_else(|_| remote_path.to_string());
+            result = self.put_drive_file(&origin, &sid, &quoted, local_path, new_version);
+        }
+        result.map_err(|err| Self::describe_upload_failure(&err))
+    }
+
+    fn create_remote_folder(&self, remote_path: &str) -> Result<(), String> {
+        let (origin, sid) = self.current_session()?;
+        let mut result = self.make_drive_folder(&origin, &sid, remote_path);
+        if matches!(&result, Err(e) if e.code != 119 && e.code != -2) {
+            let quoted = serde_json::to_string(remote_path).unwrap_or_else(|_| remote_path.to_string());
+            result = self.make_drive_folder(&origin, &sid, &quoted);
+        }
+        result.map_err(|err| Self::describe_upload_failure(&err))
     }
 
     fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
@@ -920,6 +1049,25 @@ impl AuthState {
             return Err("請先登入 NAS".to_string());
         }
         self.adapter.download_remote_file(remote_path, dest)
+    }
+
+    pub fn upload_remote_file(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        new_version: bool,
+    ) -> Result<(), String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入 NAS".to_string());
+        }
+        self.adapter.upload_remote_file(local_path, remote_path, new_version)
+    }
+
+    pub fn create_remote_folder(&self, remote_path: &str) -> Result<(), String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入 NAS".to_string());
+        }
+        self.adapter.create_remote_folder(remote_path)
     }
 
     pub fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
@@ -1315,6 +1463,95 @@ mod tests {
             .expect("listing should succeed");
         assert_eq!(entries.len(), DSM_LIST_LIMIT as usize + 2);
         assert_eq!(entries[0].path, "/mydrive/Work/f0");
+    }
+
+    #[test]
+    fn upload_sends_multipart_with_exact_content_length() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<u8>)>();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let (head_end, content_length) = loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .expect("upload must send Content-Length (no chunked encoding)");
+                    break (end + 4, len);
+                }
+            };
+            while buf.len() < head_end + content_length {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            tx.send((head, buf[head_end..head_end + content_length].to_vec())).unwrap();
+            let body = br#"{"success":true,"data":{"file_id":"1"}}"#;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let dir = std::env::temp_dir().join(format!("synoul-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("報價 a.txt");
+        let payload: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &payload).unwrap();
+
+        let adapter = DsmAuthAdapter::new();
+        adapter
+            .put_drive_file(&origin, "SID9", "/mydrive/Work/報價 a.txt", &file, true)
+            .expect("upload should succeed");
+
+        let (head, body) = rx.recv().unwrap();
+        assert!(head.starts_with("POST /webapi/entry.cgi?"));
+        assert!(head.contains("method=upload"));
+        assert!(head.contains("type=file"));
+        assert!(head.contains("conflict_action=version"));
+        assert!(head.contains("_sid=SID9"));
+        assert!(head.to_lowercase().contains("content-type: multipart/form-data; boundary="));
+
+        let text_start = String::from_utf8_lossy(&body[..200]).to_string();
+        assert!(text_start.contains("name=\"file\""));
+        assert!(text_start.contains("filename=\"報價 a.txt\""));
+        // 檔案內容必須完整且原樣出現在 multipart 內
+        assert!(body.windows(payload.len()).any(|w| w == payload.as_slice()));
+        assert!(body.ends_with(b"--\r\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_and_folder_errors_are_reported() {
+        let (origin, _requests) = spawn_mock_server(vec![
+            ("200 OK", "application/json", "", br#"{"success":false,"error":{"code":1003}}"#.to_vec()),
+            ("200 OK", "application/json", "", br#"{"success":true,"data":{}}"#.to_vec()),
+        ]);
+        let adapter = DsmAuthAdapter::new();
+        let dir = std::env::temp_dir().join(format!("synoul-err-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            adapter.put_drive_file(&origin, "S", "/mydrive/x/a.txt", &file, false),
+            Err(DsmError { code: 1003 })
+        );
+        assert_eq!(adapter.make_drive_folder(&origin, "S", "/mydrive/x"), Ok(()));
+        // 本機檔案不存在要回報本機錯誤而不是連線錯誤
+        assert_eq!(
+            adapter.put_drive_file(&origin, "S", "/mydrive/x/b.txt", &dir.join("none.txt"), false),
+            Err(DsmError { code: -3 })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

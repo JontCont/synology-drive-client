@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -6,11 +7,20 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::auth;
 use crate::config;
 use crate::executor;
+use crate::folder_sync;
 use crate::scanner;
 use crate::storage;
 use crate::watcher;
+
+#[derive(Debug, Default)]
+struct IngestOutcome {
+    queued: usize,
+    /// 這一輪偵測到本機有變動的同步資料夾
+    local_changed_folders: HashSet<String>,
+}
 
 #[derive(Debug, Default)]
 struct ServiceMetrics {
@@ -91,6 +101,8 @@ impl SyncServiceState {
             .name("sync-service-loop".to_string())
             .spawn(move || {
                 let mut last_notified_error: Option<String> = None;
+                // 本機有變動、但因為正在同步或冷卻中而尚未自動同步的資料夾
+                let mut dirty_folders: HashSet<String> = HashSet::new();
                 loop {
                     match stop_rx.recv_timeout(sleep_duration) {
                         Ok(_) => break,
@@ -101,7 +113,9 @@ impl SyncServiceState {
                             }
                             let result = (|| -> Result<executor::ExecutorRunResult, String> {
                                 let _ = storage::init(&app_for_thread)?;
-                                let queued = Self::ingest_once(&app_for_thread)?;
+                                let ingest = Self::ingest_once(&app_for_thread)?;
+                                dirty_folders.extend(ingest.local_changed_folders);
+                                let queued = ingest.queued;
                                 if let Ok(mut m) = metrics_for_thread.lock() {
                                     if queued == 0 {
                                         m.ingest_skipped_count += 1;
@@ -111,6 +125,7 @@ impl SyncServiceState {
                                 }
                                 executor::run_once(&app_for_thread)
                             })();
+                            Self::auto_sync(&app_for_thread, &mut dirty_folders);
                             if let Ok(mut m) = metrics_for_thread.lock() {
                                 match &result {
                                     Ok(run_result) if run_result.outcome == "failed" => {
@@ -239,7 +254,7 @@ impl SyncServiceState {
         }
     }
 
-    fn ingest_once(app: &AppHandle) -> Result<usize, String> {
+    fn ingest_once(app: &AppHandle) -> Result<IngestOutcome, String> {
         let cfg = config::load(app)?;
         // 僅下載模式與暫停中的資料夾不接收本機變更
         let ingest_folders: Vec<&config::SyncFolder> = config::active_folders(&cfg)
@@ -247,15 +262,13 @@ impl SyncServiceState {
             .filter(|f| f.mode != config::SYNC_MODE_DOWNLOAD_ONLY)
             .collect();
         if ingest_folders.is_empty() {
-            return Ok(0);
-        }
-        if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
-            return Ok(0);
+            return Ok(IngestOutcome::default());
         }
 
+        // 先取走監看事件：即使佇列保護暫停入列，也要讓自動同步知道哪些資料夾有本機變動
         let watcher_state = app.state::<watcher::LocalWatcherState>();
         let mut entries: Vec<(String, String)> = watcher_state
-            .drain_event_paths(20)?
+            .drain_event_paths(200)?
             .into_iter()
             .filter_map(|path| {
                 let folder = config::folder_for_path(&cfg.sync_folders, &path)?;
@@ -265,6 +278,15 @@ impl SyncServiceState {
                     .then(|| (folder.id.clone(), path))
             })
             .collect();
+        let local_changed_folders: HashSet<String> =
+            entries.iter().map(|(id, _)| id.clone()).collect();
+
+        if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
+            return Ok(IngestOutcome {
+                queued: 0,
+                local_changed_folders,
+            });
+        }
         if entries.is_empty() {
             for folder in &ingest_folders {
                 for path in scanner::collect_local_paths(&folder.local_path, 20)? {
@@ -273,7 +295,7 @@ impl SyncServiceState {
             }
         }
         if entries.is_empty() {
-            return Ok(0);
+            return Ok(IngestOutcome::default());
         }
 
         let mut queued = 0;
@@ -300,7 +322,33 @@ impl SyncServiceState {
             let _ = storage::enqueue_operation(app, op)?;
             queued += 1;
         }
-        Ok(queued)
+        Ok(IngestOutcome {
+            queued,
+            local_changed_folders,
+        })
+    }
+
+    /// 依本機變動與定期檢查，為需要的資料夾啟動 NAS ⇄ 本機同步
+    fn auto_sync(app: &AppHandle, dirty_folders: &mut HashSet<String>) {
+        let authenticated = app
+            .state::<auth::AuthState>()
+            .status()
+            .map(|s| s.stage == "authenticated")
+            .unwrap_or(false);
+        let Ok(cfg) = config::load(app) else {
+            return;
+        };
+        if !authenticated {
+            return;
+        }
+        let runs = app.state::<folder_sync::SyncRunState>();
+        let now = folder_sync::now_ms();
+        for folder in config::active_folders(&cfg) {
+            let dirty = dirty_folders.contains(&folder.id);
+            if runs.auto_sync_due(&folder.id, now, dirty) && runs.start(app, &folder.id).is_ok() {
+                dirty_folders.remove(&folder.id);
+            }
+        }
     }
 
     fn pending_backlog_count(app: &AppHandle) -> Result<i64, String> {

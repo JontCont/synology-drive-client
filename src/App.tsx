@@ -40,11 +40,12 @@ type NasProbeResult = {
   message: string;
 };
 
-type DownloadProgress = {
+type SyncProgress = {
   folderId: string;
-  phase: "listing" | "downloading" | "done" | "cancelled" | "error" | string;
+  phase: "listing" | "syncing" | "done" | "cancelled" | "error" | string;
   totalFiles: number;
   doneFiles: number;
+  uploadedFiles: number;
   skippedFiles: number;
   conflictCopies: number;
   failedFiles: number;
@@ -102,13 +103,13 @@ const SYNC_MODES: { id: SyncMode; label: string; arrow: string; desc: string }[]
     id: "bidirectional",
     label: "雙向同步",
     arrow: "⇄",
-    desc: "本機與 NAS 的變更互相同步，刪除也會同步",
+    desc: "本機與 NAS 的新增與修改互相同步；不會刪除任何一邊的檔案，兩邊都改時保留兩份",
   },
   {
     id: "upload_only",
     label: "僅上傳（本機 → NAS）",
     arrow: "→",
-    desc: "只把本機新增與修改的檔案上傳到 NAS，不下載、不刪除",
+    desc: "只把本機新增與修改的檔案上傳到 NAS（修改過的檔案，NAS 會保留舊版本），不下載、不刪除",
   },
   {
     id: "download_only",
@@ -342,7 +343,7 @@ function App() {
   const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [folderBusy, setFolderBusy] = useState(false);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
-  const [downloads, setDownloads] = useState<DownloadProgress[]>([]);
+  const [downloads, setDownloads] = useState<SyncProgress[]>([]);
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState("30");
   const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
@@ -504,36 +505,40 @@ function App() {
   const configRef = useRef<AppConfig | null>(null);
   configRef.current = config;
   async function refreshDownloads() {
-    const list = await invoke<DownloadProgress[]>("get_download_progress");
+    const list = await invoke<SyncProgress[]>("get_sync_progress");
     setDownloads(list);
     for (const item of list) {
       const prev = previousDownloadPhases.current.get(item.folderId);
       previousDownloadPhases.current.set(item.folderId, item.phase);
-      const wasRunning = prev === "listing" || prev === "downloading";
-      if (!wasRunning || item.phase === "listing" || item.phase === "downloading") continue;
+      const wasRunning = prev === "listing" || prev === "syncing";
+      if (!wasRunning || item.phase === "listing" || item.phase === "syncing") continue;
       const name = configRef.current?.syncFolders.find((f) => f.id === item.folderId)?.name ?? "資料夾";
       if (item.phase === "done" && item.failedFiles === 0) {
-        setMessage(`「${name}」已從 NAS 同步完成：下載 ${item.doneFiles} 個檔案`);
+        if (item.doneFiles + item.uploadedFiles > 0) {
+          setMessage(
+            `「${name}」同步完成：下載 ${item.doneFiles} 個、上傳 ${item.uploadedFiles} 個檔案`,
+          );
+        }
       } else if (item.phase === "done") {
-        setWarning(`「${name}」同步完成，但有 ${item.failedFiles} 個檔案下載失敗`);
+        setWarning(`「${name}」同步完成，但有 ${item.failedFiles} 個檔案同步失敗`);
       } else if (item.phase === "error") {
-        setError(`「${name}」下載失敗：${item.lastError ?? "未知錯誤"}`);
+        setError(`「${name}」同步失敗：${item.lastError ?? "未知錯誤"}`);
       }
     }
   }
 
-  async function startFolderDownload(id: string) {
+  async function startFolderSync(id: string) {
     setError(null);
     try {
-      await invoke("start_folder_download", { id });
+      await invoke("start_folder_sync", { id });
       await refreshDownloads();
     } catch (err) {
       setError(String(err));
     }
   }
 
-  async function cancelFolderDownload(id: string) {
-    await invoke("cancel_folder_download", { id }).catch((err) => setError(String(err)));
+  async function cancelFolderSync(id: string) {
+    await invoke("cancel_folder_sync", { id }).catch((err) => setError(String(err)));
     await refreshDownloads().catch(() => undefined);
   }
 
@@ -3414,8 +3419,9 @@ function App() {
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
                               if (!dl) return null;
-                              const running = dl.phase === "listing" || dl.phase === "downloading";
-                              const handled = dl.doneFiles + dl.skippedFiles + dl.failedFiles;
+                              const running = dl.phase === "listing" || dl.phase === "syncing";
+                              const handled =
+                                dl.doneFiles + dl.uploadedFiles + dl.skippedFiles + dl.failedFiles;
                               const percent =
                                 dl.totalFiles > 0
                                   ? Math.min(100, Math.round((handled / dl.totalFiles) * 100))
@@ -3436,14 +3442,14 @@ function App() {
                                   ) : null}
                                   <div className="download-text">
                                     {dl.phase === "listing"
-                                      ? `正在讀取 NAS 檔案清單…（已發現 ${dl.totalFiles} 個檔案）`
-                                      : dl.phase === "downloading"
-                                        ? `從 NAS 下載中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}`
+                                      ? `正在比對 NAS 與本機檔案…（NAS 已發現 ${dl.totalFiles} 個檔案）`
+                                      : dl.phase === "syncing"
+                                        ? `同步中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}（下載 ${dl.doneFiles}、上傳 ${dl.uploadedFiles}）`
                                         : dl.phase === "cancelled"
-                                          ? `已取消（已下載 ${dl.doneFiles} 個檔案）`
+                                          ? `已取消（已下載 ${dl.doneFiles}、已上傳 ${dl.uploadedFiles} 個檔案）`
                                           : dl.phase === "error"
-                                            ? `下載失敗：${dl.lastError ?? "未知錯誤"}`
-                                            : `已同步：下載 ${dl.doneFiles} 個、略過 ${dl.skippedFiles} 個${
+                                            ? `同步失敗：${dl.lastError ?? "未知錯誤"}`
+                                            : `已同步：下載 ${dl.doneFiles} 個、上傳 ${dl.uploadedFiles} 個、無變動 ${dl.skippedFiles} 個${
                                                 dl.conflictCopies > 0
                                                   ? `、衝突副本 ${dl.conflictCopies} 個`
                                                   : ""
@@ -3462,24 +3468,24 @@ function App() {
                           <div className="folder-row-actions">
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
-                              const running = dl?.phase === "listing" || dl?.phase === "downloading";
+                              const running = dl?.phase === "listing" || dl?.phase === "syncing";
                               if (running) {
                                 return (
                                   <button
                                     type="button"
                                     className="btn btn-outline-danger btn-sm"
-                                    onClick={() => cancelFolderDownload(folder.id)}
+                                    onClick={() => cancelFolderSync(folder.id)}
                                   >
-                                    取消下載
+                                    取消同步
                                   </button>
                                 );
                               }
-                              return folder.mode !== "upload_only" && !folder.paused ? (
+                              return !folder.paused ? (
                                 <button
                                   type="button"
                                   className="btn btn-primary btn-sm"
                                   disabled={folderBusy}
-                                  onClick={() => startFolderDownload(folder.id)}
+                                  onClick={() => startFolderSync(folder.id)}
                                 >
                                   立即同步
                                 </button>

@@ -146,21 +146,25 @@ mod imp {
         options.open(path).map(Placeholder::from)
     }
 
-    /// 將檔案或資料夾標成「已同步」或「同步中」；尚未是 Placeholder 時先轉換
+    /// 將檔案或資料夾標成「已同步」或「同步中」；尚未是 Placeholder 時先轉換。
+    /// 狀態已經正確時不再寫入，避免例行檢查反覆觸發檔案變動通知而造成連鎖同步
     pub fn mark_path(path: &Path, in_sync: bool) -> Result<(), String> {
         let mut placeholder = open_win32(path, true).map_err(|e| format!("開啟失敗：{e}"))?;
-        let is_placeholder = placeholder
+        let state = placeholder
             .state()
-            .map_err(|e| format!("讀取狀態失敗：{e}"))?
-            .is_some();
-        if !is_placeholder {
-            let mut options = ConvertOptions::default();
-            if in_sync {
-                options = options.mark_in_sync();
+            .map_err(|e| format!("讀取狀態失敗：{e}"))?;
+        match state {
+            Some(s) if s.in_sync() == in_sync => return Ok(()),
+            Some(_) => {}
+            None => {
+                let mut options = ConvertOptions::default();
+                if in_sync {
+                    options = options.mark_in_sync();
+                }
+                placeholder
+                    .convert_to_placeholder(options, None)
+                    .map_err(|e| format!("轉換為 Placeholder 失敗：{e}"))?;
             }
-            placeholder
-                .convert_to_placeholder(options, None)
-                .map_err(|e| format!("轉換為 Placeholder 失敗：{e}"))?;
         }
         placeholder
             .mark_in_sync(in_sync, None)

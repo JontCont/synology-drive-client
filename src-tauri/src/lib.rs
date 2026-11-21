@@ -1,12 +1,13 @@
 mod auth;
 mod cloud_status;
 mod config;
-mod downloader;
 mod executor;
+mod folder_sync;
 mod remote;
 mod scanner;
 mod storage;
 mod sync_model;
+mod sync_state;
 mod sync_service;
 mod watcher;
 
@@ -560,7 +561,7 @@ async fn add_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
-    download_state: State<'_, downloader::DownloadState>,
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
     local_path: String,
     remote_path: String,
@@ -568,12 +569,12 @@ async fn add_sync_folder(
 ) -> Result<config::AppConfig, String> {
     let cfg = config::add_folder(&app, &local_path, &remote_path, &mode)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
-    // 下載前先註冊同步根，下載時才能標示同步狀態
+    // 下載前先註冊同步根，同步時才能標示狀態圖示
     let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
-    // 新增後立刻開始初次下載（僅上傳模式不從 NAS 下載）
+    // 新增後立刻開始初次同步（NAS 有的下載、本機有的上傳）
     if let Some(folder) = cfg.sync_folders.last() {
         if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
-            let _ = download_state.start(&app, &folder.id);
+            let _ = sync_run_state.start(&app, &folder.id);
         }
     }
     Ok(cfg)
@@ -584,7 +585,7 @@ async fn update_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
-    download_state: State<'_, downloader::DownloadState>,
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
     id: String,
     mode: Option<String>,
@@ -594,12 +595,12 @@ async fn update_sync_folder(
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
     if paused == Some(true) {
-        download_state.cancel(&id);
+        sync_run_state.cancel(&id);
     }
-    // 繼續同步或切換成會下載的模式時，補做一次下載
+    // 繼續同步或切換模式後，補做一次同步
     if paused == Some(false) || mode.is_some() {
         if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
-            let _ = download_state.start(&app, &id);
+            let _ = sync_run_state.start(&app, &id);
         }
     }
     Ok(cfg)
@@ -610,41 +611,42 @@ async fn remove_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
-    download_state: State<'_, downloader::DownloadState>,
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
     id: String,
 ) -> Result<config::AppConfig, String> {
-    download_state.cancel(&id);
+    sync_run_state.cancel(&id);
     // 先解除同步根註冊，資料夾才不會留下雲端檔案篩選的殘餘狀態
     let _ = cloud_state.unregister(&id);
     let cfg = config::remove_folder(&app, &id)?;
+    sync_state::delete(&app, &id);
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     Ok(cfg)
 }
 
 #[tauri::command]
-async fn start_folder_download(
+async fn start_folder_sync(
     app: tauri::AppHandle,
     auth_state: State<'_, auth::AuthState>,
-    download_state: State<'_, downloader::DownloadState>,
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
     id: String,
 ) -> Result<(), String> {
     if auth_state.status()?.stage != "authenticated" {
         return Err("請先登入 NAS".to_string());
     }
-    download_state.start(&app, &id)
+    sync_run_state.start(&app, &id)
 }
 
 #[tauri::command]
-fn cancel_folder_download(download_state: State<'_, downloader::DownloadState>, id: String) {
-    download_state.cancel(&id);
+fn cancel_folder_sync(sync_run_state: State<'_, folder_sync::SyncRunState>, id: String) {
+    sync_run_state.cancel(&id);
 }
 
 #[tauri::command]
-fn get_download_progress(
-    download_state: State<'_, downloader::DownloadState>,
-) -> Vec<downloader::DownloadProgress> {
-    download_state.snapshot()
+fn get_sync_progress(
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
+) -> Vec<folder_sync::SyncProgress> {
+    sync_run_state.snapshot()
 }
 
 #[tauri::command]
@@ -744,11 +746,11 @@ async fn logout(
     auth_state: State<'_, auth::AuthState>,
     sync_state: State<'_, sync_service::SyncServiceState>,
     watcher_state: State<'_, watcher::LocalWatcherState>,
-    download_state: State<'_, downloader::DownloadState>,
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
 ) -> Result<auth::AuthStatus, String> {
     // 登出後不應在背景繼續同步
-    download_state.cancel_all();
+    sync_run_state.cancel_all();
     cloud_state.disconnect_all();
     let _ = sync_state.stop();
     let _ = watcher_state.stop();
@@ -1155,7 +1157,7 @@ pub fn run() {
         .manage(auth::AuthState::new())
         .manage(sync_service::SyncServiceState::new())
         .manage(watcher::LocalWatcherState::new())
-        .manage(downloader::DownloadState::new())
+        .manage(folder_sync::SyncRunState::new())
         .manage(cloud_status::CloudStatusState::new())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
@@ -1209,9 +1211,9 @@ pub fn run() {
             add_sync_folder,
             ensure_local_watcher,
             ensure_explorer_icons,
-            start_folder_download,
-            cancel_folder_download,
-            get_download_progress,
+            start_folder_sync,
+            cancel_folder_sync,
+            get_sync_progress,
             update_sync_folder,
             remove_sync_folder,
             list_nas_folders,
