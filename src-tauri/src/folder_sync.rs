@@ -434,10 +434,6 @@ pub struct RemoteFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Noop,
-    /// 之前同步過，本機後來被刪除：不會刪除 NAS，也不會重新下載
-    SkipLocalDeleted,
-    /// 之前同步過，NAS 後來被刪除：不會刪除本機
-    SkipRemoteDeleted,
     /// 兩邊內容一致，只需記錄為已同步
     RecordBaseline,
     Download,
@@ -487,16 +483,14 @@ pub fn decide_file(
     let can_upload = mode != config::SYNC_MODE_DOWNLOAD_ONLY;
     match (local, remote, base) {
         (None, None, _) => Action::Noop,
-        (None, Some(_), Some(_)) => Action::SkipLocalDeleted,
-        (None, Some(_), None) => {
+        (None, Some(_), _) => {
             if can_download {
                 Action::Download
             } else {
                 Action::Noop
             }
         }
-        (Some(_), None, Some(_)) => Action::SkipRemoteDeleted,
-        (Some(_), None, None) => {
+        (Some(_), None, _) => {
             if can_upload {
                 Action::Upload
             } else {
@@ -906,7 +900,7 @@ fn execute_plan(
 
         state.update(&folder.id, |p| p.current_file = Some(item.remote_path.clone()));
         let outcome: Result<Option<Transfer>, String> = match item.action {
-            Action::Noop | Action::SkipLocalDeleted | Action::SkipRemoteDeleted => Ok(None),
+            Action::Noop => Ok(None),
             Action::RecordBaseline => {
                 if let (Some(l), Some(r)) = (&item.local, &item.remote) {
                     baseline.files.insert(
@@ -1223,12 +1217,16 @@ mod tests {
     }
 
     #[test]
-    fn deletions_are_never_propagated() {
+    fn missing_files_are_restored_and_never_deleted() {
         let b = base(5, 1_000, 5);
-        // 同步過後本機刪除：不刪 NAS，也不重新下載
-        assert_eq!(decide_file(BI, None, Some(&rf(5)), Some(&b)), Action::SkipLocalDeleted);
-        // 同步過後 NAS 刪除：不刪本機，也不重新上傳
-        assert_eq!(decide_file(BI, Some(&lf(5, 1_000)), None, Some(&b)), Action::SkipRemoteDeleted);
+        // 同步過後本機刪除：不刪 NAS，從 NAS 補回
+        assert_eq!(decide_file(BI, None, Some(&rf(5)), Some(&b)), Action::Download);
+        assert_eq!(decide_file(DOWN, None, Some(&rf(5)), Some(&b)), Action::Download);
+        assert_eq!(decide_file(UP, None, Some(&rf(5)), Some(&b)), Action::Noop);
+        // 同步過後 NAS 刪除：不刪本機，重新上傳補回
+        assert_eq!(decide_file(BI, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(UP, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(DOWN, Some(&lf(5, 1_000)), None, Some(&b)), Action::Noop);
     }
 
     fn rn(path: &str, is_dir: bool, size: Option<u64>) -> RemoteNode {
