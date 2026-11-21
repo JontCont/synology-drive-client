@@ -44,6 +44,7 @@
 2. 登入流程骨架（帳密/OTP + SSO）
 3. Provider Spike（可重現測試腳本與報告）
 4. RemoteProvider 契約與 FakeRemote
+5. 視窗解析度預設：設定頁提供「寬版 / 精簡版」兩種版面，由後端調整視窗並寫入 `settings.json`（見 tasks P1-15）
 
 ## 8) Windows Explorer 整合目標（Phase 2）
 - 綁定後在 Explorer 左側導覽出現 Sync Root 入口（體感對齊 iCloud Drive）

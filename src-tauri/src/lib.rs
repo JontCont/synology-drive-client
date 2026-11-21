@@ -831,6 +831,45 @@ fn enqueue_paths_as_operations(
     Ok(operation_ids)
 }
 
+fn apply_window_preset_size<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    preset: &str,
+) -> Result<(), String> {
+    let (width, height) = config::window_preset_size(preset)
+        .ok_or_else(|| format!("不支援的視窗解析度預設：{preset}"))?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主視窗".to_string())?;
+    if window.is_maximized().unwrap_or(false) {
+        let _ = window.unmaximize();
+    }
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|e| format!("調整視窗大小失敗：{e}"))?;
+    let _ = window.center();
+    Ok(())
+}
+
+#[tauri::command]
+async fn apply_window_preset(
+    app: tauri::AppHandle,
+    preset: String,
+) -> Result<config::AppConfig, String> {
+    apply_window_preset_size(&app, &preset)?;
+    config::save(
+        &app,
+        config::AppConfigUpdate {
+            server_host: None,
+            local_sync_path: None,
+            remote_path: None,
+            poll_interval_seconds: None,
+            ingest_backlog_limit: None,
+            oidc: None,
+            window_preset: Some(preset),
+        },
+    )
+}
+
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -873,6 +912,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            if let Ok(cfg) = config::load(app.handle()) {
+                let _ = apply_window_preset_size(app.handle(), &cfg.window_preset);
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -888,6 +931,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_config,
             update_app_config,
+            apply_window_preset,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,

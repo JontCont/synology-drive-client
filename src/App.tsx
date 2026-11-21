@@ -17,7 +17,13 @@ type AppConfig = {
   pollIntervalSeconds: number;
   ingestBacklogLimit: number;
   oidc?: OidcConfig;
+  windowPreset?: "wide" | "compact";
 };
+
+const WINDOW_PRESETS: { id: "wide" | "compact"; label: string; size: string; desc: string }[] = [
+  { id: "wide", label: "寬版", size: "1160 × 768", desc: "圖表整行顯示，服務與監看兩欄並排" },
+  { id: "compact", label: "精簡版", size: "930 × 680", desc: "KPI 2×2 排列，卡片單欄堆疊" },
+];
 
 type AuthStatus = {
   stage: "idle" | "waitingOtp" | "waitingSsoCallback" | "authenticated" | string;
@@ -203,6 +209,11 @@ function App() {
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
+  const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
+  const [windowSize, setWindowSize] = useState({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
   const [stageFilter, setStageFilter] = useState<string>("all");
 
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -260,6 +271,25 @@ function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    const onResize = () =>
+      setWindowSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  async function applyWindowPreset(preset: "wide" | "compact") {
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await invoke<AppConfig>("apply_window_preset", { preset });
+      applyConfigToState(next);
+      setMessage(`已套用視窗解析度：${preset === "wide" ? "寬版" : "精簡版"}`);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   function applyConfigToState(value: AppConfig) {
     setConfig(value);
     setServerHost(value.serverHost ?? "");
@@ -267,6 +297,7 @@ function App() {
     setRemotePath(value.remotePath ?? "");
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
+    setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
     if (value.oidc) {
       setOidcProviderName(value.oidc.providerName ?? "");
       setOidcIssuerUrl(value.oidc.issuerUrl ?? "");
@@ -2895,6 +2926,38 @@ function App() {
                   </div>
                 </section>
               </div>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">視窗解析度</h2>
+                    <p className="card-desc">
+                      選擇桌面視窗版面，立即套用並於下次啟動時沿用；目前視窗大小：
+                      {windowSize.width} × {windowSize.height}
+                    </p>
+                  </div>
+                </div>
+                <div className="preset-grid" role="radiogroup" aria-label="視窗解析度">
+                  {WINDOW_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={windowPreset === preset.id}
+                      className={`preset-card ${windowPreset === preset.id ? "active" : ""}`}
+                      onClick={() => applyWindowPreset(preset.id)}
+                    >
+                      <span className={`preset-thumb preset-thumb-${preset.id}`} aria-hidden="true">
+                        <span />
+                        <span />
+                      </span>
+                      <span className="preset-label">{preset.label}</span>
+                      <span className="preset-size mono">{preset.size}</span>
+                      <span className="preset-desc">{preset.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
 
               <section className="card">
                 <div className="card-header">

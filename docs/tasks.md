@@ -70,6 +70,12 @@
   - [x] P1-14a 未登入不可進入系統（Dashboard 強制導回登入頁）
   - [x] P1-14b 「目前認證與 OIDC 配置狀態」改為設定檔分頁入口
   - [x] P1-14c Dashboard 總覽加入只讀 chart，控制操作導向其他分頁
+- [x] P1-15 視窗解析度預設（設定頁可選，寫入設定檔）
+  - [x] P1-15a 設定檔新增 `windowPreset`（`wide` 1160×768 / `compact` 930×680，邏輯像素），舊設定檔向下相容
+  - [x] P1-15b 後端 `apply_window_preset` command（set_size + 置中，最大化時先還原）；啟動時依設定套用
+  - [x] P1-15c 設定頁「視窗解析度」卡片（兩個預設選項、即時套用並儲存、顯示目前視窗大小）
+  - [x] P1-15d 版面配合：既有 auto-fit grid 在 compact 寬度自然變 KPI 2×2、卡片單欄（無需額外 media query）
+  - [ ] P1-15e 驗收：用 `npm run tauri:dev` 實測兩個預設與參考截圖一致；重開後維持上次選擇
 
 ## Phase 2（Files On-Demand）
 - [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）

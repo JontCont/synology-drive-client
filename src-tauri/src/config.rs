@@ -27,6 +27,24 @@ pub struct AppConfig {
     pub ingest_backlog_limit: u32,
     #[serde(default)]
     pub oidc: OidcConfig,
+    #[serde(default = "default_window_preset")]
+    pub window_preset: String,
+}
+
+pub const WINDOW_PRESET_WIDE: &str = "wide";
+pub const WINDOW_PRESET_COMPACT: &str = "compact";
+
+fn default_window_preset() -> String {
+    WINDOW_PRESET_WIDE.to_string()
+}
+
+/// 視窗預設對應的邏輯像素尺寸（寬, 高）
+pub fn window_preset_size(preset: &str) -> Option<(f64, f64)> {
+    match preset {
+        WINDOW_PRESET_WIDE => Some((1160.0, 768.0)),
+        WINDOW_PRESET_COMPACT => Some((930.0, 680.0)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +56,7 @@ pub struct AppConfigUpdate {
     pub poll_interval_seconds: Option<u32>,
     pub ingest_backlog_limit: Option<u32>,
     pub oidc: Option<OidcConfig>,
+    pub window_preset: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -49,6 +68,7 @@ impl Default for AppConfig {
             poll_interval_seconds: 30,
             ingest_backlog_limit: 200,
             oidc: OidcConfig::default(),
+            window_preset: default_window_preset(),
         }
     }
 }
@@ -114,6 +134,13 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         };
     }
 
+    if let Some(window_preset) = update.window_preset {
+        if window_preset_size(&window_preset).is_none() {
+            return Err(format!("不支援的視窗解析度預設：{window_preset}"));
+        }
+        config.window_preset = window_preset;
+    }
+
     if let Some(oidc) = update.oidc {
         let trim_opt = |v: Option<String>| -> Option<String> {
             v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -137,4 +164,23 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
     fs::write(&path, serialized).map_err(|e| format!("寫入設定檔失敗：{e}"))?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_without_window_preset_default_to_wide() {
+        let raw = r#"{"localSyncPath":null,"remotePath":null,"pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
+        let config: AppConfig = serde_json::from_str(raw).expect("legacy config should parse");
+        assert_eq!(config.window_preset, WINDOW_PRESET_WIDE);
+    }
+
+    #[test]
+    fn window_preset_sizes_are_defined_only_for_known_presets() {
+        assert_eq!(window_preset_size(WINDOW_PRESET_WIDE), Some((1160.0, 768.0)));
+        assert_eq!(window_preset_size(WINDOW_PRESET_COMPACT), Some((930.0, 680.0)));
+        assert_eq!(window_preset_size("huge"), None);
+    }
 }
