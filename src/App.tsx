@@ -2,14 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-type OidcConfig = {
-  providerName: string | null;
-  issuerUrl: string | null;
-  clientId: string | null;
-  redirectUri: string | null;
-  scopes: string | null;
-};
-
 type SyncFolder = {
   id: string;
   name: string;
@@ -25,7 +17,6 @@ type AppConfig = {
   syncFolders: SyncFolder[];
   pollIntervalSeconds: number;
   ingestBacklogLimit: number;
-  oidc?: OidcConfig;
   windowPreset?: "wide" | "compact";
   explorerStatusIcons?: boolean;
   autoSync?: boolean;
@@ -200,12 +191,11 @@ const WINDOW_PRESETS: { id: "wide" | "compact"; label: string; size: string; des
 ];
 
 type AuthStatus = {
-  stage: "idle" | "waitingOtp" | "waitingSsoCallback" | "authenticated" | string;
+  stage: "idle" | "waitingOtp" | "authenticated" | string;
   username: string | null;
   method: string | null;
   challengeId: string | null;
   message: string | null;
-  authorizationUrl: string | null;
 };
 
 type SyncStorageInfo = {
@@ -342,7 +332,7 @@ type FaultMatrixFastRunResult = {
 };
 
 type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings";
-type LoginViewTab = "standard" | "oidc-config";
+type LoginViewTab = "standard" | "config";
 
 function getStageBadgeClass(stage: string | null | undefined): string {
   switch (stage) {
@@ -353,7 +343,6 @@ function getStageBadgeClass(stage: string | null | undefined): string {
     case "planned":
     case "processing":
     case "waitingOtp":
-    case "waitingSsoCallback":
       return "badge-info";
     case "retryable":
       return "badge-warning";
@@ -442,15 +431,8 @@ function App() {
   });
   const [lanStatus, setLanStatus] = useState<LanStatus | null>(null);
   const [password, setPassword] = useState("");
+  const [rememberLogin, setRememberLogin] = useState(true);
   const [otpCode, setOtpCode] = useState("");
-
-  // OIDC Configuration state
-  const [oidcProviderName, setOidcProviderName] = useState("");
-  const [oidcIssuerUrl, setOidcIssuerUrl] = useState("");
-  const [oidcClientId, setOidcClientId] = useState("");
-  const [oidcRedirectUri, setOidcRedirectUri] = useState("");
-  const [oidcScopes, setOidcScopes] = useState("openid profile email");
-  const [ssoCallbackUrl, setSsoCallbackUrl] = useState("");
 
   const [authLoading, setAuthLoading] = useState(false);
   const [serviceLoading, setServiceLoading] = useState(false);
@@ -500,13 +482,6 @@ function App() {
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
     setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
-    if (value.oidc) {
-      setOidcProviderName(value.oidc.providerName ?? "");
-      setOidcIssuerUrl(value.oidc.issuerUrl ?? "");
-      setOidcClientId(value.oidc.clientId ?? "");
-      setOidcRedirectUri(value.oidc.redirectUri ?? "");
-      setOidcScopes(value.oidc.scopes ?? "openid profile email");
-    }
   }
 
   useEffect(() => {
@@ -516,9 +491,10 @@ function App() {
         .then((value) => applyConfigToState(value))
         .catch((err) => setError(String(err))),
 
-      invoke<AuthStatus>("get_auth_status")
+      invoke<AuthStatus>("restore_saved_login")
         .then((value) => {
           setAuthStatus(value);
+          if (value.message) setMessage(value.message);
           if (value.stage === "authenticated") {
             setViewMode("dashboard");
           }
@@ -708,7 +684,7 @@ function App() {
       .catch((err) => setWarning(`同步服務未能自動啟動：${String(err)}`));
   }, [isAuthenticated]);
 
-  // Whether Host and OIDC are currently configured in saved config
+  // Whether Host is currently configured in saved config
   const savedHost = config?.serverHost?.trim() || "";
   const isHostConfigured = Boolean(savedHost);
 
@@ -735,19 +711,11 @@ function App() {
     }
     return { dot: "status-online", label: `${probe.message}（${probe.latencyMs} ms）` };
   })();
-  const savedOidc = config?.oidc;
-  const isOidcConfigured = Boolean(
-    savedOidc?.issuerUrl?.trim() && savedOidc?.clientId?.trim()
-  );
-  const oidcButtonLabel = savedOidc?.providerName?.trim()
-    ? `使用 ${savedOidc.providerName.trim()} 登入`
-    : "使用 OIDC 單一登入";
-
   function setAuthResult(status: AuthStatus, successMessage?: string) {
     setAuthStatus(status);
     setError(null);
     if (successMessage) {
-      setMessage(successMessage);
+      setMessage(status.message ?? successMessage);
     }
     if (status.stage === "authenticated") {
       setViewMode("dashboard");
@@ -999,80 +967,11 @@ function App() {
     }
   }
 
-  async function saveOidcConfig(event: React.FormEvent) {
-    event.preventDefault();
-    const trimmedIssuer = oidcIssuerUrl.trim();
-    const trimmedClient = oidcClientId.trim();
-
-    if (!trimmedIssuer) {
-      setError("請填寫 OIDC Issuer / 授權入口 URL。");
-      return;
-    }
-    if (!trimmedIssuer.startsWith("https://")) {
-      setError("OIDC 授權入口 URL 必須以 https:// 開頭。");
-      return;
-    }
-    if (!trimmedClient) {
-      setError("請填寫 OIDC Client ID。");
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const next = await invoke<AppConfig>("update_app_config", {
-        update: {
-          serverHost: serverHost.trim() || undefined,
-          oidc: {
-            providerName: oidcProviderName.trim() || null,
-            issuerUrl: trimmedIssuer,
-            clientId: trimmedClient,
-            redirectUri: oidcRedirectUri.trim() || null,
-            scopes: oidcScopes.trim() || "openid profile email",
-          },
-        },
-      });
-      applyConfigToState(next);
-      setMessage("配置已儲存！現在可於一般登入頁使用 OIDC 按鈕登入。");
-      setLoginTab("standard");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function clearOidcConfig() {
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const next = await invoke<AppConfig>("update_app_config", {
-        update: {
-          oidc: {
-            providerName: null,
-            issuerUrl: null,
-            clientId: null,
-            redirectUri: null,
-            scopes: null,
-          },
-        },
-      });
-      applyConfigToState(next);
-      setMessage("已清除 OIDC 配置。");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function loginByPassword(event: React.FormEvent) {
     event.preventDefault();
     if (!isHostConfigured) {
       setError("請先到「配置」設定 NAS 主機位址（必填）。");
-      setLoginTab("oidc-config");
+      setLoginTab("config");
       return;
     }
     setAuthLoading(true);
@@ -1083,9 +982,11 @@ function App() {
         request: {
           username,
           password,
+          rememberLogin,
         },
       });
       setOtpCode("");
+      setPassword("");
       setAuthResult(
         status,
         status.stage === "authenticated"
@@ -1112,50 +1013,7 @@ function App() {
         },
       });
       setAuthResult(status, "OTP 驗證完成，已成功登入。");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setAuthLoading(false);
-    }
-  }
-
-  async function triggerOidcLogin() {
-    const entryUrl = savedOidc?.issuerUrl?.trim() || oidcIssuerUrl.trim();
-    if (!entryUrl) {
-      setError("尚未設定 OIDC 授權入口 URL，請先至「OIDC 配置」完成設定。");
-      setLoginTab("oidc-config");
-      return;
-    }
-    setAuthLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const status = await invoke<AuthStatus>("start_sso_login", {
-        request: {
-          entryUrl,
-          clientId: savedOidc?.clientId ?? (oidcClientId.trim() || null),
-          redirectUri: savedOidc?.redirectUri ?? (oidcRedirectUri.trim() || null),
-          scopes: savedOidc?.scopes ?? (oidcScopes.trim() || null),
-        },
-      });
-      setAuthResult(status, "已啟動 OIDC 登入流程，請完成授權並貼上 Callback URL。");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setAuthLoading(false);
-    }
-  }
-
-  async function completeSso(event: React.FormEvent) {
-    event.preventDefault();
-    setAuthLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const status = await invoke<AuthStatus>("complete_sso_login", {
-        request: { callbackUrl: ssoCallbackUrl },
-      });
-      setAuthResult(status, "OIDC Callback 驗證完成，已成功登入。");
+      setOtpCode("");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1187,7 +1045,6 @@ function App() {
       setAuthStatus(status);
       setPassword("");
       setOtpCode("");
-      setSsoCallbackUrl("");
       setMessage("已登出帳號。");
       setViewMode("login");
     } catch (err) {
@@ -1840,7 +1697,7 @@ function App() {
     ) : null;
 
   // ============================================================================
-  // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + 配置 Block: Host / OIDC)
+  // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + NAS 配置)
   // ============================================================================
   if (viewMode === "login" || !isAuthenticated) {
     return (
@@ -1854,7 +1711,7 @@ function App() {
         </div>
 
         <div className="login-center">
-          <div className={`login-card ${loginTab === "oidc-config" ? "login-card-wide" : ""}`}>
+          <div className={`login-card ${loginTab === "config" ? "login-card-wide" : ""}`}>
             <div className="login-card-header">
               <div className="login-logo-wrap" aria-hidden="true">
                 <div className="login-logo-ring" />
@@ -1870,7 +1727,7 @@ function App() {
               </div>
               <h1 className="login-title">連線至 Synology Drive</h1>
               <p className="login-subtitle">
-                透過一般帳號登入，或在「配置」中設定 NAS 伺服器位址與 OIDC 單一登入
+                使用 DSM 帳號密碼登入，NAS 伺服器位址可在「配置」中設定
               </p>
             </div>
 
@@ -1888,11 +1745,11 @@ function App() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={loginTab === "oidc-config"}
-                className={`login-tab-btn ${loginTab === "oidc-config" ? "active" : ""}`}
-                onClick={() => switchLoginTab("oidc-config")}
+                aria-selected={loginTab === "config"}
+                className={`login-tab-btn ${loginTab === "config" ? "active" : ""}`}
+                onClick={() => switchLoginTab("config")}
               >
-                <span>配置 (Host / OIDC)</span>
+                <span>配置</span>
                 <span className={`tab-dot ${hostHealth.dot}`} title={hostHealth.label} />
               </button>
             </div>
@@ -1936,7 +1793,7 @@ function App() {
                   <button
                     type="button"
                     className="link-btn"
-                    onClick={() => switchLoginTab("oidc-config")}
+                    onClick={() => switchLoginTab("config")}
                   >
                     配置 →
                   </button>
@@ -1967,6 +1824,15 @@ function App() {
                         />
                       </label>
 
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={rememberLogin}
+                          onChange={(event) => setRememberLogin(event.currentTarget.checked)}
+                        />
+                        <span>記住登入（安全保存 session，不保存密碼或 OTP）</span>
+                      </label>
+
                       <button
                         type="submit"
                         className="btn btn-primary btn-block btn-lg btn-animated"
@@ -1978,87 +1844,11 @@ function App() {
                     </form>
                 </>
 
-                {/* Conditional OIDC Login Button: ONLY shown when OIDC is configured! */}
-                {isOidcConfigured ? (
-                  <div className="oidc-login-section animate-step">
-                    <div className="or-divider">
-                      <span>或使用已配置的單一登入</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      className="btn btn-oidc btn-block btn-lg btn-animated"
-                      onClick={triggerOidcLogin}
-                      disabled={authLoading}
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
-                        />
-                      </svg>
-                      <span>{oidcButtonLabel}</span>
-                    </button>
-
-                    <div className="oidc-active-meta">
-                      <span>
-                        OIDC: <code className="mono">{savedOidc?.issuerUrl}</code>
-                      </span>
-                      <button
-                        type="button"
-                        className="link-btn"
-                        onClick={() => switchLoginTab("oidc-config")}
-                      >
-                        前往配置 →
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="oidc-unconfigured-hint">
-                    <span>需要設定 NAS 連線位址或啟用 OIDC 單一登入？</span>
-                    <button
-                      type="button"
-                      className="link-btn"
-                      onClick={() => switchLoginTab("oidc-config")}
-                    >
-                      前往配置 →
-                    </button>
-                  </div>
-                )}
-
-                {/* Step 2: OIDC / SSO Waiting for Callback */}
-                {(authStatus?.stage === "waitingSsoCallback" ||
-                  authStatus?.authorizationUrl) && (
-                  <form className="login-step-box animate-step" onSubmit={completeSso}>
-                    <div className="login-step-title">完成 OIDC 瀏覽器授權驗證</div>
-                    {authStatus?.authorizationUrl ? (
-                      <div className="info-box">
-                        <div className="info-box-title">請於瀏覽器開啟以下授權網址：</div>
-                        <div className="info-box-text mono">{authStatus.authorizationUrl}</div>
-                      </div>
-                    ) : null}
-                    <label className="form-field">
-                      <span>貼上授權完成後的 Callback URL</span>
-                      <div className="inline-input-row">
-                        <input
-                          className="input mono"
-                          value={ssoCallbackUrl}
-                          onChange={(event) => setSsoCallbackUrl(event.currentTarget.value)}
-                          placeholder="https://nas.example.com/callback?code=..."
-                        />
-                        <button type="submit" className="btn btn-primary" disabled={authLoading}>
-                          完成驗證
-                        </button>
-                      </div>
-                    </label>
-                  </form>
-                )}
               </div>
             )}
 
-            {/* OPTION 2: 配置 (分區 Blocks：NAS Host 區塊 + OIDC 單一登入區塊) */}
-            {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "oidc-config" && (
+            {/* OPTION 2: NAS 配置 */}
+            {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "config" && (
               <div key="tab-config" className="login-tab-panel animate-panel">
                 {/* BLOCK 1: NAS Host Configuration Block */}
                 <div className="config-block">
@@ -2073,7 +1863,7 @@ function App() {
                         </svg>
                       </div>
                       <div>
-                        <h2 className="config-block-title">區塊 1：NAS 伺服器位址 (Host)</h2>
+                        <h2 className="config-block-title">NAS 伺服器位址 (Host)</h2>
                         <p className="config-block-desc">
                           指定您要同步的 Synology NAS 網域或 IP:Port，供一般帳密登入連線使用
                         </p>
@@ -2133,112 +1923,6 @@ function App() {
                   </form>
                 </div>
 
-                {/* BLOCK 2: OIDC Single Sign-On Configuration Block */}
-                <div className="config-block config-block-accent">
-                  <div className="config-block-header">
-                    <div className="config-block-title-wrap">
-                      <div className="config-block-icon icon-accent">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
-                          />
-                        </svg>
-                      </div>
-                      <div>
-                        <h2 className="config-block-title">區塊 2：OIDC 單一登入配置（選填）</h2>
-                        <p className="config-block-desc">
-                          填寫 Issuer URL 與 Client ID 並儲存後，「一般登入」頁將自動出現 OIDC 登入按鈕
-                        </p>
-                      </div>
-                    </div>
-                    <span
-                      className={`badge ${
-                        isOidcConfigured ? "badge-success" : "badge-neutral"
-                      }`}
-                    >
-                      {isOidcConfigured ? "✓ 已啟用按鈕" : "未啟用"}
-                    </span>
-                  </div>
-
-                  <form className="config-block-body form-stack" onSubmit={saveOidcConfig}>
-                    <label className="form-field">
-                      <span>按鈕顯示名稱 / Provider 名稱（選填）</span>
-                      <input
-                        className="input"
-                        value={oidcProviderName}
-                        onChange={(event) => setOidcProviderName(event.currentTarget.value)}
-                        placeholder="例如：Synology SSO / 公司 OIDC（留空預設顯示「使用 OIDC 單一登入」）"
-                      />
-                    </label>
-
-                    <div className="two-col-compact">
-                      <label className="form-field">
-                        <span>Issuer / 授權入口 URL（必填 https://）</span>
-                        <input
-                          className="input mono"
-                          value={oidcIssuerUrl}
-                          onChange={(event) => setOidcIssuerUrl(event.currentTarget.value)}
-                          placeholder="https://nas.example.com/sso"
-                        />
-                      </label>
-
-                      <label className="form-field">
-                        <span>Client ID（必填）</span>
-                        <input
-                          className="input mono"
-                          value={oidcClientId}
-                          onChange={(event) => setOidcClientId(event.currentTarget.value)}
-                          placeholder="synology-drive-desktop"
-                        />
-                      </label>
-                    </div>
-
-                    <div className="two-col-compact">
-                      <label className="form-field">
-                        <span>Redirect URI（選填）</span>
-                        <input
-                          className="input mono"
-                          value={oidcRedirectUri}
-                          onChange={(event) => setOidcRedirectUri(event.currentTarget.value)}
-                          placeholder="https://nas.example.com/callback"
-                        />
-                      </label>
-
-                      <label className="form-field">
-                        <span>Scopes（選填）</span>
-                        <input
-                          className="input mono"
-                          value={oidcScopes}
-                          onChange={(event) => setOidcScopes(event.currentTarget.value)}
-                          placeholder="openid profile email"
-                        />
-                      </label>
-                    </div>
-
-                    <div className="button-row">
-                      <button
-                        type="submit"
-                        className="btn btn-primary btn-animated"
-                        style={{ flex: 1 }}
-                        disabled={saving}
-                      >
-                        <span>{saving ? "儲存中..." : "儲存配置並返回登入"}</span>
-                      </button>
-                      {isOidcConfigured ? (
-                        <button
-                          type="button"
-                          className="btn btn-outline-danger"
-                          onClick={clearOidcConfig}
-                          disabled={saving}
-                        >
-                          停用 / 清除 OIDC
-                        </button>
-                      ) : null}
-                    </div>
-                  </form>
-                </div>
               </div>
             )}
           </div>
@@ -3587,14 +3271,14 @@ function App() {
             </div>
           )}
 
-          {/* TAB 4: AUTHENTICATION & OIDC SUMMARY */}
+          {/* TAB 4: AUTHENTICATION SUMMARY */}
           {!initialLoading && !tabSwitching && activeTab === "auth" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">
                   <div>
                     <h2 className="card-title">設定檔</h2>
-                    <p className="card-desc">檢視當前登入身分，或切換至獨立登入頁進行一般登入與 OIDC 配置</p>
+                    <p className="card-desc">檢視當前登入身分，或切換至登入頁與 NAS 連線配置</p>
                   </div>
                   <div className="button-row">
                     <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
@@ -3614,11 +3298,11 @@ function App() {
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => {
-                        setLoginTab("oidc-config");
+                        setLoginTab("config");
                         setViewMode("login");
                       }}
                     >
-                      編輯 OIDC 配置
+                      編輯 NAS 配置
                     </button>
                     <button
                       type="button"
@@ -3639,14 +3323,6 @@ function App() {
                   <div className="stat-item">
                     <span className="stat-key">驗證方式</span>
                     <span className="stat-val">{authStatus?.method ?? "-"}</span>
-                  </div>
-                  <div className="stat-item">
-                    <span className="stat-key">OIDC 配置狀態</span>
-                    <span className="stat-val">
-                      {isOidcConfigured
-                        ? `已配置 (${savedOidc?.providerName || "OIDC"} · ${savedOidc?.issuerUrl})`
-                        : "未配置（一般登入頁將隱藏 OIDC 按鈕）"}
-                    </span>
                   </div>
                 </div>
               </section>

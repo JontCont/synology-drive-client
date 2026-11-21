@@ -21,7 +21,7 @@
 
 ### 不在範圍內（已決定不做）
 - **Files On-Demand**（placeholder / 按需下載 / 釋放空間 / 釘選）：檔案一律完整存在本機；只做狀態圖示
-- **OIDC / SSO 登入**：token 交換未實作，登入頁已停用；僅保留帳密 + OTP
+- **OIDC / SSO 登入**：已移除入口、配置與回呼，僅支援一般 DSM 帳密 + OTP
 - **分塊上傳**：Drive 網頁 API 沒有分塊機制（上傳是單一請求），改以區網直連解決大檔
 - **WebDAV / 多 Provider 抽象**（`RemoteProvider`、`FakeRemote`）：已確定直接使用 Drive API
 - **平行傳輸與頻寬限制**、**NAS 端修改時間比對**（目前只比大小）

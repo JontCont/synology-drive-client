@@ -23,7 +23,7 @@
 - [ ] P2-1 清理早期的模擬流程：Pipeline / 單步 Executor / 故障矩陣 / Demo 佇列 / 舊的 `operations` 表與相關指令與 UI（「操作佇列與監看」頁的「開發用模擬佇列」）；保留真實的同步佇列、同步服務、本機監看
 - [ ] P2-2 總覽圖表與側邊欄徽章改用真實同步佇列（目前仍用舊模擬佇列的統計）
 - [ ] P2-3 移除不再使用的程式碼與依賴（例如模擬 executor、舊模式政策 `is_operation_allowed`、`remote.rs` 契約 / FakeRemote、`docs/remote-spike.md`）
-- [ ] P2-4 登入頁移除 OIDC 配置區塊與相關設定欄位（OIDC 已不在範圍內）
+- [x] P2-4 移除 OIDC 登入入口、配置欄位、回呼、密鑰儲存與相關依賴；只保留一般帳密 + OTP 與 NAS 連線配置；舊設定可正常讀取，儲存時不再包含 OIDC
 - [ ] P2-5 衝突管理頁只顯示真實同步產生的衝突（移除模擬資料）
 - [ ] P2-6 資料夾數量多、檔案很多時的掃描與列表效能檢查
 
@@ -34,7 +34,7 @@
 
 ## 不在範圍內（已移出，不再追蹤）
 - Files On-Demand（placeholder、hydration、dehydration、釘選、釋放空間）：檔案一律完整存在本機，只做狀態圖示
-- OIDC / SSO token 交換與登入
+- OIDC / SSO 登入與回呼（已移除，僅保留一般帳密 + OTP）
 - 分塊上傳（Drive 網頁 API 沒有；改用區網直連）
 - WebDAV Provider、`RemoteProvider` 抽象、Provider Spike
 - 平行傳輸、頻寬限制、NAS 端修改時間比對

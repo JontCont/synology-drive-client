@@ -5,6 +5,7 @@ mod executor;
 mod folder_sync;
 mod lan;
 mod remote;
+mod remembered_login;
 mod scanner;
 mod storage;
 mod sync_model;
@@ -181,7 +182,9 @@ fn seed_demo_operations(
 }
 
 #[tauri::command]
-fn seed_fault_matrix_operations(app: tauri::AppHandle) -> Result<Vec<storage::OperationRow>, String> {
+fn seed_fault_matrix_operations(
+    app: tauri::AppHandle,
+) -> Result<Vec<storage::OperationRow>, String> {
     storage::seed_fault_matrix_operations(&app)
 }
 
@@ -367,7 +370,9 @@ fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
 }
 
 #[tauri::command]
-fn run_and_store_fake_remote_probe(app: tauri::AppHandle) -> Result<StoredRemoteProbeResult, String> {
+fn run_and_store_fake_remote_probe(
+    app: tauri::AppHandle,
+) -> Result<StoredRemoteProbeResult, String> {
     let result = run_fake_remote_probe()?;
     let dir = app_data_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|e| format!("建立資料目錄失敗：{e}"))?;
@@ -775,37 +780,38 @@ fn get_auth_status(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthS
 }
 
 #[tauri::command]
+async fn restore_saved_login(app: tauri::AppHandle) -> Result<auth::AuthStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = config::load(&app)?.server_host.unwrap_or_default();
+        app.state::<auth::AuthState>().restore_saved_login(&host)
+    })
+    .await
+    .map_err(|err| format!("恢復登入失敗：{err}"))?
+}
+
+#[tauri::command]
 async fn login_with_password(
     app: tauri::AppHandle,
-    auth_state: State<'_, auth::AuthState>,
     request: auth::PasswordLoginRequest,
 ) -> Result<auth::AuthStatus, String> {
-    let host = config::load(&app)?.server_host.unwrap_or_default();
-    auth_state.login_with_password(&host, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = config::load(&app)?.server_host.unwrap_or_default();
+        app.state::<auth::AuthState>().login_with_password(&host, request)
+    })
+    .await
+    .map_err(|err| format!("登入失敗：{err}"))?
 }
 
 #[tauri::command]
 async fn submit_otp(
-    auth_state: State<'_, auth::AuthState>,
+    app: tauri::AppHandle,
     request: auth::OtpRequest,
 ) -> Result<auth::AuthStatus, String> {
-    auth_state.submit_otp(request)
-}
-
-#[tauri::command]
-fn start_sso_login(
-    auth_state: State<'_, auth::AuthState>,
-    request: auth::SsoStartRequest,
-) -> Result<auth::AuthStatus, String> {
-    auth_state.start_sso(request)
-}
-
-#[tauri::command]
-fn complete_sso_login(
-    auth_state: State<'_, auth::AuthState>,
-    request: auth::SsoCallbackRequest,
-) -> Result<auth::AuthStatus, String> {
-    auth_state.complete_sso(request)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<auth::AuthState>().submit_otp(request)
+    })
+    .await
+    .map_err(|err| format!("OTP 驗證失敗：{err}"))?
 }
 
 #[tauri::command]
@@ -1168,7 +1174,6 @@ async fn apply_window_preset(
             server_host: None,
             poll_interval_seconds: None,
             ingest_backlog_limit: None,
-            oidc: None,
             window_preset: Some(preset),
             explorer_status_icons: None,
             auto_sync: None,
@@ -1212,17 +1217,15 @@ pub fn notify_if_background<R: Runtime>(app: &tauri::AppHandle<R>, title: &str, 
     if in_foreground {
         return;
     }
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(auth::AuthState::new())
@@ -1230,9 +1233,6 @@ pub fn run() {
         .manage(watcher::LocalWatcherState::new())
         .manage(folder_sync::SyncRunState::new())
         .manage(cloud_status::CloudStatusState::new())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
-        }))
         .setup(|app| {
             let open = MenuItemBuilder::with_id("open", "開啟").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "結束").build(app)?;
@@ -1330,10 +1330,9 @@ pub fn run() {
             run_fault_matrix_fast,
             force_due_retryable_operations,
             get_auth_status,
+            restore_saved_login,
             login_with_password,
             submit_otp,
-            start_sso_login,
-            complete_sso_login,
             logout
             ,
             get_system_snapshot

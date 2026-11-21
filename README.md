@@ -11,7 +11,7 @@ This template should help get you started developing with Tauri, React and Types
   - `結束`: fully exit the app
 - Security baseline:
   - default capability only (`core:default`)
-  - no opener capability/plugin by default
+  - no opener capability/plugin
   - CSP enabled in `src-tauri/tauri.conf.json`
 - Config skeleton:
   - backend commands: `get_app_config`, `update_app_config`
@@ -28,9 +28,11 @@ This template should help get you started developing with Tauri, React and Types
   - command: `export_last_remote_probe_markdown` exports last probe report to markdown (`remote-probe-last.md`)
 - Auth skeleton:
   - backend auth state machine (`idle -> waitingOtp -> authenticated` or `idle -> authenticated`) and replaceable `AuthBackendAdapter` trait in `src-tauri/src/auth.rs`
-  - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`
-  - challenge-based password login against real Synology DSM (`SYNO.API.Auth` at `<origin>/webapi/auth.cgi`, HTTPS only, certificate verified): step 1 sends `username` + `password`; DSM error 403 becomes `MfaRequired { challenge_id }`, and step 2 re-submits with `otp_code` (max 3 attempts per challenge). NAS host comes from `settings.json` `serverHost`. OIDC callback completion is intentionally disabled until real token exchange (state/PKCE) is implemented
-  - dedicated login page with `一般登入` and `OIDC 配置` tabs; saving OIDC config (`issuerUrl`, `clientId`, `redirectUri`, `scopes`, `providerName`) persists to `settings.json` and dynamically enables the OIDC login button on the standard login view
+  - commands: `get_auth_status`, `restore_saved_login`, `login_with_password`, `submit_otp`, `logout`
+  - challenge-based password login against real Synology DSM (`SYNO.API.Auth` at `<origin>/webapi/auth.cgi`, HTTPS only, certificate verified): step 1 sends `username` + `password`; DSM error 403 becomes `MfaRequired { challenge_id }`, and step 2 re-submits with `otp_code` (max 3 attempts per challenge). NAS host comes from `settings.json` `serverHost`.
+  - dedicated login page with `一般登入` and NAS `配置` tabs; only DSM account/password login with OTP when required is supported
+  - `記住登入` (checked by default) stores only the DSM session and account/NAS metadata in Windows Credential Manager, never the password or OTP. Startup validates the session with a read-only Drive listing before restoring login and the existing configured sync behavior. Expired/revoked sessions or a changed NAS require login again; temporary connection errors retain the saved session for retry on the next launch. Logout clears the saved session. Credential-storage failures are shown explicitly.
+  - OIDC / SSO is not supported. Legacy OIDC settings are ignored when loading and omitted when saving; NAS host and sync-folder settings are preserved. No browser authorization, callback listener, or Application secret storage remains in the app.
 - Sync storage skeleton:
   - SQLite schema bootstrap in `src-tauri/src/storage.rs`
   - commands: `init_sync_storage`, `get_sync_storage_info`

@@ -6,16 +6,6 @@ use tauri::{AppHandle, Manager, Runtime};
 
 const CONFIG_FILE_NAME: &str = "settings.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct OidcConfig {
-    pub provider_name: Option<String>,
-    pub issuer_url: Option<String>,
-    pub client_id: Option<String>,
-    pub redirect_uri: Option<String>,
-    pub scopes: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncFolder {
@@ -47,8 +37,6 @@ pub struct AppConfig {
     sync_mode: Option<String>,
     pub poll_interval_seconds: u32,
     pub ingest_backlog_limit: u32,
-    #[serde(default)]
-    pub oidc: OidcConfig,
     #[serde(default = "default_window_preset")]
     pub window_preset: String,
     /// 在檔案總管顯示同步狀態圖示（需將同步資料夾註冊為 Windows 同步根）
@@ -111,7 +99,6 @@ pub struct AppConfigUpdate {
     pub server_host: Option<String>,
     pub poll_interval_seconds: Option<u32>,
     pub ingest_backlog_limit: Option<u32>,
-    pub oidc: Option<OidcConfig>,
     pub window_preset: Option<String>,
     pub explorer_status_icons: Option<bool>,
     pub auto_sync: Option<bool>,
@@ -131,7 +118,6 @@ impl Default for AppConfig {
             sync_mode: None,
             poll_interval_seconds: 30,
             ingest_backlog_limit: 200,
-            oidc: OidcConfig::default(),
             window_preset: default_window_preset(),
             explorer_status_icons: true,
             auto_sync: true,
@@ -427,19 +413,6 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         config.window_preset = window_preset;
     }
 
-    if let Some(oidc) = update.oidc {
-        let trim_opt = |v: Option<String>| -> Option<String> {
-            v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-        };
-        config.oidc = OidcConfig {
-            provider_name: trim_opt(oidc.provider_name),
-            issuer_url: trim_opt(oidc.issuer_url),
-            client_id: trim_opt(oidc.client_id),
-            redirect_uri: trim_opt(oidc.redirect_uri),
-            scopes: trim_opt(oidc.scopes),
-        };
-    }
-
     write_config(app, &config)?;
     Ok(config)
 }
@@ -480,6 +453,24 @@ mod tests {
         assert!(config.sync_folders.is_empty());
         assert!(is_valid_sync_mode("upload_only"));
         assert!(!is_valid_sync_mode("mirror"));
+    }
+
+    #[test]
+    fn removed_oidc_settings_do_not_affect_existing_nas_and_sync_config() {
+        let raw = r#"{
+            "serverHost":"https://nas.example.com:5001",
+            "syncFolders":[{"id":"work","name":"Work","localPath":"D:\\Work","remotePath":"/mydrive/Work","mode":"upload_only"}],
+            "pollIntervalSeconds":30,
+            "ingestBacklogLimit":200,
+            "oidc":{"issuerUrl":"https://old.example.com","clientId":"old-client"}
+        }"#;
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(config.server_host.as_deref(), Some("https://nas.example.com:5001"));
+        assert_eq!(config.sync_folders.len(), 1);
+        assert_eq!(config.sync_folders[0].local_path, "D:\\Work");
+        assert_eq!(config.sync_folders[0].mode, SYNC_MODE_UPLOAD_ONLY);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert!(saved.get("oidc").is_none());
     }
 
     #[test]

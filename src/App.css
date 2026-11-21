@@ -1847,72 +1847,6 @@ body {
   animation: btnSheen 0.75s ease forwards;
 }
 
-.btn-oidc {
-  background-color: var(--bg-subtle);
-  color: var(--accent-text);
-  border: 1.5px solid var(--accent);
-  font-weight: 600;
-}
-
-.btn-oidc svg {
-  width: 18px;
-  height: 18px;
-}
-
-.btn-oidc:hover:not(:disabled) {
-  background-color: var(--accent-soft);
-}
-
-.oidc-login-section {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.or-divider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.or-divider::before,
-.or-divider::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background-color: var(--border-color);
-}
-
-.oidc-active-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 0 2px;
-}
-
-.oidc-unconfigured-hint {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background-color: var(--bg-subtle);
-  border: 1px dashed var(--border-strong);
-  font-size: 12.5px;
-  color: var(--text-muted);
-  transition: border-color 0.2s ease, background-color 0.2s ease;
-}
-
-.oidc-unconfigured-hint:hover {
-  border-color: var(--accent);
-}
-
 .link-btn {
   display: inline-flex;
   align-items: center;
@@ -1933,7 +1867,7 @@ body {
   transform: translateX(2px);
 }
 
-/* Configuration Tab Visual Blocks (Host Block + OIDC Block) */
+/* Configuration Tab Visual Blocks */
 .config-block {
   background-color: var(--bg-subtle);
   border: 1px solid var(--border-color);
@@ -1947,10 +1881,6 @@ body {
 
 .config-block:hover {
   border-color: var(--border-strong);
-}
-
-.config-block-accent {
-  border-color: rgba(37, 99, 235, 0.32);
 }
 
 .config-block-header {
@@ -1977,12 +1907,6 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-}
-
-.config-block-icon.icon-accent {
-  background-color: var(--accent-soft);
-  border-color: transparent;
-  color: var(--accent-text);
 }
 
 .config-block-icon svg {

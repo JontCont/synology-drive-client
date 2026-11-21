@@ -3,14 +3,17 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use crate::remembered_login::{CredentialSessionStore, SavedSession, SessionStore};
+
+pub enum SessionRestoreError {
+    Expired,
+    Other(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimaryAuthOutcome {
     /// 伺服器直接發放 session（無須第二因素驗證）
-    Authenticated {
-        username: String,
-        method: String,
-    },
+    Authenticated { username: String, method: String },
     /// 伺服器回傳需要第二因素驗證（附帶該次登入交易的 challenge_id）
     MfaRequired {
         username: String,
@@ -37,6 +40,14 @@ pub trait AuthBackendAdapter: Send + Sync {
     /// 登出時通知伺服器銷毀 session（盡力而為）
     fn logout_remote(&self) {}
 
+    fn export_session(&self) -> Result<(String, String), String> {
+        Err("目前的認證方式不支援記住登入".to_string())
+    }
+
+    fn restore_session(&self, _origin: &str, _sid: &str) -> Result<(), SessionRestoreError> {
+        Err(SessionRestoreError::Other("目前的認證方式不支援恢復登入".to_string()))
+    }
+
     /// 設定登入後檔案操作改用的區網位址（`None` 代表使用登入時的位址）
     fn set_lan_origin(&self, _origin: Option<String>) {}
 
@@ -56,7 +67,11 @@ pub trait AuthBackendAdapter: Send + Sync {
     }
 
     /// 下載 NAS 上的檔案並寫入 `dest`，回傳位元組數
-    fn download_remote_file(&self, _remote_path: &str, _dest: &std::path::Path) -> Result<u64, String> {
+    fn download_remote_file(
+        &self,
+        _remote_path: &str,
+        _dest: &std::path::Path,
+    ) -> Result<u64, String> {
         Err("目前的認證方式不支援下載 NAS 檔案".to_string())
     }
 
@@ -321,13 +336,13 @@ pub fn probe_origin(origin: &str, timeout_secs: u64) -> NasProbeResult {
             return fail(
                 format!("連線逾時（{timeout_secs} 秒內沒有回應），請確認主機位址、連接埠與網路"),
                 None,
-            )
+            );
         }
         Err(err) => {
             return fail(
                 format!("無法連線到伺服器（網路錯誤、位址錯誤或憑證無效）：{err}"),
                 None,
-            )
+            );
         }
     };
 
@@ -646,7 +661,13 @@ impl DsmAuthAdapter {
     fn multipart_parts(boundary: &str, file_name: &str) -> (Vec<u8>, Vec<u8>) {
         let safe_name: String = file_name
             .chars()
-            .map(|c| if c == '"' || c == '\r' || c == '\n' { '_' } else { c })
+            .map(|c| {
+                if c == '"' || c == '\r' || c == '\n' {
+                    '_'
+                } else {
+                    c
+                }
+            })
             .collect();
         let head = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
@@ -690,14 +711,22 @@ impl DsmAuthAdapter {
             .query("method", "upload")
             .query("path", path_param)
             .query("type", "file")
-            .query("conflict_action", if new_version { "version" } else { "autorename" })
+            .query(
+                "conflict_action",
+                if new_version { "version" } else { "autorename" },
+            )
             .query("_sid", sid)
-            .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+            .header(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
             .header("Content-Length", &total.to_string())
             .send(ureq::SendBody::from_reader(&mut body))
             .map_err(|_| DsmError { code: -2 })?;
         if response.status().as_u16() == 413 {
-            return Err(DsmError { code: DSM_CODE_BODY_TOO_LARGE });
+            return Err(DsmError {
+                code: DSM_CODE_BODY_TOO_LARGE,
+            });
         }
         let body = response.body_mut().read_to_string().unwrap_or_default();
         parse_dsm_data_response(&body).map(|_| ())
@@ -742,7 +771,10 @@ impl DsmAuthAdapter {
             ("api", "SYNO.SynologyDrive.Files".to_string()),
             ("version", "2".to_string()),
             ("method", "delete".to_string()),
-            ("files", serde_json::json!([format!("id:{file_id}")]).to_string()),
+            (
+                "files",
+                serde_json::json!([format!("id:{file_id}")]).to_string(),
+            ),
             ("permanent", "false".to_string()),
         ];
         if let Some(revisions) = info.get("revisions") {
@@ -753,6 +785,24 @@ impl DsmAuthAdapter {
 }
 
 impl AuthBackendAdapter for DsmAuthAdapter {
+    fn export_session(&self) -> Result<(String, String), String> {
+        let session = self.session.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
+        let session = session.as_ref().ok_or_else(|| "尚未登入 NAS".to_string())?;
+        Ok((session.origin.clone(), session.sid.clone()))
+    }
+
+    fn restore_session(&self, origin: &str, sid: &str) -> Result<(), SessionRestoreError> {
+        self.list_drive_data(origin, sid, DRIVE_MY_DRIVE_PATH, 0)
+            .map_err(|err| match err.code {
+                106 | 107 | 119 => SessionRestoreError::Expired,
+                _ => SessionRestoreError::Other(Self::describe_list_failure(&err)),
+            })?;
+        let mut session = self.session.lock()
+            .map_err(|_| SessionRestoreError::Other("登入狀態鎖定失敗".to_string()))?;
+        *session = Some(RemoteSession { origin: origin.to_string(), sid: sid.to_string() });
+        Ok(())
+    }
+
     fn authenticate_password(
         &self,
         host: &str,
@@ -970,10 +1020,19 @@ impl AuthBackendAdapter for DsmAuthAdapter {
             }
             other => other,
         };
-        result.map_err(|err| format!("無法列出 NAS 資料夾 {normalized}：{}", Self::describe_list_failure(&err)))
+        result.map_err(|err| {
+            format!(
+                "無法列出 NAS 資料夾 {normalized}：{}",
+                Self::describe_list_failure(&err)
+            )
+        })
     }
 
-    fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
+    fn download_remote_file(
+        &self,
+        remote_path: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, String> {
         let (origin, sid) = self.current_session()?;
         self.fetch_drive_file(&origin, &sid, remote_path, dest)
             .map_err(|err| Self::describe_download_failure(&err))
@@ -1017,14 +1076,14 @@ impl AuthBackendAdapter for DsmAuthAdapter {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AuthStage {
     Idle,
     WaitingOtp {
         username: String,
         challenge_id: String,
+        remember_login: bool,
     },
-    WaitingSsoCallback,
     Authenticated {
         username: String,
         method: String,
@@ -1039,7 +1098,6 @@ pub struct AuthStatus {
     pub method: Option<String>,
     pub challenge_id: Option<String>,
     pub message: Option<String>,
-    pub authorization_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1047,6 +1105,8 @@ pub struct AuthStatus {
 pub struct PasswordLoginRequest {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub remember_login: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1056,37 +1116,82 @@ pub struct OtpRequest {
     pub challenge_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SsoStartRequest {
-    pub entry_url: String,
-    pub client_id: Option<String>,
-    pub redirect_uri: Option<String>,
-    pub scopes: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SsoCallbackRequest {
-    #[allow(dead_code)]
-    pub callback_url: String,
-}
-
 pub struct AuthState {
     inner: Mutex<AuthStage>,
     adapter: Box<dyn AuthBackendAdapter>,
+    session_store: Box<dyn SessionStore>,
 }
 
 impl AuthState {
     pub fn new() -> Self {
-        Self::with_adapter(Box::new(DsmAuthAdapter::new()))
+        Self::with_components(Box::new(DsmAuthAdapter::new()), Box::new(CredentialSessionStore::default()))
     }
 
+    #[cfg(test)]
     pub fn with_adapter(adapter: Box<dyn AuthBackendAdapter>) -> Self {
+        Self::with_components(adapter, Box::new(tests::MemorySessionStore::default()))
+    }
+
+    fn with_components(adapter: Box<dyn AuthBackendAdapter>, session_store: Box<dyn SessionStore>) -> Self {
         Self {
             inner: Mutex::new(AuthStage::Idle),
             adapter,
+            session_store,
         }
+    }
+
+    pub fn restore_saved_login(&self, host: &str) -> Result<AuthStatus, String> {
+        let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
+        if !matches!(*stage, AuthStage::Idle) {
+            return Ok(Self::to_status(&stage));
+        }
+        let Some(saved) = self.session_store.load()? else {
+            return Ok(Self::to_status(&stage));
+        };
+        if normalize_dsm_origin(host).ok().as_deref() != Some(saved.origin.as_str()) {
+            self.session_store.clear()?;
+            let mut status = Self::to_status(&stage);
+            status.message = Some("NAS 配置已變更，請重新登入".to_string());
+            return Ok(status);
+        }
+        if saved.sid.trim().is_empty() || saved.username.trim().is_empty() {
+            self.session_store.clear()?;
+            return Err("儲存的登入資料不完整，請重新登入".to_string());
+        }
+        match self.adapter.restore_session(&saved.origin, &saved.sid) {
+            Ok(()) => {
+                *stage = AuthStage::Authenticated { username: saved.username, method: saved.method };
+                let mut status = Self::to_status(&stage);
+                status.message = Some("已恢復記住的登入".to_string());
+                Ok(status)
+            }
+            Err(SessionRestoreError::Expired) => {
+                self.session_store.clear()?;
+                let mut status = Self::to_status(&stage);
+                status.message = Some("NAS 登入已過期或撤銷，請重新登入".to_string());
+                Ok(status)
+            }
+            Err(SessionRestoreError::Other(err)) => {
+                Err(format!("無法恢復登入：{err}。已保留記住登入，可恢復連線後重開 App 再試"))
+            }
+        }
+    }
+
+    fn remember_authenticated(&self, stage: &AuthStage, remember: bool) -> AuthStatus {
+        let mut status = Self::to_status(stage);
+        if let AuthStage::Authenticated { username, method } = stage {
+            if remember {
+                let saved = self.adapter.export_session().and_then(|(origin, sid)| {
+                    self.session_store.save(&SavedSession {
+                        origin, sid, username: username.clone(), method: method.clone(),
+                    })
+                });
+                if let Err(err) = saved {
+                    status.message = Some(format!("登入成功，但未能記住登入：{err}"));
+                }
+            }
+        }
+        status
     }
 
     pub fn status(&self) -> Result<AuthStatus, String> {
@@ -1100,11 +1205,12 @@ impl AuthState {
         host: &str,
         request: PasswordLoginRequest,
     ) -> Result<AuthStatus, String> {
+        let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
+        self.session_store.clear()?;
         let outcome = self
             .adapter
             .authenticate_password(host, &request.username, &request.password)?;
 
-        let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
         match outcome {
             PrimaryAuthOutcome::Authenticated { username, method } => {
                 *stage = AuthStage::Authenticated { username, method };
@@ -1116,20 +1222,22 @@ impl AuthState {
                 *stage = AuthStage::WaitingOtp {
                     username,
                     challenge_id,
+                    remember_login: request.remember_login,
                 };
             }
         }
-        Ok(Self::to_status(&stage))
+        Ok(self.remember_authenticated(&stage, request.remember_login))
     }
 
     /// Step 2: 帶著該次登入的 challenge 上下文送出 OTP 驗證
     pub fn submit_otp(&self, request: OtpRequest) -> Result<AuthStatus, String> {
         let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
-        let (username, active_challenge_id) = match &*stage {
+        let (username, active_challenge_id, remember_login) = match &*stage {
             AuthStage::WaitingOtp {
                 username,
                 challenge_id,
-            } => (username.clone(), challenge_id.clone()),
+                remember_login,
+            } => (username.clone(), challenge_id.clone(), *remember_login),
             _ => return Err("目前不在 OTP 驗證階段".to_string()),
         };
 
@@ -1144,61 +1252,17 @@ impl AuthState {
             }
         }
 
-        self.adapter
-            .verify_otp_challenge(&username, &active_challenge_id, request.otp_code.trim())?;
+        self.adapter.verify_otp_challenge(
+            &username,
+            &active_challenge_id,
+            request.otp_code.trim(),
+        )?;
 
         *stage = AuthStage::Authenticated {
             username,
             method: "password+otp".to_string(),
         };
-        Ok(Self::to_status(&stage))
-    }
-
-    pub fn start_sso(&self, request: SsoStartRequest) -> Result<AuthStatus, String> {
-        if !request.entry_url.starts_with("https://") {
-            return Err("OIDC / SSO 入口必須使用 https://".to_string());
-        }
-        let client_id = request
-            .client_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("desktop-client");
-        let scope = request
-            .scopes
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("openid profile");
-        let mut auth_url = format!(
-            "{}?client_id={}&response_type=code&scope={}",
-            request.entry_url.trim_end_matches('/'),
-            client_id,
-            scope.replace(' ', "+")
-        );
-        if let Some(redirect) = request
-            .redirect_uri
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            auth_url.push_str(&format!("&redirect_uri={redirect}"));
-        }
-        let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
-        *stage = AuthStage::WaitingSsoCallback;
-        Ok(AuthStatus {
-            stage: "waitingSsoCallback".to_string(),
-            username: None,
-            method: Some("oidc".to_string()),
-            challenge_id: None,
-            message: Some("請在系統瀏覽器完成 OIDC 授權，並貼上 callback URL".to_string()),
-            authorization_url: Some(auth_url),
-        })
-    }
-
-    pub fn complete_sso(&self, _request: SsoCallbackRequest) -> Result<AuthStatus, String> {
-        // 尚未實作 token exchange / state / PKCE 驗證；在此之前不可僅憑 callback URL 就視為已登入
-        Err("OIDC 單一登入尚未完成實作（缺少 token 交換驗證），目前請使用帳號密碼登入".to_string())
+        Ok(self.remember_authenticated(&stage, remember_login))
     }
 
     pub fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
@@ -1208,7 +1272,11 @@ impl AuthState {
         self.adapter.list_remote_entries(path)
     }
 
-    pub fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
+    pub fn download_remote_file(
+        &self,
+        remote_path: &str,
+        dest: &std::path::Path,
+    ) -> Result<u64, String> {
         if self.status()?.stage != "authenticated" {
             return Err("請先登入 NAS".to_string());
         }
@@ -1257,8 +1325,9 @@ impl AuthState {
     }
 
     pub fn logout(&self) -> Result<AuthStatus, String> {
-        self.adapter.logout_remote();
         let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
+        self.session_store.clear()?;
+        self.adapter.logout_remote();
         *stage = AuthStage::Idle;
         Ok(Self::to_status(&stage))
     }
@@ -1271,26 +1340,17 @@ impl AuthState {
                 method: None,
                 challenge_id: None,
                 message: None,
-                authorization_url: None,
             },
             AuthStage::WaitingOtp {
                 username,
                 challenge_id,
+                ..
             } => AuthStatus {
                 stage: "waitingOtp".to_string(),
                 username: Some(username.clone()),
                 method: None,
                 challenge_id: Some(challenge_id.clone()),
                 message: Some("伺服器要求第二因素驗證，請輸入 6 位數 OTP 驗證碼".to_string()),
-                authorization_url: None,
-            },
-            AuthStage::WaitingSsoCallback => AuthStatus {
-                stage: "waitingSsoCallback".to_string(),
-                username: None,
-                method: Some("oidc".to_string()),
-                challenge_id: None,
-                message: Some("等待 OIDC / SSO callback".to_string()),
-                authorization_url: None,
             },
             AuthStage::Authenticated { username, method } => AuthStatus {
                 stage: "authenticated".to_string(),
@@ -1298,7 +1358,6 @@ impl AuthState {
                 method: Some(method.clone()),
                 challenge_id: None,
                 message: Some("登入成功".to_string()),
-                authorization_url: None,
             },
         }
     }
@@ -1308,10 +1367,51 @@ impl AuthState {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Default)]
+    pub(super) struct MemorySessionStore {
+        saved: std::sync::Arc<Mutex<Option<SavedSession>>>,
+        fail_save: bool,
+        fail_clear: bool,
+    }
+
+    impl SessionStore for MemorySessionStore {
+        fn load(&self) -> Result<Option<SavedSession>, String> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+
+        fn save(&self, session: &SavedSession) -> Result<(), String> {
+            if self.fail_save {
+                return Err("test credential storage unavailable".to_string());
+            }
+            *self.saved.lock().unwrap() = Some(session.clone());
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), String> {
+            if self.fail_clear {
+                return Err("test credential deletion unavailable".to_string());
+            }
+            *self.saved.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
     /// 僅供測試的狀態機 Adapter（正式環境一律使用 `DsmAuthAdapter`）
     struct FakeAdapter;
 
     impl AuthBackendAdapter for FakeAdapter {
+        fn export_session(&self) -> Result<(String, String), String> {
+            Ok(("https://nas.example.com".to_string(), "test-session".to_string()))
+        }
+
+        fn restore_session(&self, _origin: &str, sid: &str) -> Result<(), SessionRestoreError> {
+            match sid {
+                "expired" => Err(SessionRestoreError::Expired),
+                "offline" => Err(SessionRestoreError::Other("network unavailable".to_string())),
+                _ => Ok(()),
+            }
+        }
+
         fn authenticate_password(
             &self,
             _host: &str,
@@ -1354,6 +1454,7 @@ mod tests {
             PasswordLoginRequest {
                 username: user.to_string(),
                 password: pass.to_string(),
+                remember_login: false,
             },
         )
     }
@@ -1363,6 +1464,93 @@ mod tests {
         let state = AuthState::with_adapter(Box::new(FakeAdapter));
         assert!(login(&state, "alice", "wrong").is_err());
         assert_eq!(state.status().unwrap().stage, "idle");
+    }
+
+    #[test]
+    fn remembered_session_restores_in_new_state_and_logout_removes_it() {
+        let store = MemorySessionStore::default();
+        let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store.clone()));
+        state.login_with_password("https://nas.example.com", PasswordLoginRequest {
+            username: "alice".to_string(), password: "secret".to_string(), remember_login: true,
+        }).unwrap();
+        let persisted = serde_json::to_value(store.load().unwrap().unwrap()).unwrap();
+        assert!(persisted.get("password").is_none());
+        assert!(persisted.get("otpCode").is_none());
+        let restarted = AuthState::with_components(Box::new(FakeAdapter), Box::new(store.clone()));
+        let status = restarted.restore_saved_login("https://nas.example.com/drive/").unwrap();
+        assert_eq!(status.stage, "authenticated");
+        assert_eq!(status.username.as_deref(), Some("alice"));
+        restarted.logout().unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn remembered_mfa_session_is_saved_only_after_successful_otp() {
+        let store = MemorySessionStore::default();
+        let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store.clone()));
+        state.login_with_password("https://nas.example.com", PasswordLoginRequest {
+            username: "alice-2fa".to_string(), password: "secret".to_string(), remember_login: true,
+        }).unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(state.submit_otp(OtpRequest {
+            otp_code: "000000".to_string(), challenge_id: Some("chg-test".to_string()),
+        }).is_err());
+        assert!(store.load().unwrap().is_none());
+        state.submit_otp(OtpRequest {
+            otp_code: "123456".to_string(), challenge_id: Some("chg-test".to_string()),
+        }).unwrap();
+        let saved = store.load().unwrap().unwrap();
+        assert_eq!(saved.method, "password+otp");
+    }
+
+    #[test]
+    fn restoration_rejects_expired_sessions_and_changed_nas_but_keeps_offline_sessions() {
+        for (sid, host, removed) in [
+            ("expired", "https://nas.example.com", true),
+            ("test-session", "https://different.example.com", true),
+            ("offline", "https://nas.example.com", false),
+        ] {
+            let store = MemorySessionStore::default();
+            store.save(&SavedSession {
+                origin: "https://nas.example.com".to_string(), sid: sid.to_string(),
+                username: "alice".to_string(), method: "password".to_string(),
+            }).unwrap();
+            let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store.clone()));
+            let result = state.restore_saved_login(host);
+            if removed {
+                assert!(result.unwrap().message.is_some());
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(state.status().unwrap().stage, "idle");
+            assert_eq!(store.load().unwrap().is_none(), removed);
+        }
+    }
+
+    #[test]
+    fn unchecked_login_clears_previous_session_and_does_not_save_a_new_one() {
+        let store = MemorySessionStore::default();
+        store.save(&SavedSession {
+            origin: "https://nas.example.com".to_string(), sid: "previous-session".to_string(),
+            username: "previous".to_string(), method: "password".to_string(),
+        }).unwrap();
+        let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store.clone()));
+        login(&state, "alice", "secret").unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn credential_failures_are_reported_without_claiming_remembering_or_logout_succeeded() {
+        let store = MemorySessionStore { fail_save: true, ..Default::default() };
+        let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store));
+        let status = state.login_with_password("https://nas.example.com", PasswordLoginRequest {
+            username: "alice".to_string(), password: "secret".to_string(), remember_login: true,
+        }).unwrap();
+        assert_eq!(status.stage, "authenticated");
+        assert!(status.message.unwrap().contains("未能記住登入"));
+        let store = MemorySessionStore { fail_clear: true, ..Default::default() };
+        let state = AuthState::with_components(Box::new(FakeAdapter), Box::new(store));
+        assert!(state.logout().is_err());
     }
 
     #[test]
@@ -1406,16 +1594,6 @@ mod tests {
 
         assert_eq!(step2.stage, "authenticated");
         assert_eq!(step2.method.as_deref(), Some("password+otp"));
-    }
-
-    #[test]
-    fn sso_callback_alone_never_authenticates() {
-        let state = AuthState::with_adapter(Box::new(FakeAdapter));
-        let result = state.complete_sso(SsoCallbackRequest {
-            callback_url: "https://idp.example.com/cb?code=abc".to_string(),
-        });
-        assert!(result.is_err());
-        assert_eq!(state.status().unwrap().stage, "idle");
     }
 
     #[test]
@@ -1547,7 +1725,11 @@ mod tests {
                 let head = String::from_utf8_lossy(&buf).to_string();
                 let content_length = head
                     .lines()
-                    .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                    .find_map(|l| {
+                        l.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
                     .unwrap_or(0);
                 if let Some(end) = header_end {
                     let mut have = buf.len() - (end + 4);
@@ -1569,6 +1751,34 @@ mod tests {
             }
         });
         (origin, rx)
+    }
+
+    #[test]
+    fn dsm_session_restoration_requires_successful_read_only_validation() {
+        for code in [None, Some(119), Some(106), Some(107)] {
+            let body = match code {
+                None => br#"{"success":true,"data":{"items":[]}}"#.to_vec(),
+                Some(code) => format!(r#"{{"success":false,"error":{{"code":{code}}}}}"#).into_bytes(),
+            };
+            let response_count = if matches!(code, Some(106 | 107)) { 2 } else { 1 };
+            let responses = (0..response_count)
+                .map(|_| ("200 OK", "application/json", "", body.clone()))
+                .collect();
+            let (origin, requests) = spawn_mock_server(responses);
+            let adapter = DsmAuthAdapter::new();
+            assert!(adapter.export_session().is_err());
+            let result = adapter.restore_session(&origin, "saved-test-session");
+            if code.is_none() {
+                assert!(result.is_ok());
+                assert_eq!(adapter.export_session().unwrap(), (origin, "saved-test-session".to_string()));
+            } else {
+                assert!(matches!(result, Err(SessionRestoreError::Expired)));
+                assert!(adapter.export_session().is_err());
+            }
+            for _ in 0..response_count {
+                assert_eq!(requests.recv().unwrap(), "POST /webapi/entry.cgi HTTP/1.1");
+            }
+        }
     }
 
     #[test]
@@ -1630,11 +1840,25 @@ mod tests {
             let items: Vec<String> = (start..start + count)
                 .map(|i| format!(r#"{{"name":"f{i}","type":"file","size":1}}"#))
                 .collect();
-            format!(r#"{{"success":true,"data":{{"items":[{}]}}}}"#, items.join(",")).into_bytes()
+            format!(
+                r#"{{"success":true,"data":{{"items":[{}]}}}}"#,
+                items.join(",")
+            )
+            .into_bytes()
         };
         let (origin, _requests) = spawn_mock_server(vec![
-            ("200 OK", "application/json", "", page(DSM_LIST_LIMIT as usize, 0)),
-            ("200 OK", "application/json", "", page(2, DSM_LIST_LIMIT as usize)),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                page(DSM_LIST_LIMIT as usize, 0),
+            ),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                page(2, DSM_LIST_LIMIT as usize),
+            ),
         ]);
         let adapter = DsmAuthAdapter::new();
         let entries = adapter
@@ -1661,7 +1885,10 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
                     let len = head
                         .lines()
-                        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
                         .expect("upload must send Content-Length (no chunked encoding)");
                     break (end + 4, len);
                 }
@@ -1712,8 +1939,18 @@ mod tests {
     #[test]
     fn upload_and_folder_errors_are_reported() {
         let (origin, _requests) = spawn_mock_server(vec![
-            ("200 OK", "application/json", "", br#"{"success":false,"error":{"code":1003}}"#.to_vec()),
-            ("200 OK", "application/json", "", br#"{"success":true,"data":{}}"#.to_vec()),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":false,"error":{"code":1003}}"#.to_vec(),
+            ),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":true,"data":{}}"#.to_vec(),
+            ),
         ]);
         let adapter = DsmAuthAdapter::new();
         let dir = std::env::temp_dir().join(format!("synoul-err-{}", std::process::id()));
@@ -1764,13 +2001,36 @@ mod tests {
                 "",
                 br#"{"success":true,"data":{"file_id":"123456","revisions":3}}"#.to_vec(),
             ),
-            ("200 OK", "application/json", "", br#"{"success":true,"data":{"async_task_id":"t"}}"#.to_vec()),
-            ("200 OK", "application/json", "", br#"{"success":true,"data":{}}"#.to_vec()),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":true,"data":{"async_task_id":"t"}}"#.to_vec(),
+            ),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":true,"data":{}}"#.to_vec(),
+            ),
         ]);
         let adapter = DsmAuthAdapter::new();
-        assert_eq!(adapter.trash_drive_path(&origin, "S", "/mydrive/x/a.txt"), Ok(()));
-        assert!(requests.recv().unwrap().starts_with("POST /webapi/entry.cgi"));
-        assert!(requests.recv().unwrap().starts_with("POST /webapi/entry.cgi"));
+        assert_eq!(
+            adapter.trash_drive_path(&origin, "S", "/mydrive/x/a.txt"),
+            Ok(())
+        );
+        assert!(
+            requests
+                .recv()
+                .unwrap()
+                .starts_with("POST /webapi/entry.cgi")
+        );
+        assert!(
+            requests
+                .recv()
+                .unwrap()
+                .starts_with("POST /webapi/entry.cgi")
+        );
         // 查不到 file_id 時不能送出刪除
         assert_eq!(
             adapter.trash_drive_path(&origin, "S", "/mydrive/x/b.txt"),

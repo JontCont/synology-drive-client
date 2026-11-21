@@ -41,3 +41,4 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 cloud-filter = "0.0.7"
+keyring = { version = "3", features = ["windows-native"] }
