@@ -13,12 +13,12 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
 }
 
-// 停用瀏覽器右鍵選單
+// Disable browser context menu
 window.addEventListener("contextmenu", (event) => {
   event.preventDefault();
 });
 
-// 停用 Ctrl/Cmd + 滾輪縮放頁面
+// Disable Ctrl/Cmd + wheel page zoom
 window.addEventListener(
   "wheel",
   (event) => {
@@ -29,19 +29,19 @@ window.addEventListener(
   { passive: false },
 );
 
-// 停用瀏覽器快捷鍵（保留輸入框內的複製、貼上、全選、復原等基本編輯）
+// Disable browser shortcuts while keeping basic editing keys inside inputs
 window.addEventListener(
   "keydown",
   (event) => {
     const key = event.key.toLowerCase();
 
-    // 阻擋 F1~F12 功能鍵（F5 重整、F12 開發者工具、F3 搜尋等）
+    // Block F1-F12 function keys (F5 refresh, F12 devtools, F3 find, etc.)
     if (/^f([1-9]|1[0-2])$/.test(key)) {
       event.preventDefault();
       return;
     }
 
-    // 阻擋 Alt + 左右鍵（上一頁 / 下一頁）
+    // Block Alt + Left/Right (browser back / forward)
     if (event.altKey && (key === "arrowleft" || key === "arrowright")) {
       event.preventDefault();
       return;

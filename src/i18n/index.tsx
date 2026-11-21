@@ -37,8 +37,8 @@ export function isValidLanguagePreference(value: unknown): value is LanguagePref
 }
 
 export function detectSystemLocale(): SupportedLocale {
-  if (typeof navigator === "undefined") return "zh-TW";
-  const raw = navigator.language || navigator.languages?.[0] || "zh-TW";
+  if (typeof navigator === "undefined") return "en";
+  const raw = navigator.language || navigator.languages?.[0] || "en";
   const normalized = raw.trim().replace(/_/g, "-").toLowerCase();
   if (
     normalized.startsWith("zh-cn") ||
@@ -80,7 +80,7 @@ type I18nContextValue = {
 const I18nContext = createContext<I18nContextValue | null>(null);
 
 export function I18nProvider({
-  initialLanguage = "system",
+  initialLanguage = "en",
   children,
 }: {
   initialLanguage?: LanguagePreference;
@@ -97,8 +97,8 @@ export function I18nProvider({
 
   const t = useCallback(
     (key: TranslationKey, params?: TranslationParams) => {
-      const dict = LOCALE_DICTS[resolvedLocale] ?? LOCALE_DICTS["zh-TW"];
-      const template = dict[key] ?? LOCALE_DICTS["zh-TW"][key] ?? key;
+      const dict = LOCALE_DICTS[resolvedLocale] ?? LOCALE_DICTS.en;
+      const template = dict[key] ?? LOCALE_DICTS.en[key] ?? key;
       return formatMessage(template, params);
     },
     [resolvedLocale],

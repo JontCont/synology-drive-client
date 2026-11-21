@@ -54,12 +54,12 @@ pub struct AppConfig {
     /// 只在連上這些 Wi-Fi 時使用區網位址；留空表示只要連得到區網位址就使用
     #[serde(default)]
     pub lan_wifi_names: Vec<String>,
-    /// 介面語言（"system" | "zh-TW" | "zh-CN" | "en" | "ja"）
+    /// Interface language ("system" | "zh-TW" | "zh-CN" | "en" | "ja")
     #[serde(default = "default_language")]
     pub language: String,
 }
 
-pub const DEFAULT_LANGUAGE: &str = "system";
+pub const DEFAULT_LANGUAGE: &str = "en";
 
 fn default_language() -> String {
     DEFAULT_LANGUAGE.to_string()
@@ -540,9 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn language_defaults_to_system_and_validates_allowed_values() {
+    fn language_defaults_to_en_and_validates_allowed_values() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.language, "system");
+        assert_eq!(cfg.language, "en");
         for lang in ["system", "zh-TW", "zh-CN", "en", "ja"] {
             assert!(is_valid_language(lang));
         }

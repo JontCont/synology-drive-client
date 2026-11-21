@@ -230,7 +230,7 @@ function pathRelation(
   return null;
 }
 
-// 舊有 describeRelation / SYNC_MODES / WINDOW_PRESETS 已移至 i18n 字典與 App() 內部的 t()
+// Note: describeRelation, SYNC_MODES, and WINDOW_PRESETS were moved to i18n dictionaries and App() via t()
 
 type AuthStatus = {
   stage: "idle" | "waitingOtp" | "authenticated" | string;

@@ -1251,7 +1251,7 @@ fn resolve_tray_language(lang: &str) -> &'static str {
         "ja" => "ja",
         _ => {
             let Some(raw) = system_locale_tag() else {
-                return "zh-TW";
+                return "en";
             };
             let normalized = raw.trim().replace('_', "-").to_lowercase();
             if normalized.starts_with("zh-cn")
@@ -1272,10 +1272,10 @@ fn resolve_tray_language(lang: &str) -> &'static str {
 
 fn tray_labels(lang: &str) -> (&'static str, &'static str) {
     match resolve_tray_language(lang) {
+        "zh-TW" => ("開啟", "結束"),
         "zh-CN" => ("打开", "退出"),
-        "en" => ("Open", "Quit"),
         "ja" => ("開く", "終了"),
-        _ => ("開啟", "結束"),
+        _ => ("Open", "Quit"),
     }
 }
 
