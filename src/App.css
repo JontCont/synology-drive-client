@@ -376,6 +376,11 @@ body {
   gap: 8px;
 }
 
+/* 主控台的 toast 放在 header 下方，避免蓋住右側的登入狀態與操作按鈕 */
+.main-area .banner-stack {
+  top: 92px;
+}
+
 .banner-stack .alert {
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
   animation: toast-in 0.2s ease-out;
