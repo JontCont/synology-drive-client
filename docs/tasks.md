@@ -80,7 +80,8 @@
   - [x] P1-17a 設定檔新增 `syncMode`：`bidirectional` 雙向 / `upload_only` 僅上傳 / `download_only` 僅下載（舊設定檔預設雙向）
   - [x] P1-17b 模式政策 `is_operation_allowed`：單向模式不執行刪除與改名；僅下載不接收本機變更；executor 依模式略過不允許的 operation
   - [x] P1-17c 設定頁重做：步驟式（1 同步模式卡片 → 2 本機/NAS 資料夾含方向箭頭 → 進階折疊），本機資料夾可用系統對話框「瀏覽…」選取
-  - [ ] P1-17d 待辦：NAS 遠端資料夾瀏覽（待 Provider 定稿）；服務運行中改模式/路徑自動重啟；雙向模式的「大量刪除保護」
+  - [x] P1-17d NAS 遠端資料夾瀏覽：登入後以 session 呼叫 `SYNO.SynologyDrive.Files list` / `TeamFolders list`（已用 `SYNO.API.Info` 確認 NAS 支援），設定頁以選取視窗取代文字輸入（本機與 NAS 皆為 UI 選取）
+  - [ ] P1-17e 待驗證：Drive 檔案列表 API 的實機回應（需登入後實測；目前以文件化的欄位與單元測試解析）；服務運行中改模式/路徑自動重啟；雙向模式的「大量刪除保護」
 - [ ] P1-16 同步服務與本機監看串接
   - [x] P1-16a 啟動同步服務前需已登入；啟動時自動啟動本機監看，停止服務時一併停止
   - [ ] P1-16b 補掃描 fallback 會對已完成的檔案無限重複入列（目前每 tick 都掃同一批路徑），需改為僅首次全量掃描 + 之後只吃 watcher 事件

@@ -512,6 +512,14 @@ fn get_local_watcher_status(
 }
 
 #[tauri::command]
+async fn list_nas_folders(
+    auth_state: State<'_, auth::AuthState>,
+    path: String,
+) -> Result<Vec<auth::RemoteFolderEntry>, String> {
+    auth_state.list_remote_folders(&path)
+}
+
+#[tauri::command]
 fn get_auth_status(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthStatus, String> {
     auth_state.status()
 }
@@ -1000,6 +1008,7 @@ pub fn run() {
             update_app_config,
             apply_window_preset,
             pick_local_folder,
+            list_nas_folders,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,

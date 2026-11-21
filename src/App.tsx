@@ -23,6 +23,8 @@ type AppConfig = {
 
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
 
+type NasFolderEntry = { name: string; path: string };
+
 const SYNC_MODES: { id: SyncMode; label: string; arrow: string; desc: string }[] = [
   {
     id: "bidirectional",
@@ -235,6 +237,13 @@ function App() {
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
   const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
+  const [nasPicker, setNasPicker] = useState<{
+    open: boolean;
+    path: string;
+    entries: NasFolderEntry[];
+    loading: boolean;
+    error: string | null;
+  }>({ open: false, path: "", entries: [], loading: false, error: null });
   const [windowSize, setWindowSize] = useState({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -487,6 +496,25 @@ function App() {
     } catch (err) {
       setError(String(err));
     }
+  }
+
+  async function loadNasFolders(path: string) {
+    setNasPicker((prev) => ({ ...prev, open: true, loading: true, error: null, path }));
+    try {
+      const entries = await invoke<NasFolderEntry[]>("list_nas_folders", { path });
+      setNasPicker((prev) => ({ ...prev, entries, loading: false }));
+    } catch (err) {
+      setNasPicker((prev) => ({ ...prev, entries: [], loading: false, error: String(err) }));
+    }
+  }
+
+  function openNasPicker() {
+    loadNasFolders(remotePath.startsWith("/") ? remotePath : "");
+  }
+
+  function chooseNasFolder() {
+    setRemotePath(nasPicker.path);
+    setNasPicker((prev) => ({ ...prev, open: false }));
   }
 
   async function saveHostConfig(event: React.FormEvent) {
@@ -2051,6 +2079,96 @@ function App() {
 
         {toastStack}
 
+        {nasPicker.open ? (
+          <div className="modal-overlay" role="presentation">
+            <div
+              className="modal-dialog modal-dialog-wide animate-pop"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="nas-picker-title"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setNasPicker((prev) => ({ ...prev, open: false }));
+              }}
+            >
+              <h2 id="nas-picker-title" className="modal-title">
+                選擇 NAS 資料夾
+              </h2>
+              <nav className="nas-breadcrumb" aria-label="NAS 路徑">
+                <button type="button" className="link-btn" onClick={() => loadNasFolders("")}>
+                  NAS
+                </button>
+                {nasPicker.path
+                  .split("/")
+                  .filter(Boolean)
+                  .map((segment, index, all) => {
+                    const target = "/" + all.slice(0, index + 1).join("/");
+                    const label =
+                      segment === "mydrive"
+                        ? "我的 Drive"
+                        : segment === "team-folders"
+                          ? "團隊資料夾"
+                          : segment;
+                    return (
+                      <span key={target}>
+                        <span aria-hidden="true"> / </span>
+                        <button
+                          type="button"
+                          className="link-btn"
+                          onClick={() => loadNasFolders(target)}
+                        >
+                          {label}
+                        </button>
+                      </span>
+                    );
+                  })}
+              </nav>
+              <div className="nas-folder-list" aria-busy={nasPicker.loading}>
+                {nasPicker.loading ? (
+                  <div className="empty-state">載入中...</div>
+                ) : nasPicker.error ? (
+                  <div className="alert alert-error">{nasPicker.error}</div>
+                ) : nasPicker.entries.length > 0 ? (
+                  nasPicker.entries.map((entry) => (
+                    <button
+                      key={entry.path}
+                      type="button"
+                      className="nas-folder-item"
+                      onClick={() => loadNasFolders(entry.path)}
+                    >
+                      <span aria-hidden="true">📁</span>
+                      <span>{entry.name}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-state">此資料夾底下沒有子資料夾</div>
+                )}
+              </div>
+              <div className="cell-secondary">
+                已選：
+                <code className="mono">{nasPicker.path || "（請先進入一個資料夾）"}</code>
+              </div>
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                  disabled={!nasPicker.path || nasPicker.loading}
+                  onClick={chooseNasFolder}
+                >
+                  選擇此資料夾
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setNasPicker((prev) => ({ ...prev, open: false }))}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <main className="content-scroll">
           {/* Global Facebook-style Page Skeleton when switching tabs or initial hydration */}
           {(initialLoading || tabSwitching) && (
@@ -3001,8 +3119,9 @@ function App() {
                             <input
                               className="input mono"
                               value={localSyncPath}
-                              onChange={(event) => setLocalSyncPath(event.currentTarget.value)}
-                              placeholder="例如 C:\Users\you\SynologyDrive"
+                              readOnly
+                              onClick={browseLocalFolder}
+                              placeholder="尚未選擇，請按「瀏覽…」"
                             />
                             <button
                               type="button"
@@ -3018,12 +3137,22 @@ function App() {
                         </span>
                         <label className="form-field" style={{ flex: 1 }}>
                           <span>NAS 遠端資料夾</span>
-                          <input
-                            className="input mono"
-                            value={remotePath}
-                            onChange={(event) => setRemotePath(event.currentTarget.value)}
-                            placeholder="例如 /Drive/SyncRoot"
-                          />
+                          <div className="inline-input-row">
+                            <input
+                              className="input mono"
+                              value={remotePath}
+                              readOnly
+                              onClick={openNasPicker}
+                              placeholder="尚未選擇，請按「瀏覽 NAS…」"
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={openNasPicker}
+                            >
+                              瀏覽 NAS…
+                            </button>
+                          </div>
                         </label>
                       </div>
                     </div>

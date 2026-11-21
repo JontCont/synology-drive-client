@@ -36,7 +36,23 @@ pub trait AuthBackendAdapter: Send + Sync {
 
     /// 登出時通知伺服器銷毀 session（盡力而為）
     fn logout_remote(&self) {}
+
+    /// 列出 NAS Drive 指定路徑下的子資料夾（`/` 代表根：我的 Drive 與團隊資料夾）
+    fn list_remote_folders(&self, _path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
+        Err("目前的認證方式不支援瀏覽 NAS 資料夾".to_string())
+    }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFolderEntry {
+    pub name: String,
+    pub path: String,
+}
+
+const DRIVE_MY_DRIVE_PATH: &str = "/mydrive";
+const DRIVE_TEAM_FOLDERS_PREFIX: &str = "/team-folders";
+const DSM_LIST_LIMIT: u32 = 1000;
 
 const MAX_OTP_ATTEMPTS: u8 = 3;
 const DSM_SESSION_NAME: &str = "SynologyDrive";
@@ -96,6 +112,67 @@ fn normalize_dsm_origin(host: &str) -> Result<String, String> {
         return Err("NAS 主機位址格式不正確".to_string());
     }
     Ok(format!("https://{authority}"))
+}
+
+/// 解析 DSM 一般 API 回應，成功時回傳 `data`
+fn parse_dsm_data_response(body: &str) -> Result<serde_json::Value, DsmError> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| DsmError { code: -1 })?;
+    if value.get("success").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(value.get("data").cloned().unwrap_or(serde_json::Value::Null));
+    }
+    let code = value
+        .pointer("/error/code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+    Err(DsmError { code })
+}
+
+fn join_remote_path(parent: &str, name: &str) -> String {
+    format!("{}/{}", parent.trim_end_matches('/'), name)
+}
+
+/// 解析 `SYNO.SynologyDrive.Files list` 回應中的子資料夾
+fn parse_drive_folder_items(data: &serde_json::Value, parent: &str) -> Vec<RemoteFolderEntry> {
+    let mut folders: Vec<RemoteFolderEntry> = data
+        .get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    item.get("type").and_then(|t| t.as_str()).map_or(true, |t| t == "dir")
+                })
+                .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
+                .map(|name| RemoteFolderEntry {
+                    name: name.to_string(),
+                    path: join_remote_path(parent, name),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort_by_key(|f| f.name.to_lowercase());
+    folders
+}
+
+/// 解析 `SYNO.SynologyDrive.TeamFolders list` 回應
+fn parse_team_folder_items(data: &serde_json::Value) -> Vec<RemoteFolderEntry> {
+    let mut folders: Vec<RemoteFolderEntry> = data
+        .get("items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
+                .map(|name| RemoteFolderEntry {
+                    name: name.to_string(),
+                    path: join_remote_path(DRIVE_TEAM_FOLDERS_PREFIX, name),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort_by_key(|f| f.name.to_lowercase());
+    folders
 }
 
 struct PendingLogin {
@@ -176,10 +253,70 @@ impl DsmAuthAdapter {
 
     fn describe_failure(err: &DsmError) -> String {
         match err.code {
+            119 => "NAS 登入已過期，請重新登入".to_string(),
             -1 => "伺服器回應格式不正確，請確認 NAS 主機位址是否為 DSM".to_string(),
             -2 => "無法連線到 NAS（網路錯誤、逾時或憑證無效），請檢查主機位址".to_string(),
             _ => err.message(),
         }
+    }
+
+    fn current_session(&self) -> Result<(String, String), String> {
+        self.session
+            .lock()
+            .map_err(|_| "登入狀態鎖定失敗".to_string())?
+            .as_ref()
+            .map(|s| (s.origin.clone(), s.sid.clone()))
+            .ok_or_else(|| "尚未登入 NAS".to_string())
+    }
+
+    /// 呼叫 `entry.cgi` 的一般 API；失敗時回傳 DSM 錯誤碼
+    fn call_entry_api(
+        &self,
+        origin: &str,
+        sid: &str,
+        params: &[(&str, String)],
+    ) -> Result<serde_json::Value, DsmError> {
+        let mut form: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        form.push(("_sid", sid));
+        let url = format!("{origin}/webapi/entry.cgi");
+        let mut response = self
+            .agent
+            .post(&url)
+            .send_form(form)
+            .map_err(|_| DsmError { code: -2 })?;
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|_| DsmError { code: -2 })?;
+        parse_dsm_data_response(&body)
+    }
+
+    fn list_drive_directory(
+        &self,
+        origin: &str,
+        sid: &str,
+        path: &str,
+    ) -> Result<Vec<RemoteFolderEntry>, DsmError> {
+        let build = |path_param: String| {
+            vec![
+                ("api", "SYNO.SynologyDrive.Files".to_string()),
+                ("version", "2".to_string()),
+                ("method", "list".to_string()),
+                ("path", path_param),
+                ("offset", "0".to_string()),
+                ("limit", DSM_LIST_LIMIT.to_string()),
+                ("sort_by", "\"name\"".to_string()),
+                ("sort_direction", "\"asc\"".to_string()),
+            ]
+        };
+        // 此 API 的 requestFormat 為 JSON，字串需帶引號；失敗時退回不帶引號的寫法
+        let quoted = serde_json::to_string(path).unwrap_or_else(|_| format!("\"{path}\""));
+        let data = match self.call_entry_api(origin, sid, &build(quoted)) {
+            Ok(data) => data,
+            Err(err) if err.code == 119 || err.code == -2 => return Err(err),
+            Err(_) => self.call_entry_api(origin, sid, &build(path.to_string()))?,
+        };
+        Ok(parse_drive_folder_items(&data, path))
     }
 }
 
@@ -289,6 +426,41 @@ impl AuthBackendAdapter for DsmAuthAdapter {
                 }
             }
         }
+    }
+
+    fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
+        let (origin, sid) = self.current_session()?;
+        let normalized = path.trim().trim_end_matches('/');
+
+        if normalized.is_empty() {
+            let mut roots = vec![RemoteFolderEntry {
+                name: "我的 Drive".to_string(),
+                path: DRIVE_MY_DRIVE_PATH.to_string(),
+            }];
+            let team = self.call_entry_api(
+                &origin,
+                &sid,
+                &[
+                    ("api", "SYNO.SynologyDrive.TeamFolders".to_string()),
+                    ("version", "1".to_string()),
+                    ("method", "list".to_string()),
+                    ("offset", "0".to_string()),
+                    ("limit", DSM_LIST_LIMIT.to_string()),
+                ],
+            );
+            match team {
+                Ok(data) => roots.extend(parse_team_folder_items(&data)),
+                Err(err) if err.code == 119 => return Err(Self::describe_failure(&err)),
+                Err(_) => {}
+            }
+            return Ok(roots);
+        }
+
+        if !normalized.starts_with('/') || normalized.split('/').any(|seg| seg == "..") {
+            return Err("NAS 路徑格式不正確".to_string());
+        }
+        self.list_drive_directory(&origin, &sid, normalized)
+            .map_err(|err| Self::describe_failure(&err))
     }
 
     fn logout_remote(&self) {
@@ -493,6 +665,13 @@ impl AuthState {
         Err("OIDC 單一登入尚未完成實作（缺少 token 交換驗證），目前請使用帳號密碼登入".to_string())
     }
 
+    pub fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入後再瀏覽 NAS 資料夾".to_string());
+        }
+        self.adapter.list_remote_folders(path)
+    }
+
     pub fn logout(&self) -> Result<AuthStatus, String> {
         self.adapter.logout_remote();
         let mut stage = self.inner.lock().map_err(|_| "登入狀態鎖定失敗".to_string())?;
@@ -677,6 +856,45 @@ mod tests {
             parse_dsm_login_response(r#"{"success":true,"data":{}}"#),
             Err(DsmError { code: -1 })
         );
+    }
+
+    #[test]
+    fn drive_folder_parsing_keeps_only_directories_and_sorts() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"items":[{"name":"b-docs","type":"dir"},{"name":"a.txt","type":"file"},{"name":"A-photos","type":"dir"}]}"#,
+        )
+        .unwrap();
+        let folders = parse_drive_folder_items(&data, "/mydrive/");
+        let paths: Vec<_> = folders.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["/mydrive/A-photos", "/mydrive/b-docs"]);
+    }
+
+    #[test]
+    fn team_folder_parsing_maps_to_team_folders_path() {
+        let data: serde_json::Value =
+            serde_json::from_str(r#"{"items":[{"name":"Design"}]}"#).unwrap();
+        assert_eq!(
+            parse_team_folder_items(&data),
+            vec![RemoteFolderEntry {
+                name: "Design".to_string(),
+                path: "/team-folders/Design".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn dsm_data_response_returns_error_code() {
+        assert!(parse_dsm_data_response(r#"{"success":true,"data":{"items":[]}}"#).is_ok());
+        assert_eq!(
+            parse_dsm_data_response(r#"{"success":false,"error":{"code":119}}"#),
+            Err(DsmError { code: 119 })
+        );
+    }
+
+    #[test]
+    fn listing_folders_requires_login() {
+        let state = AuthState::with_adapter(Box::new(FakeAdapter));
+        assert!(state.list_remote_folders("/").is_err());
     }
 
     #[test]

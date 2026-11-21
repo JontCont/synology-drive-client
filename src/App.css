@@ -576,6 +576,47 @@ body {
   font-weight: 700;
 }
 
+.modal-dialog-wide {
+  width: min(520px, 100%);
+}
+
+.nas-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 13px;
+}
+
+.nas-folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.nas-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.nas-folder-item:hover {
+  background-color: var(--bg-hover);
+}
+
 .modal-desc {
   margin: 0;
   font-size: 13px;
