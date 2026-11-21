@@ -1,7 +1,9 @@
 //! 單一同步資料夾的同步引擎（NAS ⇄ 本機）。
 //!
 //! 一次同步 = 列出 NAS 與本機的檔案 → 與「上次同步紀錄」比對產生計畫 → 逐項上傳／下載。
-//! 原則：永不刪除任何一側的檔案；內容衝突時兩邊都保留；NAS 端被覆蓋前一律保留歷史版本。
+//! 原則：預設不刪除任何一側的檔案（缺的一邊一律補回）；資料夾開啟「刪除也同步」後，
+//! 同步過的檔案在一邊被刪除時，另一邊會移到資源回收桶/回收筒（不是永久刪除）。
+//! 內容衝突時兩邊都保留；NAS 端被覆蓋前一律保留歷史版本。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,6 +25,8 @@ const PHASE_ERROR: &str = "error";
 const TEMP_SUFFIX: &str = ".synodl-part";
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASELINE_SAVE_EVERY: u64 = 25;
+/// 一次同步要刪除的檔案數達到這個數量（且過半）才會觸發大量刪除保護
+const MASS_DELETE_MIN: usize = 10;
 /// NTFS 與 NAS 的時間精度不同，差距在此範圍內視為沒有改動
 const MTIME_TOLERANCE_MS: u64 = 2000;
 /// 測試用的 NAS 檢查間隔；實際值來自設定的 remoteCheckMinutes
@@ -39,6 +43,7 @@ pub struct SyncProgress {
     pub total_files: u64,
     pub done_files: u64,
     pub uploaded_files: u64,
+    pub deleted_files: u64,
     pub skipped_files: u64,
     pub conflict_copies: u64,
     pub failed_files: u64,
@@ -61,7 +66,7 @@ const QUEUE_FAILED: &str = "failed";
 pub struct QueueItem {
     pub folder_id: String,
     pub path: String,
-    /// download / download_overwrite / keep_both_download / upload / upload_version / create_remote_dir / create_local_dir / conflict
+    /// download / download_overwrite / keep_both_download / upload / upload_version / create_remote_dir / create_local_dir / delete_remote / delete_local / conflict
     pub action: String,
     pub size: Option<u64>,
     /// waiting / running / done / failed
@@ -90,6 +95,8 @@ fn queue_action_label(action: &Action) -> Option<&'static str> {
         Action::UploadVersion => "upload_version",
         Action::CreateRemoteDir => "create_remote_dir",
         Action::CreateLocalDir => "create_local_dir",
+        Action::DeleteRemote | Action::DeleteRemoteDir => "delete_remote",
+        Action::DeleteLocal | Action::DeleteLocalDir => "delete_local",
         Action::TypeMismatch => "conflict",
         _ => return None,
     })
@@ -454,11 +461,24 @@ pub enum Action {
     UploadVersion,
     CreateLocalDir,
     CreateRemoteDir,
+    /// 同步過後本機刪除了檔案：NAS 端移到資源回收桶
+    DeleteRemote,
+    /// 同步過後 NAS 刪除了檔案：本機端移到 Windows 資源回收筒
+    DeleteLocal,
+    DeleteRemoteDir,
+    DeleteLocalDir,
     /// 同一名稱在一邊是檔案、另一邊是資料夾
     TypeMismatch,
 }
 
 impl Action {
+    fn is_delete(&self) -> bool {
+        matches!(
+            self,
+            Action::DeleteRemote | Action::DeleteLocal | Action::DeleteRemoteDir | Action::DeleteLocalDir
+        )
+    }
+
     fn is_transfer(&self) -> bool {
         matches!(
             self,
@@ -479,17 +499,23 @@ fn remote_changed(remote: &RemoteFile, base: &FileBase) -> bool {
     remote.size.is_some_and(|size| size != base.remote_size)
 }
 
-/// 檔案的同步決策：依模式、兩邊現況與上次同步紀錄決定動作
+/// 檔案的同步決策：依模式、兩邊現況與上次同步紀錄決定動作。
+/// `sync_deletes` 開啟時（僅「雙向」與「僅上傳」），同步過的檔案若只有一邊刪除且另一邊沒有改動，
+/// 會把另一邊也刪除（移到資源回收桶）；否則一律把缺的那一邊補回
 pub fn decide_file(
     mode: &str,
+    sync_deletes: bool,
     local: Option<&LocalFile>,
     remote: Option<&RemoteFile>,
     base: Option<&FileBase>,
 ) -> Action {
     let can_download = mode != config::SYNC_MODE_UPLOAD_ONLY;
     let can_upload = mode != config::SYNC_MODE_DOWNLOAD_ONLY;
+    let delete_remote = sync_deletes && can_upload;
+    let delete_local = sync_deletes && mode == config::SYNC_MODE_BIDIRECTIONAL;
     match (local, remote, base) {
         (None, None, _) => Action::Noop,
+        (None, Some(r), Some(b)) if delete_remote && !remote_changed(r, b) => Action::DeleteRemote,
         (None, Some(_), _) => {
             if can_download {
                 Action::Download
@@ -497,6 +523,7 @@ pub fn decide_file(
                 Action::Noop
             }
         }
+        (Some(l), None, Some(b)) if delete_local && !local_changed(l, b) => Action::DeleteLocal,
         (Some(_), None, _) => {
             if can_upload {
                 Action::Upload
@@ -565,6 +592,8 @@ pub struct PlanItem {
     pub local: Option<LocalFile>,
     pub remote: Option<RemoteFile>,
     pub action: Action,
+    /// 兩邊都存在（資料夾用來記錄「已同步的資料夾」）
+    pub both_present: bool,
 }
 
 fn key_of(segments: &[String]) -> String {
@@ -575,9 +604,40 @@ fn key_of(segments: &[String]) -> String {
         .join("/")
 }
 
-/// 合併兩邊的檔案清單並產生同步計畫：資料夾在前（由淺到深），檔案在後
+/// 資料夾要刪除，前提是它底下的每個項目也都是同一方向的刪除；
+/// 只要底下還有要保留、補回或新增的項目，資料夾就不刪，改回原本的補回動作
+fn resolve_dir_deletions(items: &mut [PlanItem], can_upload: bool, can_download: bool) {
+    let mut pending: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i.action, Action::DeleteRemoteDir | Action::DeleteLocalDir))
+        .map(|(idx, _)| idx)
+        .collect();
+    pending.sort_by_key(|&idx| std::cmp::Reverse(items[idx].rel_local.len()));
+    for idx in pending {
+        let prefix = format!("{}/", items[idx].key);
+        let remote_side = items[idx].action == Action::DeleteRemoteDir;
+        let all_deleted = items.iter().filter(|o| o.key.starts_with(&prefix)).all(|o| {
+            if remote_side {
+                matches!(o.action, Action::DeleteRemote | Action::DeleteRemoteDir)
+            } else {
+                matches!(o.action, Action::DeleteLocal | Action::DeleteLocalDir)
+            }
+        });
+        if !all_deleted {
+            items[idx].action = match (remote_side, can_download, can_upload) {
+                (true, true, _) => Action::CreateLocalDir,
+                (false, _, true) => Action::CreateRemoteDir,
+                _ => Action::Noop,
+            };
+        }
+    }
+}
+
+/// 合併兩邊的檔案清單並產生同步計畫：資料夾在前（由淺到深），檔案在後，要刪除的資料夾最後（由深到淺）
 pub fn build_plan(
     mode: &str,
+    sync_deletes: bool,
     remote_root: &str,
     remote: &[RemoteNode],
     local: &[LocalNode],
@@ -585,6 +645,8 @@ pub fn build_plan(
 ) -> Vec<PlanItem> {
     let can_download = mode != config::SYNC_MODE_UPLOAD_ONLY;
     let can_upload = mode != config::SYNC_MODE_DOWNLOAD_ONLY;
+    let delete_remote = sync_deletes && can_upload;
+    let delete_local = sync_deletes && mode == config::SYNC_MODE_BIDIRECTIONAL;
     let root = remote_root.trim_end_matches('/');
 
     let mut remote_by_key: HashMap<String, (&RemoteNode, Vec<String>)> = HashMap::new();
@@ -625,6 +687,7 @@ pub fn build_plan(
                         local: None,
                         remote: None,
                         action: Action::TypeMismatch,
+                        both_present: false,
                     });
                     continue;
                 }
@@ -651,12 +714,20 @@ pub fn build_plan(
         let action = if is_dir {
             match (r.is_some(), l.is_some()) {
                 (true, true) => Action::Noop,
+                (false, true) if delete_local && baseline.dirs.contains(key) => Action::DeleteLocalDir,
                 (false, true) if can_upload => Action::CreateRemoteDir,
+                (true, false) if delete_remote && baseline.dirs.contains(key) => Action::DeleteRemoteDir,
                 (true, false) if can_download => Action::CreateLocalDir,
                 _ => Action::Noop,
             }
         } else {
-            decide_file(mode, local_file.as_ref(), remote_file.as_ref(), baseline.files.get(key))
+            decide_file(
+                mode,
+                sync_deletes,
+                local_file.as_ref(),
+                remote_file.as_ref(),
+                baseline.files.get(key),
+            )
         };
         items.push(PlanItem {
             key: key.clone(),
@@ -666,10 +737,21 @@ pub fn build_plan(
             local: local_file,
             remote: remote_file,
             action,
+            both_present: r.is_some() && l.is_some(),
         });
     }
+    resolve_dir_deletions(&mut items, can_upload, can_download);
     items.sort_by(|a, b| {
-        (!a.is_dir, a.rel_local.len(), &a.key).cmp(&(!b.is_dir, b.rel_local.len(), &b.key))
+        let rank = |i: &PlanItem| {
+            if matches!(i.action, Action::DeleteRemoteDir | Action::DeleteLocalDir) {
+                (2u8, usize::MAX - i.rel_local.len())
+            } else if i.is_dir {
+                (0u8, i.rel_local.len())
+            } else {
+                (1u8, i.rel_local.len())
+            }
+        };
+        (rank(a), &a.key).cmp(&(rank(b), &b.key))
     });
     items
 }
@@ -799,7 +881,18 @@ fn run_sync(
 
     // 2) 比對產生計畫
     let mut baseline = sync_state::load(app, &folder.id);
-    let plan = build_plan(&folder.mode, &remote_root, &remote, &local, &baseline);
+    let plan = build_plan(&folder.mode, folder.sync_deletes, &remote_root, &remote, &local, &baseline);
+
+    // 保護：一次要刪除的檔案佔同步紀錄的一半以上時，多半是列表異常或資料夾被整個搬走/中斷連線，
+    // 不執行任何刪除，避免誤刪整個資料夾
+    let planned_deletes = plan.iter().filter(|i| !i.is_dir && i.action.is_delete()).count();
+    if planned_deletes >= MASS_DELETE_MIN && planned_deletes * 2 > baseline.files.len() {
+        return Err(format!(
+            "偵測到大量刪除（{planned_deletes} / {} 個已同步的檔案），為避免誤刪已中止。\
+             若確定要這麼做，請分批刪除，或先關閉此資料夾的「刪除也同步」",
+            baseline.files.len()
+        ));
+    }
     let file_items = plan.iter().filter(|i| !i.is_dir).count() as u64;
     let transfer_bytes: u64 = plan
         .iter()
@@ -835,6 +928,10 @@ fn run_sync(
         // 兩邊都已不存在的項目不再保留紀錄
         let live: HashSet<&String> = plan.iter().map(|i| &i.key).collect();
         baseline.files.retain(|key, _| live.contains(key));
+        baseline.dirs.retain(|key| live.contains(key));
+        for item in plan.iter().filter(|i| i.is_dir && i.both_present && i.action == Action::Noop) {
+            baseline.dirs.insert(item.key.clone());
+        }
     }
     let _ = sync_state::save(app, &folder.id, &baseline);
     result?;
@@ -878,6 +975,45 @@ fn execute_plan(
             state.set_queue_status(&folder.id, pos, QUEUE_RUNNING, None);
         }
 
+        if item.action.is_delete() {
+            let result = match item.action {
+                Action::DeleteRemote | Action::DeleteRemoteDir => {
+                    ensure_local_absent(&local_path).and_then(|()| auth.delete_remote_path(&item.remote_path))
+                }
+                _ => trash_local(&local_path, item),
+            };
+            match result {
+                Ok(()) => {
+                    consecutive_failures = 0;
+                    baseline.files.remove(&item.key);
+                    baseline.dirs.remove(&item.key);
+                    since_save += 1;
+                    if let Some(pos) = queue_pos {
+                        state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
+                    }
+                    if !item.is_dir {
+                        state.update(&folder.id, |p| p.deleted_files += 1);
+                    }
+                }
+                Err(err) => {
+                    if let Some(pos) = queue_pos {
+                        state.set_queue_status(&folder.id, pos, QUEUE_FAILED, Some(err.clone()));
+                    }
+                    if is_session_error(&err) {
+                        return Err(err);
+                    }
+                    consecutive_failures += 1;
+                    record_failure(state, folder, &item.rel_local.join("/"), &err);
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        return Err(format!(
+                            "連續 {MAX_CONSECUTIVE_FAILURES} 個項目同步失敗，已停止。最後的錯誤：{err}"
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+
         if item.is_dir {
             let result = match item.action {
                 Action::CreateLocalDir => std::fs::create_dir_all(&local_path)
@@ -888,6 +1024,9 @@ fn execute_plan(
             };
             match result {
                 Ok(()) => {
+                    if matches!(item.action, Action::CreateLocalDir | Action::CreateRemoteDir) {
+                        baseline.dirs.insert(item.key.clone());
+                    }
                     if let Some(pos) = queue_pos {
                         state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
                     }
@@ -927,6 +1066,9 @@ fn execute_plan(
             Action::Upload | Action::UploadVersion => upload_one(auth, &local_path, item),
             Action::TypeMismatch => Err("此名稱在本機與 NAS 一邊是檔案、一邊是資料夾".to_string()),
             Action::CreateLocalDir | Action::CreateRemoteDir => Ok(None),
+            Action::DeleteRemote | Action::DeleteLocal | Action::DeleteRemoteDir | Action::DeleteLocalDir => {
+                Ok(None)
+            }
         };
 
         match outcome {
@@ -992,6 +1134,34 @@ fn execute_plan(
         }
     }
     Ok(())
+}
+
+/// 刪除 NAS 項目前再次確認本機真的不存在（讀取失敗、權限不足等情況不能當成「已刪除」）
+fn ensure_local_absent(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err("無法確認本機項目已刪除，略過這次刪除".to_string()),
+    }
+}
+
+/// 把本機項目移到 Windows 資源回收筒；刪除前確認檔案沒被改過、資料夾內沒有新檔案
+fn trash_local(path: &Path, item: &PlanItem) -> Result<(), String> {
+    if item.is_dir {
+        let entries = std::fs::read_dir(path).map_err(|e| format!("無法讀取本機資料夾：{e}"))?;
+        let has_content = entries
+            .flatten()
+            .any(|entry| !is_ignored_name(&entry.file_name().to_string_lossy()));
+        if has_content {
+            return Err("本機資料夾內還有檔案，略過刪除".to_string());
+        }
+    } else {
+        let planned = item.local.as_ref().ok_or_else(|| "找不到本機檔案資訊".to_string())?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("無法讀取本機檔案：{e}"))?;
+        if meta.len() != planned.size || mtime_ms(&meta).abs_diff(planned.mtime_ms) > MTIME_TOLERANCE_MS {
+            return Err("檔案在刪除前被修改，略過刪除".to_string());
+        }
+    }
+    trash::delete(path).map_err(|e| format!("無法移到資源回收筒：{e}"))
 }
 
 fn rel_to_path(root: &Path, rel: &[String]) -> PathBuf {
@@ -1181,59 +1351,146 @@ mod tests {
     #[test]
     fn first_sync_without_baseline() {
         // 本機沒有、NAS 有 -> 下載（僅上傳模式不下載）
-        assert_eq!(decide_file(BI, None, Some(&rf(5)), None), Action::Download);
-        assert_eq!(decide_file(DOWN, None, Some(&rf(5)), None), Action::Download);
-        assert_eq!(decide_file(UP, None, Some(&rf(5)), None), Action::Noop);
+        assert_eq!(decide_file(BI, false, None, Some(&rf(5)), None), Action::Download);
+        assert_eq!(decide_file(DOWN, false, None, Some(&rf(5)), None), Action::Download);
+        assert_eq!(decide_file(UP, false, None, Some(&rf(5)), None), Action::Noop);
         // 本機有、NAS 沒有 -> 上傳（僅下載模式不上傳）
-        assert_eq!(decide_file(BI, Some(&lf(5, 1)), None, None), Action::Upload);
-        assert_eq!(decide_file(UP, Some(&lf(5, 1)), None, None), Action::Upload);
-        assert_eq!(decide_file(DOWN, Some(&lf(5, 1)), None, None), Action::Noop);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 1)), None, None), Action::Upload);
+        assert_eq!(decide_file(UP, false, Some(&lf(5, 1)), None, None), Action::Upload);
+        assert_eq!(decide_file(DOWN, false, Some(&lf(5, 1)), None, None), Action::Noop);
         // 兩邊都有且大小相同 -> 只記錄
-        assert_eq!(decide_file(BI, Some(&lf(5, 1)), Some(&rf(5)), None), Action::RecordBaseline);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 1)), Some(&rf(5)), None), Action::RecordBaseline);
         // 兩邊都有但大小不同且沒有紀錄：雙向/僅下載保留兩份；僅上傳以本機為準（NAS 留歷史版本）
-        assert_eq!(decide_file(BI, Some(&lf(5, 1)), Some(&rf(9)), None), Action::KeepBothThenDownload);
-        assert_eq!(decide_file(DOWN, Some(&lf(5, 1)), Some(&rf(9)), None), Action::KeepBothThenDownload);
-        assert_eq!(decide_file(UP, Some(&lf(5, 1)), Some(&rf(9)), None), Action::UploadVersion);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 1)), Some(&rf(9)), None), Action::KeepBothThenDownload);
+        assert_eq!(decide_file(DOWN, false, Some(&lf(5, 1)), Some(&rf(9)), None), Action::KeepBothThenDownload);
+        assert_eq!(decide_file(UP, false, Some(&lf(5, 1)), Some(&rf(9)), None), Action::UploadVersion);
     }
 
     #[test]
     fn local_edit_after_sync_uploads_as_new_version_instead_of_conflict() {
         let b = base(5, 1_000, 5);
         // 本機改大小
-        assert_eq!(decide_file(BI, Some(&lf(8, 1_000)), Some(&rf(5)), Some(&b)), Action::UploadVersion);
+        assert_eq!(decide_file(BI, false, Some(&lf(8, 1_000)), Some(&rf(5)), Some(&b)), Action::UploadVersion);
         // 大小相同但修改時間明顯不同
-        assert_eq!(decide_file(BI, Some(&lf(5, 9_000)), Some(&rf(5)), Some(&b)), Action::UploadVersion);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 9_000)), Some(&rf(5)), Some(&b)), Action::UploadVersion);
         // 時間差在容許範圍內視為沒改
-        assert_eq!(decide_file(BI, Some(&lf(5, 2_500)), Some(&rf(5)), Some(&b)), Action::Noop);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 2_500)), Some(&rf(5)), Some(&b)), Action::Noop);
         // 僅下載模式不上傳本機改動
-        assert_eq!(decide_file(DOWN, Some(&lf(8, 1_000)), Some(&rf(5)), Some(&b)), Action::Noop);
+        assert_eq!(decide_file(DOWN, false, Some(&lf(8, 1_000)), Some(&rf(5)), Some(&b)), Action::Noop);
     }
 
     #[test]
     fn remote_edit_after_sync_downloads_over_unchanged_local() {
         let b = base(5, 1_000, 5);
-        assert_eq!(decide_file(BI, Some(&lf(5, 1_000)), Some(&rf(9)), Some(&b)), Action::DownloadOverwrite);
-        assert_eq!(decide_file(UP, Some(&lf(5, 1_000)), Some(&rf(9)), Some(&b)), Action::Noop);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 1_000)), Some(&rf(9)), Some(&b)), Action::DownloadOverwrite);
+        assert_eq!(decide_file(UP, false, Some(&lf(5, 1_000)), Some(&rf(9)), Some(&b)), Action::Noop);
     }
 
     #[test]
     fn both_changed_keeps_both_except_upload_only() {
         let b = base(5, 1_000, 5);
-        assert_eq!(decide_file(BI, Some(&lf(8, 9_000)), Some(&rf(9)), Some(&b)), Action::KeepBothThenDownload);
-        assert_eq!(decide_file(UP, Some(&lf(8, 9_000)), Some(&rf(9)), Some(&b)), Action::UploadVersion);
+        assert_eq!(decide_file(BI, false, Some(&lf(8, 9_000)), Some(&rf(9)), Some(&b)), Action::KeepBothThenDownload);
+        assert_eq!(decide_file(UP, false, Some(&lf(8, 9_000)), Some(&rf(9)), Some(&b)), Action::UploadVersion);
     }
 
     #[test]
     fn missing_files_are_restored_and_never_deleted() {
         let b = base(5, 1_000, 5);
         // 同步過後本機刪除：不刪 NAS，從 NAS 補回
-        assert_eq!(decide_file(BI, None, Some(&rf(5)), Some(&b)), Action::Download);
-        assert_eq!(decide_file(DOWN, None, Some(&rf(5)), Some(&b)), Action::Download);
-        assert_eq!(decide_file(UP, None, Some(&rf(5)), Some(&b)), Action::Noop);
+        assert_eq!(decide_file(BI, false, None, Some(&rf(5)), Some(&b)), Action::Download);
+        assert_eq!(decide_file(DOWN, false, None, Some(&rf(5)), Some(&b)), Action::Download);
+        assert_eq!(decide_file(UP, false, None, Some(&rf(5)), Some(&b)), Action::Noop);
         // 同步過後 NAS 刪除：不刪本機，重新上傳補回
-        assert_eq!(decide_file(BI, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
-        assert_eq!(decide_file(UP, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
-        assert_eq!(decide_file(DOWN, Some(&lf(5, 1_000)), None, Some(&b)), Action::Noop);
+        assert_eq!(decide_file(BI, false, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(UP, false, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(DOWN, false, Some(&lf(5, 1_000)), None, Some(&b)), Action::Noop);
+    }
+
+    #[test]
+    fn sync_deletes_propagates_only_unchanged_deletions() {
+        let b = base(5, 1_000, 5);
+        // 本機刪除：雙向與僅上傳會刪 NAS；NAS 端若在這之後被改過就改為補回
+        assert_eq!(decide_file(BI, true, None, Some(&rf(5)), Some(&b)), Action::DeleteRemote);
+        assert_eq!(decide_file(UP, true, None, Some(&rf(5)), Some(&b)), Action::DeleteRemote);
+        assert_eq!(decide_file(BI, true, None, Some(&rf(9)), Some(&b)), Action::Download);
+        assert_eq!(decide_file(DOWN, true, None, Some(&rf(5)), Some(&b)), Action::Download);
+        // 沒有同步紀錄的檔案（例如網站剛上傳的新檔案）絕不刪除
+        assert_eq!(decide_file(BI, true, None, Some(&rf(5)), None), Action::Download);
+        // NAS 刪除：只有雙向會刪本機；本機有改過就改為重新上傳
+        assert_eq!(decide_file(BI, true, Some(&lf(5, 1_000)), None, Some(&b)), Action::DeleteLocal);
+        assert_eq!(decide_file(BI, true, Some(&lf(8, 9_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(UP, true, Some(&lf(5, 1_000)), None, Some(&b)), Action::Upload);
+        assert_eq!(decide_file(BI, true, Some(&lf(5, 1_000)), None, None), Action::Upload);
+    }
+
+    #[test]
+    fn deleted_local_folder_is_removed_remotely_only_when_everything_inside_is_deleted() {
+        let mut baseline = Baseline::default();
+        baseline.files.insert("old/a.txt".to_string(), base(5, 1_000, 5));
+        baseline.dirs.insert("old".to_string());
+        let remote = vec![
+            rn("/mydrive/W/old", true, None),
+            rn("/mydrive/W/old/a.txt", false, Some(5)),
+        ];
+        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline);
+        let find = |plan: &[PlanItem], key: &str| plan.iter().find(|i| i.key == key).unwrap().action.clone();
+        assert_eq!(find(&plan, "old/a.txt"), Action::DeleteRemote);
+        assert_eq!(find(&plan, "old"), Action::DeleteRemoteDir);
+        // 資料夾最後才刪
+        assert_eq!(plan.last().unwrap().key, "old");
+
+        // 網站上同時新增了檔案：資料夾不能刪，該檔案與資料夾都補回本機
+        let mut remote = remote;
+        remote.push(rn("/mydrive/W/old/new.txt", false, Some(3)));
+        let plan = build_plan(BI, true, "/mydrive/W", &remote, &[], &baseline);
+        assert_eq!(find(&plan, "old/new.txt"), Action::Download);
+        assert_eq!(find(&plan, "old"), Action::CreateLocalDir);
+    }
+
+    #[test]
+    fn deleted_remote_folder_is_removed_locally_only_in_bidirectional_mode() {
+        let mut baseline = Baseline::default();
+        baseline.files.insert("old/a.txt".to_string(), base(5, 1_000, 5));
+        baseline.dirs.insert("old".to_string());
+        let local = vec![ln(&["old"], true, 0, 0), ln(&["old", "a.txt"], false, 5, 1_000)];
+        let plan = build_plan(BI, true, "/mydrive/W", &[], &local, &baseline);
+        let find = |plan: &[PlanItem], key: &str| plan.iter().find(|i| i.key == key).unwrap().action.clone();
+        assert_eq!(find(&plan, "old/a.txt"), Action::DeleteLocal);
+        assert_eq!(find(&plan, "old"), Action::DeleteLocalDir);
+
+        let plan = build_plan(UP, true, "/mydrive/W", &[], &local, &baseline);
+        assert_eq!(find(&plan, "old/a.txt"), Action::Upload);
+        assert_eq!(find(&plan, "old"), Action::CreateRemoteDir);
+    }
+
+    #[test]
+    #[ignore = "會把暫存檔放進 Windows 資源回收筒；手動執行：cargo test trash_local -- --ignored"]
+    fn trash_local_moves_a_file_to_the_recycle_bin() {
+        let dir = std::env::temp_dir().join(format!("synotrash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gone.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let item = PlanItem {
+            key: "gone.txt".to_string(),
+            is_dir: false,
+            rel_local: vec!["gone.txt".to_string()],
+            remote_path: "/mydrive/W/gone.txt".to_string(),
+            local: Some(LocalFile { size: meta.len(), mtime_ms: mtime_ms(&meta) }),
+            remote: None,
+            action: Action::DeleteLocal,
+            both_present: false,
+        };
+        // 內容被改過就不能刪
+        std::fs::write(&file, b"abcdef").unwrap();
+        assert!(trash_local(&file, &item).is_err());
+        assert!(file.exists());
+        let meta = std::fs::metadata(&file).unwrap();
+        let item = PlanItem { local: Some(LocalFile { size: meta.len(), mtime_ms: mtime_ms(&meta) }), ..item };
+        trash_local(&file, &item).unwrap();
+        assert!(!file.exists());
+        assert!(ensure_local_absent(&file).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn rn(path: &str, is_dir: bool, size: Option<u64>) -> RemoteNode {
@@ -1255,7 +1512,7 @@ mod tests {
             ln(&["new", "b.txt"], false, 7, 100),
             ln(&["SAME.txt"], false, 4, 100),
         ];
-        let plan = build_plan(BI, "/mydrive/W/", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W/", &remote, &local, &Baseline::default());
         let find = |key: &str| plan.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("missing {key}"));
 
         assert_eq!(find("docs").action, Action::CreateLocalDir);
@@ -1278,7 +1535,7 @@ mod tests {
         // NAS 上的 "a:b.txt" 下載時被清理成 "a_b.txt"，之後不可被當成新檔案再上傳一次
         let remote = vec![rn("/mydrive/W/a:b.txt", false, Some(4))];
         let local = vec![ln(&["a_b.txt"], false, 4, 100)];
-        let plan = build_plan(BI, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].action, Action::RecordBaseline);
         assert_eq!(plan[0].remote_path, "/mydrive/W/a:b.txt");
@@ -1333,7 +1590,7 @@ mod tests {
             ln(&["up.txt"], false, 9, 100),
             ln(&["newdir"], true, 0, 0),
         ];
-        let plan = build_plan(BI, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
         let (queue, positions) = build_queue("f", &plan);
         // same.txt 兩邊一致（只記錄）不進佇列；其餘三項：資料夾、下載、上傳
         assert_eq!(positions.len(), plan.len());
@@ -1375,7 +1632,7 @@ mod tests {
     fn plan_flags_file_vs_folder_name_clash() {
         let remote = vec![rn("/mydrive/W/x", true, None)];
         let local = vec![ln(&["x"], false, 1, 1)];
-        let plan = build_plan(BI, "/mydrive/W", &remote, &local, &Baseline::default());
+        let plan = build_plan(BI, false, "/mydrive/W", &remote, &local, &Baseline::default());
         assert_eq!(plan[0].action, Action::TypeMismatch);
     }
 
@@ -1383,10 +1640,10 @@ mod tests {
     fn one_way_modes_do_not_create_folders_on_the_other_side() {
         let remote = vec![rn("/mydrive/W/r", true, None)];
         let local = vec![ln(&["l"], true, 0, 0)];
-        let up = build_plan(UP, "/mydrive/W", &remote, &local, &Baseline::default());
+        let up = build_plan(UP, false, "/mydrive/W", &remote, &local, &Baseline::default());
         assert_eq!(up.iter().find(|i| i.key == "l").unwrap().action, Action::CreateRemoteDir);
         assert_eq!(up.iter().find(|i| i.key == "r").unwrap().action, Action::Noop);
-        let down = build_plan(DOWN, "/mydrive/W", &remote, &local, &Baseline::default());
+        let down = build_plan(DOWN, false, "/mydrive/W", &remote, &local, &Baseline::default());
         assert_eq!(down.iter().find(|i| i.key == "l").unwrap().action, Action::Noop);
         assert_eq!(down.iter().find(|i| i.key == "r").unwrap().action, Action::CreateLocalDir);
     }

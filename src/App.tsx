@@ -17,6 +17,7 @@ type SyncFolder = {
   remotePath: string;
   mode: SyncMode;
   paused: boolean;
+  syncDeletes?: boolean;
 };
 
 type AppConfig = {
@@ -48,6 +49,7 @@ type SyncProgress = {
   totalFiles: number;
   doneFiles: number;
   uploadedFiles: number;
+  deletedFiles: number;
   skippedFiles: number;
   conflictCopies: number;
   failedFiles: number;
@@ -114,6 +116,8 @@ const QUEUE_ACTIONS: Record<string, { arrow: string; label: string }> = {
   upload_version: { arrow: "↑", label: "上傳新版本（NAS 保留舊版）" },
   create_remote_dir: { arrow: "↑", label: "在 NAS 建立資料夾" },
   create_local_dir: { arrow: "↓", label: "在本機建立資料夾" },
+  delete_remote: { arrow: "✕", label: "刪除 NAS 上的項目（移到資源回收桶）" },
+  delete_local: { arrow: "✕", label: "刪除本機項目（移到資源回收筒）" },
   conflict: { arrow: "⚠", label: "名稱衝突（一邊是檔案、一邊是資料夾）" },
 };
 
@@ -597,9 +601,11 @@ function App() {
       if (!wasRunning || item.phase === "listing" || item.phase === "syncing") continue;
       const name = configRef.current?.syncFolders.find((f) => f.id === item.folderId)?.name ?? "資料夾";
       if (item.phase === "done" && item.failedFiles === 0) {
-        if (item.doneFiles + item.uploadedFiles > 0) {
+        if (item.doneFiles + item.uploadedFiles + item.deletedFiles > 0) {
           setMessage(
-            `「${name}」同步完成：下載 ${item.doneFiles} 個、上傳 ${item.uploadedFiles} 個檔案`,
+            `「${name}」同步完成：下載 ${item.doneFiles} 個、上傳 ${item.uploadedFiles} 個${
+              item.deletedFiles > 0 ? `、刪除 ${item.deletedFiles} 個` : ""
+            }檔案`,
           );
         }
       } else if (item.phase === "done") {
@@ -825,14 +831,21 @@ function App() {
     }
   }
 
-  function updateSyncFolder(id: string, patch: { mode?: SyncMode; paused?: boolean }) {
+  function updateSyncFolder(
+    id: string,
+    patch: { mode?: SyncMode; paused?: boolean; syncDeletes?: boolean },
+  ) {
     return runFolderAction(
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
-      patch.paused === undefined
-        ? "已更新同步模式。"
-        : patch.paused
-          ? "已暫停此資料夾的同步。"
-          : "已繼續同步此資料夾。",
+      patch.syncDeletes !== undefined
+        ? patch.syncDeletes
+          ? "已開啟「刪除也同步」，下一輪同步起生效。"
+          : "已關閉「刪除也同步」。"
+        : patch.paused === undefined
+          ? "已更新同步模式。"
+          : patch.paused
+            ? "已暫停此資料夾的同步。"
+            : "已繼續同步此資料夾。",
     );
   }
 
@@ -3636,12 +3649,38 @@ function App() {
                                 僅下載模式：本機新增或修改的檔案不會上傳到 NAS
                               </div>
                             ) : null}
+                            {folder.mode !== "download_only" ? (
+                              <label className="checkbox-row">
+                                <input
+                                  type="checkbox"
+                                  checked={folder.syncDeletes === true}
+                                  disabled={folderBusy}
+                                  onChange={(event) =>
+                                    updateSyncFolder(folder.id, {
+                                      syncDeletes: event.currentTarget.checked,
+                                    })
+                                  }
+                                />
+                                <span>
+                                  <strong>刪除也同步</strong>
+                                  <span className="cell-secondary">
+                                    {folder.mode === "upload_only"
+                                      ? "在本機刪除已同步過的檔案時，NAS 上的檔案會移到資源回收桶（可還原）"
+                                      : "任一邊刪除已同步過的檔案時，另一邊會移到資源回收桶/回收筒（可還原）；關閉時會把刪掉的檔案補回"}
+                                  </span>
+                                </span>
+                              </label>
+                            ) : null}
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
                               if (!dl) return null;
                               const running = dl.phase === "listing" || dl.phase === "syncing";
                               const handled =
-                                dl.doneFiles + dl.uploadedFiles + dl.skippedFiles + dl.failedFiles;
+                                dl.doneFiles +
+                                dl.uploadedFiles +
+                                dl.deletedFiles +
+                                dl.skippedFiles +
+                                dl.failedFiles;
                               const percent =
                                 dl.totalFiles > 0
                                   ? Math.min(100, Math.round((handled / dl.totalFiles) * 100))
@@ -3664,12 +3703,14 @@ function App() {
                                     {dl.phase === "listing"
                                       ? `正在比對 NAS 與本機檔案…（NAS 已發現 ${dl.totalFiles} 個檔案）`
                                       : dl.phase === "syncing"
-                                        ? `同步中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}（下載 ${dl.doneFiles}、上傳 ${dl.uploadedFiles}）`
+                                        ? `同步中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}（下載 ${dl.doneFiles}、上傳 ${dl.uploadedFiles}${dl.deletedFiles > 0 ? `、刪除 ${dl.deletedFiles}` : ""}）`
                                         : dl.phase === "cancelled"
                                           ? `已取消（已下載 ${dl.doneFiles}、已上傳 ${dl.uploadedFiles} 個檔案）`
                                           : dl.phase === "error"
                                             ? `同步失敗：${dl.lastError ?? "未知錯誤"}`
-                                            : `已同步：下載 ${dl.doneFiles} 個、上傳 ${dl.uploadedFiles} 個、無變動 ${dl.skippedFiles} 個${
+                                            : `已同步：下載 ${dl.doneFiles} 個、上傳 ${dl.uploadedFiles} 個${
+                                                dl.deletedFiles > 0 ? `、刪除 ${dl.deletedFiles} 個` : ""
+                                              }、無變動 ${dl.skippedFiles} 個${
                                                 dl.conflictCopies > 0
                                                   ? `、衝突副本 ${dl.conflictCopies} 個`
                                                   : ""

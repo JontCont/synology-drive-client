@@ -623,8 +623,9 @@ async fn update_sync_folder(
     id: String,
     mode: Option<String>,
     paused: Option<bool>,
+    sync_deletes: Option<bool>,
 ) -> Result<config::AppConfig, String> {
-    let cfg = config::update_folder(&app, &id, mode.clone(), paused)?;
+    let cfg = config::update_folder(&app, &id, mode.clone(), paused, sync_deletes)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
     if paused == Some(true) {

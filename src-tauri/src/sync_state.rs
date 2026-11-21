@@ -1,7 +1,7 @@
 //! 每個同步資料夾「上次同步完成時」的檔案紀錄。
 //! 有了它才能分辨「本機改了」「NAS 改了」「兩邊都改了」，進而決定上傳、下載或保留兩份。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ pub struct FileBase {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Baseline {
     pub files: HashMap<String, FileBase>,
+    /// 上次同步時兩邊都存在的資料夾；用來分辨「一邊刪除了資料夾」與「一邊新增了資料夾」
+    #[serde(default)]
+    pub dirs: HashSet<String>,
 }
 
 fn state_path<R: Runtime>(app: &AppHandle<R>, folder_id: &str) -> Result<PathBuf, String> {

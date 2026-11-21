@@ -67,6 +67,11 @@ pub trait AuthBackendAdapter: Send + Sync {
     fn create_remote_folder(&self, _remote_path: &str) -> Result<(), String> {
         Err("目前的認證方式不支援在 NAS 建立資料夾".to_string())
     }
+
+    /// 把 NAS 上的檔案或資料夾移到資源回收桶（不是永久刪除）
+    fn delete_remote_path(&self, _remote_path: &str) -> Result<(), String> {
+        Err("目前的認證方式不支援刪除 NAS 檔案".to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -648,6 +653,36 @@ impl DsmAuthAdapter {
         let body = response.body_mut().read_to_string().unwrap_or_default();
         parse_dsm_data_response(&body).map(|_| ())
     }
+
+    /// 先查出檔案編號與版本數，再以 `permanent=false` 移到 Drive 資源回收桶（DSM 以背景工作執行）
+    fn trash_drive_path(&self, origin: &str, sid: &str, path_param: &str) -> Result<(), DsmError> {
+        let info = self.call_entry_api(
+            origin,
+            sid,
+            &[
+                ("api", "SYNO.SynologyDrive.Files".to_string()),
+                ("version", "3".to_string()),
+                ("method", "get".to_string()),
+                ("path", path_param.to_string()),
+            ],
+        )?;
+        let file_id = match info.get("file_id") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => return Err(DsmError { code: -1 }),
+        };
+        let mut params = vec![
+            ("api", "SYNO.SynologyDrive.Files".to_string()),
+            ("version", "2".to_string()),
+            ("method", "delete".to_string()),
+            ("files", serde_json::json!([format!("id:{file_id}")]).to_string()),
+            ("permanent", "false".to_string()),
+        ];
+        if let Some(revisions) = info.get("revisions") {
+            params.push(("revisions", revisions.to_string()));
+        }
+        self.call_entry_api(origin, sid, &params).map(|_| ())
+    }
 }
 
 impl AuthBackendAdapter for DsmAuthAdapter {
@@ -817,6 +852,28 @@ impl AuthBackendAdapter for DsmAuthAdapter {
             result = self.make_drive_folder(&origin, &sid, &quoted);
         }
         result.map_err(|err| Self::describe_upload_failure(&err))
+    }
+
+    fn delete_remote_path(&self, remote_path: &str) -> Result<(), String> {
+        let (origin, sid) = self.current_session()?;
+        let normalized = remote_path.trim().trim_end_matches('/');
+        if !normalized.starts_with('/')
+            || normalized.matches('/').count() < 2
+            || normalized.split('/').any(|seg| seg == "..")
+        {
+            return Err("NAS 路徑格式不正確，拒絕刪除".to_string());
+        }
+        let mut result = self.trash_drive_path(&origin, &sid, normalized);
+        if matches!(&result, Err(e) if e.code != 119 && e.code != -2) {
+            let quoted = serde_json::to_string(normalized).unwrap_or_else(|_| normalized.to_string());
+            result = self.trash_drive_path(&origin, &sid, &quoted);
+        }
+        result.map_err(|err| match err.code {
+            -1 => "NAS 回應了無法辨識的內容（刪除 API 可能與此 DSM 版本不相容）".to_string(),
+            1002 | 1003 => "NAS 找不到此項目，或沒有刪除權限".to_string(),
+            code if code == 119 || code == -2 => Self::describe_failure(&err),
+            code => format!("NAS 回報刪除失敗（錯誤碼 {code}）"),
+        })
     }
 
     fn list_remote_entries(&self, path: &str) -> Result<Vec<RemoteEntry>, String> {
@@ -1068,6 +1125,13 @@ impl AuthState {
             return Err("請先登入 NAS".to_string());
         }
         self.adapter.create_remote_folder(remote_path)
+    }
+
+    pub fn delete_remote_path(&self, remote_path: &str) -> Result<(), String> {
+        if self.status()?.stage != "authenticated" {
+            return Err("請先登入 NAS".to_string());
+        }
+        self.adapter.delete_remote_path(remote_path)
     }
 
     pub fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
@@ -1552,6 +1616,29 @@ mod tests {
             Err(DsmError { code: -3 })
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trashing_a_path_looks_up_the_file_id_first() {
+        let (origin, requests) = spawn_mock_server(vec![
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":true,"data":{"file_id":"123456","revisions":3}}"#.to_vec(),
+            ),
+            ("200 OK", "application/json", "", br#"{"success":true,"data":{"async_task_id":"t"}}"#.to_vec()),
+            ("200 OK", "application/json", "", br#"{"success":true,"data":{}}"#.to_vec()),
+        ]);
+        let adapter = DsmAuthAdapter::new();
+        assert_eq!(adapter.trash_drive_path(&origin, "S", "/mydrive/x/a.txt"), Ok(()));
+        assert!(requests.recv().unwrap().starts_with("POST /webapi/entry.cgi"));
+        assert!(requests.recv().unwrap().starts_with("POST /webapi/entry.cgi"));
+        // 查不到 file_id 時不能送出刪除
+        assert_eq!(
+            adapter.trash_drive_path(&origin, "S", "/mydrive/x/b.txt"),
+            Err(DsmError { code: -1 })
+        );
     }
 
     #[test]

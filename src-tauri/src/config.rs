@@ -26,6 +26,9 @@ pub struct SyncFolder {
     pub mode: String,
     #[serde(default)]
     pub paused: bool,
+    /// 刪除也同步（僅「雙向」與「僅上傳」模式有效）：同步過的檔案在一邊被刪除時，另一邊會移到資源回收桶
+    #[serde(default)]
+    pub sync_deletes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +237,7 @@ fn migrate_legacy(config: &mut AppConfig) {
                 remote_path: remote,
                 mode,
                 paused: false,
+                sync_deletes: false,
             });
         }
     }
@@ -299,6 +303,7 @@ pub fn add_folder<R: Runtime>(
         remote_path: remote_path.trim().trim_end_matches('/').to_string(),
         mode: mode.to_string(),
         paused: false,
+        sync_deletes: false,
     });
     write_config(app, &config)?;
     Ok(config)
@@ -309,6 +314,7 @@ pub fn update_folder<R: Runtime>(
     id: &str,
     mode: Option<String>,
     paused: Option<bool>,
+    sync_deletes: Option<bool>,
 ) -> Result<AppConfig, String> {
     let mut config = load(app)?;
     let folder = config
@@ -324,6 +330,9 @@ pub fn update_folder<R: Runtime>(
     }
     if let Some(paused) = paused {
         folder.paused = paused;
+    }
+    if let Some(sync_deletes) = sync_deletes {
+        folder.sync_deletes = sync_deletes;
     }
     write_config(app, &config)?;
     Ok(config)
@@ -418,6 +427,7 @@ mod tests {
             remote_path: remote.to_string(),
             mode: SYNC_MODE_BIDIRECTIONAL.to_string(),
             paused: false,
+            sync_deletes: false,
         }
     }
 
