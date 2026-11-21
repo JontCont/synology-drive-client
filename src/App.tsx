@@ -682,7 +682,8 @@ function App() {
     try {
       const status = await invoke<SyncServiceStatus>("start_sync_service");
       setServiceStatus(status);
-      setMessage("同步服務已啟動。");
+      await refreshWatcherStatus().catch(() => undefined);
+      setMessage("同步服務已啟動（本機監看已一併啟動）。");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -697,7 +698,8 @@ function App() {
     try {
       const status = await invoke<SyncServiceStatus>("stop_sync_service");
       setServiceStatus(status);
-      setMessage("同步服務已停止。");
+      await refreshWatcherStatus().catch(() => undefined);
+      setMessage("同步服務已停止（本機監看已一併停止）。");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1808,13 +1810,6 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm btn-block"
-            onClick={() => setViewMode("login")}
-          >
-            切換至登入頁
-          </button>
           <div className="theme-switcher" role="group" aria-label="佈景主題切換">
             <button
               type="button"

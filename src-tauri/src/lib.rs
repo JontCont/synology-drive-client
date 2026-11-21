@@ -433,21 +433,48 @@ fn export_last_remote_probe_markdown(
 fn start_sync_service(
     app: tauri::AppHandle,
     sync_state: State<'_, sync_service::SyncServiceState>,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
 ) -> Result<sync_service::SyncServiceStatus, String> {
+    if auth_state.status()?.stage != "authenticated" {
+        return Err("請先登入後再啟動同步服務".to_string());
+    }
+
     let cfg = config::load(&app)?;
-    sync_state.start(
+    let local_sync_path = cfg.local_sync_path.unwrap_or_default();
+
+    // 同步服務依賴本機監看提供變更事件，因此一併啟動
+    let started_watcher = if watcher_state.status()?.running {
+        false
+    } else {
+        watcher_state.start(local_sync_path.clone())?;
+        true
+    };
+
+    match sync_state.start(
         app,
         cfg.poll_interval_seconds,
-        cfg.local_sync_path.unwrap_or_default(),
+        local_sync_path,
         cfg.remote_path.unwrap_or_default(),
-    )
+    ) {
+        Ok(status) => Ok(status),
+        Err(err) => {
+            if started_watcher {
+                let _ = watcher_state.stop();
+            }
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
 fn stop_sync_service(
     sync_state: State<'_, sync_service::SyncServiceState>,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
 ) -> Result<sync_service::SyncServiceStatus, String> {
-    sync_state.stop()
+    let status = sync_state.stop()?;
+    let _ = watcher_state.stop();
+    Ok(status)
 }
 
 #[tauri::command]

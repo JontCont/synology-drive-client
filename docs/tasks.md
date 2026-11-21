@@ -76,6 +76,11 @@
   - [x] P1-15c 設定頁「視窗解析度」卡片（兩個預設選項、即時套用並儲存、顯示目前視窗大小）
   - [x] P1-15d 版面配合：既有 auto-fit grid 在 compact 寬度自然變 KPI 2×2、卡片單欄（無需額外 media query）
   - [ ] P1-15e 驗收：用 `npm run tauri:dev` 實測兩個預設與參考截圖一致；重開後維持上次選擇
+- [ ] P1-16 同步服務與本機監看串接
+  - [x] P1-16a 啟動同步服務前需已登入；啟動時自動啟動本機監看，停止服務時一併停止
+  - [ ] P1-16b 補掃描 fallback 會對已完成的檔案無限重複入列（目前每 tick 都掃同一批路徑），需改為僅首次全量掃描 + 之後只吃 watcher 事件
+  - [ ] P1-16c Executor 仍為骨架（op 直接標 done，未真正上傳/下載），待 T2 Provider 定稿後接 RemoteProvider
+  - [ ] P1-16d 每 tick 只處理 1 筆 operation，需改為批次/連續處理直到佇列清空
 
 ## Phase 2（Files On-Demand）
 - [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）
