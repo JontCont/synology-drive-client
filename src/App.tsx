@@ -386,6 +386,18 @@ function getStageBadgeClass(stage: string | null | undefined): string {
   }
 }
 
+function requireHttpsHost(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("請輸入有效的 HTTPS 主機網址。");
+  }
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+    throw new Error("NAS 與區網位址都必須使用 HTTPS，且網址不可包含帳號或密碼。");
+  }
+}
+
 function App() {
   const { language, setLanguage, t } = useI18n();
   const hasTauriBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -446,6 +458,7 @@ function App() {
   const [viewMode, setViewMode] = useState<"login" | "dashboard">("login");
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
+  const [developmentToolsEnabled, setDevelopmentToolsEnabled] = useState(false);
   const [chartType, setChartType] = useState<"bar" | "line">("bar");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
@@ -642,6 +655,13 @@ function App() {
         .catch(() => setSnapshot(null)),
 
       refreshSyncQueue(),
+
+      invoke<boolean>("get_development_tools_enabled")
+        .then((enabled) => {
+          if (typeof enabled !== "boolean") throw new Error("開發工具能力回應格式不正確");
+          setDevelopmentToolsEnabled(enabled);
+        })
+        .catch((err) => setWarning(`無法確認開發工具能力：${String(err)}`)),
     ]).finally(() => {
       window.setTimeout(() => setInitialLoading(false), 320);
     });
@@ -1015,6 +1035,7 @@ function App() {
   async function testNasHost() {
     setHostTest({ loading: true, result: null });
     try {
+      requireHttpsHost(serverHost);
       const result = await invoke<NasProbeResult>("test_nas_host", { host: serverHost });
       setHostTest({ loading: false, result });
       if (serverHost.trim() === savedHost) {
@@ -1045,6 +1066,7 @@ function App() {
   async function testLanHost() {
     setLanTest({ loading: true, result: null });
     try {
+      requireHttpsHost(lanHost);
       const result = await invoke<NasProbeResult>("test_lan_host", { host: lanHost });
       setLanTest({ loading: false, result });
     } catch (err) {
@@ -1066,6 +1088,8 @@ function App() {
     setError(null);
     setMessage(null);
     try {
+      requireHttpsHost(trimmedHost);
+      if (includeLan && lanHost.trim()) requireHttpsHost(lanHost);
       const next = await invoke<AppConfig>("update_app_config", {
         update: {
           serverHost: trimmedHost,
@@ -1147,6 +1171,9 @@ function App() {
             </button>
           </div>
         </label>
+        <p className="cell-secondary">
+          區網連線也必須使用 HTTPS 與符合主機名稱的有效憑證；不支援 HTTP 或略過憑證驗證。
+        </p>
         <label className="form-field">
           <span>{t("login.lanWifiLabel")}</span>
           <input
@@ -1186,8 +1213,6 @@ function App() {
           rememberLogin,
         },
       });
-      setOtpCode("");
-      setPassword("");
       setAuthResult(
         status,
         status.stage === "authenticated"
@@ -1197,6 +1222,8 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1218,6 +1245,7 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1228,11 +1256,11 @@ function App() {
     try {
       const status = await invoke<AuthStatus>("logout");
       setAuthStatus(status);
-      setPassword("");
-      setOtpCode("");
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -1251,6 +1279,8 @@ function App() {
     } catch (err) {
       setError(String(err));
     } finally {
+      setPassword("");
+      setOtpCode("");
       setAuthLoading(false);
     }
   }
@@ -2261,7 +2291,7 @@ function App() {
               }`}
             />
           </button>
-          {!import.meta.env.PROD && (
+          {developmentToolsEnabled && !import.meta.env.PROD && (
             <button
               type="button"
               className={`nav-item ${activeTab === "devtools" ? "active" : ""}`}
@@ -4218,7 +4248,7 @@ function App() {
               </section>
             </article>
           )}
-          {!import.meta.env.PROD && !initialLoading && !tabSwitching && activeTab === "devtools" && (
+          {developmentToolsEnabled && !import.meta.env.PROD && !initialLoading && !tabSwitching && activeTab === "devtools" && (
             <div className="section-stack">
               <section className="card">
                 <div className="card-header">

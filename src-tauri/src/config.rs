@@ -382,6 +382,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         config.server_host = if server_host.trim().is_empty() {
             None
         } else {
+            crate::auth::normalize_dsm_origin(&server_host)?;
             Some(server_host.trim().to_string())
         };
     }

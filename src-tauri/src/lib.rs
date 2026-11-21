@@ -13,15 +13,25 @@ mod sync_state;
 mod sync_service;
 mod watcher;
 
+#[cfg(debug_assertions)]
 use crate::remote::RemoteProvider;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
-use serde::{Deserialize, Serialize};
+#[cfg(debug_assertions)]
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashSet;
+#[cfg(debug_assertions)]
 use std::fs;
+
+// Keep this query available even when development IPC handlers are compiled out.
+#[tauri::command]
+fn get_development_tools_enabled() -> bool {
+    cfg!(debug_assertions)
+}
 
 #[tauri::command]
 fn get_app_config(app: tauri::AppHandle) -> Result<config::AppConfig, String> {
@@ -173,6 +183,7 @@ fn purge_sync_operations(
     storage::purge_operations_by_stage(&app, &stage, limit.unwrap_or(100))
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn seed_demo_operations(
     app: tauri::AppHandle,
@@ -181,6 +192,7 @@ fn seed_demo_operations(
     storage::seed_demo_operations(&app, count.unwrap_or(5))
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn seed_fault_matrix_operations(
     app: tauri::AppHandle,
@@ -226,6 +238,7 @@ fn get_default_sync_root(app: tauri::AppHandle) -> Result<storage::SyncRootRow, 
     storage::get_default_sync_root(&app)
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeCase {
@@ -234,6 +247,7 @@ struct RemoteProbeCase {
     detail: String,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeResult {
@@ -243,6 +257,7 @@ struct RemoteProbeResult {
     cases: Vec<RemoteProbeCase>,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredRemoteProbeResult {
@@ -250,6 +265,7 @@ struct StoredRemoteProbeResult {
     result: RemoteProbeResult,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeReportFile {
@@ -257,6 +273,7 @@ struct RemoteProbeReportFile {
     content: String,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeHistoryItem {
@@ -267,12 +284,14 @@ struct RemoteProbeHistoryItem {
     report_path: String,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeHistoryIndex {
     items: Vec<RemoteProbeHistoryItem>,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteProbeMarkdownFile {
@@ -280,12 +299,14 @@ struct RemoteProbeMarkdownFile {
     content: String,
 }
 
+#[cfg(debug_assertions)]
 fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|e| format!("無法取得資料目錄：{e}"))
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
     let mut remote = remote::FakeRemote::new();
@@ -369,6 +390,7 @@ fn run_fake_remote_probe() -> Result<RemoteProbeResult, String> {
     })
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn run_and_store_fake_remote_probe(
     app: tauri::AppHandle,
@@ -415,6 +437,7 @@ fn run_and_store_fake_remote_probe(
     })
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn load_last_remote_probe_report(
     app: tauri::AppHandle,
@@ -432,6 +455,7 @@ fn load_last_remote_probe_report(
     }))
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn list_remote_probe_history(
     app: tauri::AppHandle,
@@ -455,6 +479,7 @@ fn list_remote_probe_history(
     Ok(items)
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn export_last_remote_probe_markdown(
     app: tauri::AppHandle,
@@ -873,6 +898,7 @@ struct PipelineBatchResult {
     message: String,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FaultMatrixRunResult {
@@ -880,6 +906,7 @@ struct FaultMatrixRunResult {
     batch: PipelineBatchResult,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FaultMatrixFastRunResult {
@@ -1022,6 +1049,7 @@ fn run_pipeline_batch(
     })
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn run_fault_matrix_once(
     app: tauri::AppHandle,
@@ -1035,6 +1063,7 @@ fn run_fault_matrix_once(
     })
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn force_due_retryable_operations(
     app: tauri::AppHandle,
@@ -1043,6 +1072,7 @@ fn force_due_retryable_operations(
     storage::force_due_retryable_operations(&app, limit.unwrap_or(100))
 }
 
+#[cfg(debug_assertions)]
 #[tauri::command]
 fn run_fault_matrix_fast(
     app: tauri::AppHandle,
@@ -1359,6 +1389,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_development_tools_enabled,
             get_app_config,
             update_app_config,
             set_tray_language,
@@ -1386,7 +1417,10 @@ pub fn run() {
             resolve_sync_conflict,
             get_conflict_status_counts,
             purge_sync_conflicts,
+            // Attributes here remove the dispatch arms, not just the functions/UI.
+            #[cfg(debug_assertions)]
             seed_demo_operations,
+            #[cfg(debug_assertions)]
             seed_fault_matrix_operations,
             list_sync_operations,
             get_operation_stage_counts,
@@ -1396,10 +1430,15 @@ pub fn run() {
             run_sync_cycle_once,
             sync_default_root_from_config,
             get_default_sync_root,
+            #[cfg(debug_assertions)]
             run_fake_remote_probe,
+            #[cfg(debug_assertions)]
             run_and_store_fake_remote_probe,
+            #[cfg(debug_assertions)]
             load_last_remote_probe_report,
+            #[cfg(debug_assertions)]
             list_remote_probe_history,
+            #[cfg(debug_assertions)]
             export_last_remote_probe_markdown,
             start_sync_service,
             stop_sync_service,
@@ -1411,8 +1450,11 @@ pub fn run() {
             scan_local_once_to_operations,
             run_pipeline_once,
             run_pipeline_batch,
+            #[cfg(debug_assertions)]
             run_fault_matrix_once,
+            #[cfg(debug_assertions)]
             run_fault_matrix_fast,
+            #[cfg(debug_assertions)]
             force_due_retryable_operations,
             get_auth_status,
             restore_saved_login,

@@ -1,92 +1,105 @@
-# Tauri + React + Typescript
+<p align="center">
+  <img src="public/app-logo.png" alt="Synology Drive Client Logo" width="96" height="96" />
+</p>
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+<h1 align="center">Synology Drive Client</h1>
 
-## Current desktop behavior
+<p align="center">
+  A lightweight cross-platform desktop sync client for Synology NAS Drive built with <strong>Tauri v2</strong>, <strong>Rust</strong>, and <strong>React</strong>.
+</p>
 
-- Single-instance app (opening a second instance focuses the existing window)
-- Closing the main window hides it to system tray instead of exiting
-- Tray menu:
-  - `開啟`: restore/focus main window
-  - `結束`: fully exit the app
-- Security baseline:
-  - default capability only (`core:default`)
-  - no opener capability/plugin
-  - CSP enabled in `src-tauri/tauri.conf.json`
-- Config skeleton:
-  - backend commands: `get_app_config`, `update_app_config`
-  - file location: app config directory `settings.json`
-  - initial fields: `localSyncPath`, `remotePath`, `pollIntervalSeconds`, `ingestBacklogLimit`
-  - frontend has a basic settings form for editing/saving these fields
-- Remote contract skeleton:
-  - `RemoteProvider` trait and in-memory `FakeRemote` in `src-tauri/src/remote.rs`
-  - includes basic list/stat/read/write/delete/move/mkdir operations for contract testing
-  - command: `run_fake_remote_probe` for contract smoke checks (mkdir/write/read/move/delete/not-found)
-  - command: `run_and_store_fake_remote_probe` writes probe report to app data (`remote-probe-last.json`)
-  - command: `load_last_remote_probe_report` reads last persisted probe report
-  - command: `list_remote_probe_history` lists stored probe history (newest first)
-  - command: `export_last_remote_probe_markdown` exports last probe report to markdown (`remote-probe-last.md`)
-- Auth skeleton:
-  - backend auth state machine (`idle -> waitingOtp -> authenticated` or `idle -> authenticated`) and replaceable `AuthBackendAdapter` trait in `src-tauri/src/auth.rs`
-  - commands: `get_auth_status`, `restore_saved_login`, `login_with_password`, `submit_otp`, `logout`
-  - challenge-based password login against real Synology DSM (`SYNO.API.Auth` at `<origin>/webapi/auth.cgi`, HTTPS only, certificate verified): step 1 sends `username` + `password`; DSM error 403 becomes `MfaRequired { challenge_id }`, and step 2 re-submits with `otp_code` (max 3 attempts per challenge). NAS host comes from `settings.json` `serverHost`.
-  - dedicated login page with `一般登入` and NAS `配置` tabs; only DSM account/password login with OTP when required is supported
-  - dashboard `設定檔` shows read-only account identity, a separate connection form block for NAS host, LAN host and Wi-Fi names (with connection tests), and window-size presets. Saving connection settings preserves the active login and does not navigate to the login page. Changing window size preserves unsaved connection edits. LAN configuration and window-size presets live here rather than in sync settings.
-  - developer Pipeline/Executor controls live in `同步設定`; the real sync queue stays in `操作佇列與監看`.
-  - overview status counts can be switched between Bar (default) and Line charts; both show the real sync queue's waiting/running/done/failed totals across all folders, refreshed every two seconds independently of table limits and folder/status filters, not background operation records or a time-series history
-  - queue counts include file and directory operations but exclude unchanged files, so they can differ from folder file-progress counts; queue read failures are displayed explicitly rather than as zero activity
-  - sync-folder paths stay on one line, abbreviate intermediate directories while retaining the root and last two levels, and expose the unmodified full path on hover
-  - removing a sync-folder pairing opens a confirmation modal; cancel/Escape leaves it unchanged, failed removal keeps the dialog open with an error, and local/NAS files are never deleted by this action
-  - sidebar `文件說明` provides an in-app guide to connection settings, remembered login, sync directions, deletion options, window sizing and tray behavior.
-  - `記住登入` (checked by default) stores only the DSM session and account/NAS metadata in Windows Credential Manager, never the password or OTP. Startup validates the session with a read-only Drive listing before restoring login and the existing configured sync behavior. Expired/revoked sessions or a changed NAS require login again; temporary connection errors retain the saved session for retry on the next launch. Logout clears the saved session. Credential-storage failures are shown explicitly.
-  - OIDC / SSO is not supported. Legacy OIDC settings are ignored when loading and omitted when saving; NAS host and sync-folder settings are preserved. No browser authorization, callback listener, or Application secret storage remains in the app.
-- Sync storage skeleton:
-  - SQLite schema bootstrap in `src-tauri/src/storage.rs`
-  - commands: `init_sync_storage`, `get_sync_storage_info`
-  - tables: `sync_roots`, `items`, `observations`, `baseline`, `tombstones`, `operations`, `conflicts`
-  - commands: `sync_default_root_from_config`, `get_default_sync_root`, `add_sync_conflict`, `list_sync_conflicts`, `resolve_sync_conflict`, `get_conflict_status_counts`, `purge_sync_conflicts`
-- Sync decision skeleton:
-  - three-way comparison model in `src-tauri/src/sync_model.rs`
-  - includes initial decision function (`decide_action`) and unit tests
-- Sync service skeleton:
-  - background loop state in `src-tauri/src/sync_service.rs`
-  - commands: `start_sync_service`, `stop_sync_service`, `get_sync_service_status`
-  - each tick runs ingest + one executor step (`storage::init` + watcher/scanner ingest + `executor::run_once`)
-  - status includes latest tick outcome (`lastMessage`, `lastOperationId`, `lastStage`, `lastError`) and counters (`queuedCount`, `ingestSkippedCount`, `processedCount`, `retryScheduledCount`, `failedCount`)
-  - ingest has backlog guard: when pending (`planned/processing/retryable`) reaches `ingestBacklogLimit`, skip new ingestion
-  - frontend panel for start/stop/status preview (auto refresh)
-- Local watcher skeleton:
-  - notify-based watcher state in `src-tauri/src/watcher.rs`
-  - commands: `start_local_watcher`, `stop_local_watcher`, `get_local_watcher_status`, `drain_watcher_events_to_operations`, `scan_local_once_to_operations`
-  - frontend panel for watcher start/stop/status preview (auto refresh)
-  - `run_pipeline_once` 會優先吃 watcher 事件，若無事件則自動 fallback 到 local scan
-  - `run_pipeline_batch` 可一次執行多步 executor（可設定 `max_steps`）
-- Operation queue skeleton:
-  - the legacy Operation table keeps the latest 20 records in a scrollable viewport capped at 360 px, with a sticky header; this display limit does not delete records
-  - SQLite operation enqueue/list in `src-tauri/src/storage.rs`
-  - commands: `enqueue_sync_operation`, `seed_demo_operations`, `seed_fault_matrix_operations`, `list_sync_operations`, `get_operation_stage_counts`, `retry_sync_operation`, `purge_sync_operations`
-  - frontend panel to add sample/retryable/hard-retry operations and preview recent rows (`lastError` / `nextRetryAt`)
-  - command: `run_fault_matrix_once` for one-shot seed + batch execution drill
-  - commands: `run_fault_matrix_fast`, `force_due_retryable_operations` for accelerated retry-path drill
-  - ingest path has de-dup guard: skip enqueue when same `scan_local_path` is already in `planned/processing/retryable`
-- Executor skeleton:
-  - single-step executor in `src-tauri/src/executor.rs`
-  - commands: `run_sync_executor_once`, `run_sync_cycle_once`, `run_pipeline_once`
-  - behavior (current skeleton): claim one `planned` (or due `retryable`) operation; supported types (`upload/download/delete/rename`) mark `done`, `upload_retry` first enters `retryable` then succeeds, `upload_retry_hard` reaches max attempts then marks `failed`, unsupported type marks `failed` with `last_error`; all outcomes are returned as structured `ExecutorRunResult` (not treated as system error)
-- Diagnostics:
-  - command: `get_system_snapshot`
-  - returns config/auth/storage/service/watcher summary, operation/conflict counts, and stage/status aggregates in one response
-- Modern Desktop UI:
-  - sidebar navigation (`總覽儀表板`, `操作佇列與監看`, `衝突管理`, `帳號與認證`, `同步設定與診斷`)
-  - KPI dashboard cards, stage-filtered operations table, conflict cards, and theme switcher (`自動` / `淺色` / `深色`)
-  - Facebook-style Skeleton Shimmer loading placeholders across initial boot, login/config transitions, tab switches, operation queue, conflicts, and system snapshot
+---
 
-## Validation command
+## Features
 
-- `npm run check` : runs frontend build + Rust `cargo check`
-- `npm run tauri:dev` : run app with Tauri runtime (required for `invoke` commands)
-- `npm run dev` : frontend-only mode (no Tauri bridge; backend commands unavailable)
+- **Flexible Folder Sync**
+  - Manage multiple local ↔ NAS folder pairs independently.
+  - Per-folder sync modes: **Bidirectional**, **Upload-only**, and **Download-only**.
+  - Optional **Sync Deletions** (moves deleted items to the recycle bin) for bidirectional and upload-only folders.
+  - Atomic downloads via `.synodl-part` temporary files and automatic retry handling.
+- **Secure Authentication & Session Persistence**
+  - Direct Synology DSM authentication (`SYNO.API.Auth`) over **HTTPS** with strict certificate verification.
+  - Built-in **2FA / OTP** challenge flow with zeroizing in-memory secret handling.
+  - **Remember Login** stores only the session token and NAS metadata in the OS Credential Manager (Windows Credential Manager via `keyring`)—never passwords or OTP codes.
+- **LAN Direct Transfer**
+  - Optional LAN endpoint configuration with Wi-Fi SSID filtering to bypass reverse-proxy upload size limits (e.g., Cloudflare 100 MB limit) when on your local network.
+- **Real-Time Watcher & SQLite State Engine**
+  - Instant local file change detection (`notify`) paired with a SQLite `baseline` three-way comparison engine (`operations`, `conflicts`, `tombstones`).
+  - Live operation queue, per-folder transfer progress, and a dedicated **Conflict Management** view.
+- **Desktop-First Experience**
+  - System tray integration (closing the window minimizes to tray instead of exiting).
+  - Configurable window resolution presets, Light / Dark / System themes, and in-app documentation.
+  - Desktop WebView lockdown (browser shortcuts, context menu, and accidental zoom disabled).
+  - Multi-language support (`English`, `繁體中文`, `简体中文`, `日本語`).
 
-## Recommended IDE Setup
+---
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Tech Stack
+
+| Layer | Technology |
+| --- | --- |
+| Desktop Runtime | [Tauri v2](https://v2.tauri.app/) (Rust) |
+| Frontend | React 19, TypeScript, Vite |
+| Local State | SQLite (`rusqlite` bundled) |
+| File Watching | `notify` v8 |
+| HTTP Client | `ureq` v3 |
+| Credential Storage | `keyring` v3 (`windows-native`) |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **Node.js** 22+
+- **Rust** stable toolchain (`rustup`)
+- **Linux only:** `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf`
+
+### Development
+
+```bash
+# Install frontend dependencies
+npm ci
+
+# Run the desktop app in development mode
+npm run tauri:dev
+```
+
+### Verification & Testing
+
+```bash
+# TypeScript + Vite build + Rust cargo check
+npm run check
+
+# Run Rust unit tests
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+### Production Build
+
+```bash
+npm run tauri build
+```
+
+---
+
+## CI/CD & Releases
+
+GitHub Actions workflows are configured under `.github/workflows/`:
+
+- **`ci.yml`**: Runs frontend build, `cargo check`, and `cargo test` across `ubuntu-22.04`, `windows-latest`, and `macos-latest` on pushes and PRs to `main`.
+- **`release.yml`**: Builds installers for Windows (`.msi`, `.exe`), macOS (`.dmg` for Apple Silicon & Intel), and Linux (`.deb`, `.rpm`, `.AppImage`) when pushing a `v*` tag or triggering manually.
+
+---
+
+## Documentation
+
+- [Security & Secrets Audit](docs/security-audit.md)
+- [Multi-Language (i18n) Plan](docs/i18n-plan.md)
+- [Architecture & Development Plan](docs/plan.md)
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
