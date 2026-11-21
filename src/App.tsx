@@ -637,6 +637,21 @@ function App() {
     }
   }
 
+  async function cancelOtp() {
+    setAuthLoading(true);
+    setError(null);
+    try {
+      const status = await invoke<AuthStatus>("logout");
+      setAuthStatus(status);
+      setPassword("");
+      setOtpCode("");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
   async function logout() {
     setAuthLoading(true);
     setError(null);
@@ -1215,12 +1230,67 @@ function App() {
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
 
+  const toastStack =
+    error || message || warning ? (
+      <div className="banner-stack" aria-live="polite">
+        {warning ? (
+          <div className="alert alert-warning" role="status">
+            <div className="alert-content">
+              <strong>注意：</strong>
+              <span>{warning}</span>
+            </div>
+            <button
+              type="button"
+              className="alert-close"
+              onClick={() => setWarning(null)}
+              aria-label="關閉警告訊息"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
+        {error ? (
+          <div className="alert alert-error" role="alert">
+            <div className="alert-content">
+              <strong>發生錯誤：</strong>
+              <span>{error}</span>
+            </div>
+            <button
+              type="button"
+              className="alert-close"
+              onClick={() => setError(null)}
+              aria-label="關閉錯誤訊息"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
+        {message ? (
+          <div className="alert alert-success" role="status">
+            <div className="alert-content">
+              <strong>操作成功：</strong>
+              <span>{message}</span>
+            </div>
+            <button
+              type="button"
+              className="alert-close"
+              onClick={() => setMessage(null)}
+              aria-label="關閉通知訊息"
+            >
+              ✕
+            </button>
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
   // ============================================================================
   // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + 配置 Block: Host / OIDC)
   // ============================================================================
   if (viewMode === "login" || !isAuthenticated) {
     return (
       <div className="login-screen">
+        {toastStack}
         {/* Ambient animated background orbs */}
         <div className="login-bg-decor" aria-hidden="true">
           <div className="login-bg-orb orb-1" />
@@ -1283,40 +1353,6 @@ function App() {
               </button>
             </div>
 
-            {/* Feedback Alerts inside Login Card */}
-            {error ? (
-              <div className="alert alert-error animate-pop" role="alert">
-                <div className="alert-content">
-                  <strong>錯誤：</strong>
-                  <span>{error}</span>
-                </div>
-                <button
-                  type="button"
-                  className="alert-close"
-                  onClick={() => setError(null)}
-                  aria-label="關閉錯誤"
-                >
-                  ✕
-                </button>
-              </div>
-            ) : null}
-
-            {message ? (
-              <div className="alert alert-success animate-pop" role="status">
-                <div className="alert-content">
-                  <span>{message}</span>
-                </div>
-                <button
-                  type="button"
-                  className="alert-close"
-                  onClick={() => setMessage(null)}
-                  aria-label="關閉訊息"
-                >
-                  ✕
-                </button>
-              </div>
-            ) : null}
-
             {/* Facebook-style Shimmer Skeleton when loading / switching login views */}
             {initialLoading || loginTabSwitching || authLoading || saving ? (
               <div className="fb-skeleton-container" aria-busy="true" aria-label="載入中">
@@ -1354,7 +1390,7 @@ function App() {
                     />
                     <span className="host-status-label">NAS 主機：</span>
                     <code className="mono host-status-value">
-                      {isHostConfigured ? savedHost : "尚未指定（預設本機模擬）"}
+                      {isHostConfigured ? savedHost : "尚未設定（請先至「配置」填寫）"}
                     </code>
                   </div>
                   <button
@@ -1366,8 +1402,7 @@ function App() {
                   </button>
                 </div>
 
-                {authStatus?.stage !== "waitingOtp" ? (
-                  <>
+                <>
                     <form className="form-stack" onSubmit={loginByPassword}>
                       <label className="form-field">
                         <span>DSM 帳號</span>
@@ -1407,53 +1442,7 @@ function App() {
                         OTP，驗證通過後才會進入系統。
                       </span>
                     </div>
-                  </>
-                ) : (
-                  /* Step 2: Challenge-based OTP Verification */
-                  <form className="login-step-box animate-step" onSubmit={submitOtp}>
-                    <div className="login-step-title">
-                      需要二階段驗證 (MFA Challenge)
-                    </div>
-                    <div className="cell-secondary">
-                      帳號：<strong>{authStatus.username}</strong>
-                      {authStatus.challengeId ? (
-                        <>
-                          {" "}
-                          · Challenge: <code className="mono">{authStatus.challengeId}</code>
-                        </>
-                      ) : null}
-                    </div>
-                    <label className="form-field">
-                      <span>6 位數 OTP 驗證碼</span>
-                      <input
-                        className="input"
-                        value={otpCode}
-                        onChange={(event) => setOtpCode(event.currentTarget.value)}
-                        placeholder="請輸入驗證器上的 6 位數字"
-                        inputMode="numeric"
-                        autoFocus
-                      />
-                    </label>
-                    <div className="button-row">
-                      <button
-                        type="submit"
-                        className="btn btn-primary btn-animated"
-                        style={{ flex: 1 }}
-                        disabled={authLoading}
-                      >
-                        <span>{authLoading ? "驗證中..." : "送出 OTP 驗證"}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={logout}
-                        disabled={authLoading}
-                      >
-                        返回重新登入
-                      </button>
-                    </div>
-                  </form>
-                )}
+                </>
 
                 {/* Conditional OIDC Login Button: ONLY shown when OIDC is configured! */}
                 {isOidcConfigured ? (
@@ -1714,6 +1703,60 @@ function App() {
             )}
           </div>
         </div>
+
+        {authStatus?.stage === "waitingOtp" ? (
+          <div className="modal-overlay" role="presentation">
+            <form
+              className="modal-dialog animate-pop"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="otp-dialog-title"
+              onSubmit={submitOtp}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && !authLoading) cancelOtp();
+              }}
+            >
+              <h2 id="otp-dialog-title" className="modal-title">
+                二階段驗證
+              </h2>
+              <p className="modal-desc">
+                帳號 <strong>{authStatus.username}</strong> 已啟用兩步驟驗證，請輸入驗證器上的 6
+                位數驗證碼。
+              </p>
+              <input
+                className="input otp-input mono"
+                value={otpCode}
+                onChange={(event) =>
+                  setOtpCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))
+                }
+                placeholder="000000"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                aria-label="6 位數 OTP 驗證碼"
+                autoFocus
+              />
+              <div className="button-row">
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                  disabled={authLoading || otpCode.length !== 6}
+                >
+                  {authLoading ? "驗證中..." : "驗證"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={cancelOtp}
+                  disabled={authLoading}
+                >
+                  取消
+                </button>
+              </div>
+            </form>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1955,59 +1998,7 @@ function App() {
           </div>
         </header>
 
-        {/* Toast notifications */}
-        {error || message || warning ? (
-          <div className="banner-stack" aria-live="polite">
-            {warning ? (
-              <div className="alert alert-warning" role="status">
-                <div className="alert-content">
-                  <strong>注意：</strong>
-                  <span>{warning}</span>
-                </div>
-                <button
-                  type="button"
-                  className="alert-close"
-                  onClick={() => setWarning(null)}
-                  aria-label="關閉警告訊息"
-                >
-                  ✕
-                </button>
-              </div>
-            ) : null}
-            {error ? (
-              <div className="alert alert-error" role="alert">
-                <div className="alert-content">
-                  <strong>發生錯誤：</strong>
-                  <span>{error}</span>
-                </div>
-                <button
-                  type="button"
-                  className="alert-close"
-                  onClick={() => setError(null)}
-                  aria-label="關閉錯誤訊息"
-                >
-                  ✕
-                </button>
-              </div>
-            ) : null}
-            {message ? (
-              <div className="alert alert-success" role="status">
-                <div className="alert-content">
-                  <strong>操作成功：</strong>
-                  <span>{message}</span>
-                </div>
-                <button
-                  type="button"
-                  className="alert-close"
-                  onClick={() => setMessage(null)}
-                  aria-label="關閉通知訊息"
-                >
-                  ✕
-                </button>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+        {toastStack}
 
         <main className="content-scroll">
           {/* Global Facebook-style Page Skeleton when switching tabs or initial hydration */}
