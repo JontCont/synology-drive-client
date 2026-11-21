@@ -1726,26 +1726,6 @@ function App() {
     ? pathRelation(syncFolders, nasPicker.path, normalizeRemotePath, (f) => f.remotePath)
     : null;
 
-  const setupSteps: {
-    label: string;
-    hint: string;
-    done: boolean;
-    action?: string;
-    target?: NavTab;
-  }[] = [
-    { label: "登入 NAS", hint: "已完成", done: isAuthenticated },
-    {
-      label: "新增同步資料夾",
-      hint:
-        syncFolders.length > 0
-          ? `已設定 ${syncFolders.length} 個同步資料夾`
-          : "在「同步設定」選擇本機與 NAS 資料夾及同步模式",
-      done: syncFolders.length > 0,
-      action: "前往設定",
-      target: "settings",
-    },
-  ];
-
   const toastStack =
     error || message || warning ? (
       <div className="banner-stack" aria-live="polite">
@@ -2465,44 +2445,6 @@ function App() {
           {/* TAB 1: OVERVIEW */}
           {!initialLoading && !tabSwitching && activeTab === "overview" && (
             <div className="section-stack">
-              {setupSteps.some((step) => !step.done) ? (
-                <section className="card setup-card">
-                  <div className="card-header">
-                    <div>
-                      <h2 className="card-title">開始設定同步</h2>
-                      <p className="card-desc">
-                        完成以下步驟後即可開始 NAS 與本機資料夾同步
-                      </p>
-                    </div>
-                  </div>
-                  <ol className="setup-steps">
-                    {setupSteps.map((step, index) => (
-                      <li
-                        key={step.label}
-                        className={`setup-step ${step.done ? "done" : ""}`}
-                      >
-                        <span className="setup-step-index" aria-hidden="true">
-                          {step.done ? "✓" : index + 1}
-                        </span>
-                        <div className="setup-step-body">
-                          <span className="setup-step-label">{step.label}</span>
-                          <span className="setup-step-hint">{step.hint}</span>
-                        </div>
-                        {!step.done && step.target ? (
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => switchDashboardTab(step.target!)}
-                          >
-                            {step.action}
-                          </button>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ol>
-                </section>
-              ) : null}
-
               {/* KPI Summary Grid */}
               <div className="kpi-grid">
                 <div className="kpi-card">
@@ -3801,7 +3743,7 @@ function App() {
                   </div>
                 </div>
 
-                <div className="action-groups">
+                <div className="action-groups service-action-groups">
                   <div className="action-group">
                     <span className="action-group-label">
                       同步服務：登入後自動啟動，通常不需要手動操作
