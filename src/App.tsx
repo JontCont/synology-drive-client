@@ -3310,23 +3310,26 @@ function App() {
                               </div>
                             ) : null}
                             {folder.mode !== "download_only" ? (
-                              <label className="checkbox-row">
-                                <input
-                                  type="checkbox"
-                                  checked={folder.syncDeletes === true}
-                                  disabled={folderBusy}
-                                  onChange={(event) =>
-                                    updateSyncFolder(folder.id, {
-                                      syncDeletes: event.currentTarget.checked,
-                                    })
-                                  }
-                                />
-                                <span>
-                                  <strong>刪除也同步</strong>
-                                  <span className="cell-secondary">
-                                    {folder.mode === "upload_only"
-                                      ? "在本機刪除已同步過的檔案時，NAS 上的檔案會移到資源回收桶（可還原）"
-                                      : "任一邊刪除已同步過的檔案時，另一邊會移到資源回收桶/回收筒（可還原）；關閉時會把刪掉的檔案補回"}
+                              <div className="form-field">
+                                <span>同步刪除</span>
+                                <label className="checkbox-row">
+                                  <input
+                                    type="checkbox"
+                                    checked={folder.syncDeletes === true}
+                                    disabled={folderBusy}
+                                    onChange={(event) =>
+                                      updateSyncFolder(folder.id, {
+                                        syncDeletes: event.currentTarget.checked,
+                                      })
+                                    }
+                                  />
+                                  <span>
+                                    <strong>刪除也同步</strong>
+                                    <span className="cell-secondary">
+                                      {folder.mode === "upload_only"
+                                        ? "在本機刪除已同步過的檔案時，NAS 上的檔案會移到資源回收桶（可還原）"
+                                        : "任刪除已同步過的檔案時，另邊會移到回收筒"}
+                                    </span>
                                   </span>
                                 </span>
                               </label>
