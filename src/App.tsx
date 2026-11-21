@@ -2939,7 +2939,12 @@ function App() {
                     ))}
                   </div>
                 ) : filteredOperations.length > 0 ? (
-                  <div className="table-wrapper">
+                  <div
+                    className="table-wrapper operation-table-scroll"
+                    role="region"
+                    aria-label="操作佇列清單"
+                    tabIndex={0}
+                  >
                     <table className="modern-table">
                       <thead>
                         <tr>

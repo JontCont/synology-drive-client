@@ -1306,6 +1306,17 @@ body {
   border-radius: 10px;
 }
 
+.operation-table-scroll {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.operation-table-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 .modern-table {
   width: 100%;
   border-collapse: collapse;
