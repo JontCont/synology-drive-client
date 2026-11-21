@@ -54,6 +54,19 @@ pub struct AppConfig {
     /// 只在連上這些 Wi-Fi 時使用區網位址；留空表示只要連得到區網位址就使用
     #[serde(default)]
     pub lan_wifi_names: Vec<String>,
+    /// Interface language ("system" | "zh-TW" | "zh-CN" | "en" | "ja")
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+pub const DEFAULT_LANGUAGE: &str = "en";
+
+fn default_language() -> String {
+    DEFAULT_LANGUAGE.to_string()
+}
+
+pub fn is_valid_language(lang: &str) -> bool {
+    matches!(lang, "system" | "zh-TW" | "zh-CN" | "en" | "ja")
 }
 
 pub const MAX_REMOTE_CHECK_MINUTES: u32 = 24 * 60;
@@ -106,6 +119,7 @@ pub struct AppConfigUpdate {
     /// 空字串代表清除
     pub lan_host: Option<String>,
     pub lan_wifi_names: Option<Vec<String>>,
+    pub language: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -124,6 +138,7 @@ impl Default for AppConfig {
             remote_check_minutes: default_remote_check_minutes(),
             lan_host: None,
             lan_wifi_names: Vec::new(),
+            language: default_language(),
         }
     }
 }
@@ -414,6 +429,13 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         config.window_preset = window_preset;
     }
 
+    if let Some(language) = update.language {
+        if !is_valid_language(&language) {
+            return Err(format!("不支援的介面語言：{language}"));
+        }
+        config.language = language;
+    }
+
     write_config(app, &config)?;
     Ok(config)
 }
@@ -516,5 +538,16 @@ mod tests {
         assert_eq!(window_preset_size(WINDOW_PRESET_WIDE), Some((1160.0, 768.0)));
         assert_eq!(window_preset_size(WINDOW_PRESET_COMPACT), Some((930.0, 680.0)));
         assert_eq!(window_preset_size("huge"), None);
+    }
+
+    #[test]
+    fn language_defaults_to_en_and_validates_allowed_values() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.language, "en");
+        for lang in ["system", "zh-TW", "zh-CN", "en", "ja"] {
+            assert!(is_valid_language(lang));
+        }
+        assert!(!is_valid_language("fr"));
+        assert!(!is_valid_language(""));
     }
 }

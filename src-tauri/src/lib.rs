@@ -1210,6 +1210,7 @@ async fn apply_window_preset(
             remote_check_minutes: None,
             lan_host: None,
             lan_wifi_names: None,
+            language: None,
         },
     )
 }
@@ -1250,6 +1251,86 @@ pub fn notify_if_background<R: Runtime>(app: &tauri::AppHandle<R>, title: &str, 
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
+#[cfg(target_os = "windows")]
+fn system_locale_tag() -> Option<String> {
+    unsafe extern "system" {
+        fn GetUserDefaultLocaleName(lp_locale_name: *mut u16, cch_locale_name: i32) -> i32;
+    }
+    let mut buf = [0u16; 85];
+    // SAFETY: `buf` is a valid writable buffer of 85 UTF-16 code units.
+    let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+    if len > 1 {
+        Some(String::from_utf16_lossy(&buf[..(len as usize - 1)]))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_locale_tag() -> Option<String> {
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .ok()
+}
+
+fn resolve_tray_language(lang: &str) -> &'static str {
+    match lang {
+        "zh-TW" => "zh-TW",
+        "zh-CN" => "zh-CN",
+        "en" => "en",
+        "ja" => "ja",
+        _ => {
+            let Some(raw) = system_locale_tag() else {
+                return "en";
+            };
+            let normalized = raw.trim().replace('_', "-").to_lowercase();
+            if normalized.starts_with("zh-cn")
+                || normalized.starts_with("zh-sg")
+                || normalized.starts_with("zh-hans")
+            {
+                "zh-CN"
+            } else if normalized.starts_with("zh") {
+                "zh-TW"
+            } else if normalized.starts_with("ja") {
+                "ja"
+            } else {
+                "en"
+            }
+        }
+    }
+}
+
+fn tray_labels(lang: &str) -> (&'static str, &'static str) {
+    match resolve_tray_language(lang) {
+        "zh-TW" => ("開啟", "結束"),
+        "zh-CN" => ("打开", "退出"),
+        "ja" => ("開く", "終了"),
+        _ => ("Open", "Quit"),
+    }
+}
+
+fn build_tray_menu<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    lang: &str,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    let (open_label, quit_label) = tray_labels(lang);
+    let open = MenuItemBuilder::with_id("open", open_label).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", quit_label).build(app)?;
+    MenuBuilder::new(app).items(&[&open, &quit]).build()
+}
+
+#[tauri::command]
+fn set_tray_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    if !config::is_valid_language(&language) {
+        return Err(format!("不支援的介面語言：{language}"));
+    }
+    let menu = build_tray_menu(&app, &language).map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1264,9 +1345,12 @@ pub fn run() {
         .manage(folder_sync::SyncRunState::new())
         .manage(cloud_status::CloudStatusState::new())
         .setup(|app| {
-            let open = MenuItemBuilder::with_id("open", "開啟").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "結束").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&open, &quit]).build()?;
+            let loaded_cfg = config::load(app.handle()).ok();
+            let tray_lang = loaded_cfg
+                .as_ref()
+                .map(|c| c.language.as_str())
+                .unwrap_or(config::DEFAULT_LANGUAGE);
+            let menu = build_tray_menu(app.handle(), tray_lang)?;
 
             TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
@@ -1288,7 +1372,7 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            if let Ok(cfg) = config::load(app.handle()) {
+            if let Some(cfg) = loaded_cfg {
                 let _ = apply_window_preset_size(app.handle(), &cfg.window_preset);
             }
 
@@ -1308,6 +1392,7 @@ pub fn run() {
             get_development_tools_enabled,
             get_app_config,
             update_app_config,
+            set_tray_language,
             apply_window_preset,
             pick_local_folder,
             add_sync_folder,
