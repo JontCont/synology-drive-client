@@ -864,8 +864,8 @@ function App() {
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
       patch.syncDeletes !== undefined
         ? patch.syncDeletes
-          ? "已開啟「刪除也同步」，下一輪同步起生效。"
-          : "已關閉「刪除也同步」。"
+          ? "已開啟「同步刪除」，下一輪同步起生效。"
+          : "已關閉「同步刪除」。"
         : patch.paused === undefined
           ? "已更新同步模式。"
           : patch.paused
@@ -3311,7 +3311,6 @@ function App() {
                             ) : null}
                             {folder.mode !== "download_only" ? (
                               <div className="form-field">
-                                <span>同步刪除</span>
                                 <label className="checkbox-row">
                                   <input
                                     type="checkbox"
@@ -3324,7 +3323,7 @@ function App() {
                                     }
                                   />
                                   <span>
-                                    <strong>刪除也同步</strong>
+                                    <strong>同步刪除</strong>
                                     <span className="cell-secondary">
                                       {folder.mode === "upload_only"
                                         ? "在本機刪除已同步過的檔案時，NAS 上的檔案會移到資源回收桶（可還原）"
@@ -4020,7 +4019,7 @@ function App() {
                   <li>雙向同步：本機與 NAS 的新增及修改互相同步。</li>
                   <li>僅上傳：將本機的新增及修改傳到 NAS，不下載。</li>
                   <li>僅下載：將 NAS 的變更下載到本機，不上傳。</li>
-                  <li>「刪除也同步」預設關閉；啟用前請確認同步方向與資料夾範圍。</li>
+                  <li>「同步刪除」預設關閉；啟用前請確認同步方向與資料夾範圍。</li>
                   <li>發生同步衝突時，到「同步衝突管理」確認檔案版本再處理。</li>
                 </ul>
               </section>
