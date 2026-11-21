@@ -249,6 +249,7 @@ function App() {
   const [tabSwitching, setTabSwitching] = useState(false);
   const [loginTabSwitching, setLoginTabSwitching] = useState(false);
   const [retryOpId, setRetryOpId] = useState("");
+  const isAuthenticated = authStatus?.stage === "authenticated";
 
   useEffect(() => {
     const rootEl = document.documentElement;
@@ -353,6 +354,15 @@ function App() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (viewMode === "dashboard" && !isAuthenticated) {
+      setViewMode("login");
+      if (!initialLoading) {
+        setError("請先登入後再進入系統。");
+      }
+    }
+  }, [viewMode, isAuthenticated, initialLoading]);
 
   // Whether Host and OIDC are currently configured in saved config
   const savedHost = config?.serverHost?.trim() || "";
@@ -1125,11 +1135,18 @@ function App() {
     stageFilter === "all"
       ? operations
       : operations.filter((op) => op.stage === stageFilter);
+  const stageOrder = ["planned", "processing", "retryable", "done", "failed"];
+  const stageCountMap = new Map(operationStageCounts.map((it) => [it.stage, it.count]));
+  const overviewChartData = stageOrder.map((stage) => ({
+    label: stage,
+    value: stageCountMap.get(stage) ?? 0,
+  }));
+  const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
 
   // ============================================================================
   // VIEW 1: DEDICATED LOGIN PAGE (一般登入 + 配置 Block: Host / OIDC)
   // ============================================================================
-  if (viewMode === "login") {
+  if (viewMode === "login" || !isAuthenticated) {
     return (
       <div className="login-screen">
         {/* Ambient animated background orbs */}
@@ -1138,71 +1155,6 @@ function App() {
           <div className="login-bg-orb orb-2" />
           <div className="login-bg-orb orb-3" />
         </div>
-
-        {/* Top bar on login screen */}
-        <header className="login-topbar">
-          <div className="brand">
-            <div className="brand-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                />
-              </svg>
-            </div>
-            <div className="brand-text">
-              <span className="brand-title">Synology Drive Client</span>
-              <span className="brand-subtitle">Windows Desktop Sync</span>
-            </div>
-          </div>
-
-          <div className="login-topbar-actions">
-            <div className="theme-switcher" role="group" aria-label="佈景主題切換">
-              <button
-                type="button"
-                className={theme === "system" ? "active" : ""}
-                onClick={() => setTheme("system")}
-              >
-                自動
-              </button>
-              <button
-                type="button"
-                className={theme === "light" ? "active" : ""}
-                onClick={() => setTheme("light")}
-              >
-                淺色
-              </button>
-              <button
-                type="button"
-                className={theme === "dark" ? "active" : ""}
-                onClick={() => setTheme("dark")}
-              >
-                深色
-              </button>
-            </div>
-
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={triggerSkeletonPreview}
-              title="預覽 Facebook 骨架屏載入動畫"
-            >
-              預覽載入動畫
-            </button>
-
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={() => {
-                setViewMode("dashboard");
-                triggerSkeletonPreview();
-              }}
-            >
-              進入同步主控台 →
-            </button>
-          </div>
-        </header>
 
         <div className="login-center">
           <div className={`login-card ${loginTab === "oidc-config" ? "login-card-wide" : ""}`}>
@@ -1800,7 +1752,7 @@ function App() {
                 d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
               />
             </svg>
-            <span>帳號與認證</span>
+            <span>設定檔</span>
             <span
               className={`status-dot-sm ${
                 authStatus?.stage === "authenticated" ? "status-online" : "status-idle"
@@ -1872,7 +1824,7 @@ function App() {
               {activeTab === "overview" && "總覽儀表板"}
               {activeTab === "operations" && "操作佇列與本機監看"}
               {activeTab === "conflicts" && "同步衝突管理"}
-              {activeTab === "auth" && "NAS 帳號與 OIDC 認證狀態"}
+              {activeTab === "auth" && "設定檔"}
               {activeTab === "settings" && "同步設定、資料庫與系統快照"}
             </h1>
             <p className="page-subtitle">
@@ -1916,25 +1868,26 @@ function App() {
                 前往登入頁
               </button>
             )}
-            {serviceStatus?.running ? (
-              <button
-                type="button"
-                className="btn btn-outline-danger btn-sm"
-                onClick={stopService}
-                disabled={serviceLoading}
-              >
-                停止同步服務
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={startService}
-                disabled={serviceLoading}
-              >
-                啟動同步服務
-              </button>
-            )}
+            {activeTab !== "overview" &&
+              (serviceStatus?.running ? (
+                <button
+                  type="button"
+                  className="btn btn-outline-danger btn-sm"
+                  onClick={stopService}
+                  disabled={serviceLoading}
+                >
+                  停止同步服務
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={startService}
+                  disabled={serviceLoading}
+                >
+                  啟動同步服務
+                </button>
+              ))}
           </div>
         </header>
 
@@ -2087,6 +2040,31 @@ function App() {
                 </div>
               </div>
 
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">同步狀態圖表</h2>
+                    <p className="card-desc">總覽僅提供狀態觀察，控制操作請至其他分頁。</p>
+                  </div>
+                </div>
+                <div className="status-chart">
+                  {overviewChartData.map((item) => (
+                    <div key={item.label} className="status-chart-row">
+                      <span className="status-chart-label">{item.label}</span>
+                      <div className="status-chart-track">
+                        <div
+                          className="status-chart-bar"
+                          style={{
+                            width: `${Math.round((item.value / overviewChartMax) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="status-chart-value">{item.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
               {/* Sync Service & Watcher Control Cards */}
               <div className="two-col-grid">
                 <section className="card">
@@ -2152,27 +2130,18 @@ function App() {
                   <div className="button-row">
                     <button
                       type="button"
-                      className="btn btn-primary"
-                      onClick={startService}
-                      disabled={serviceLoading || serviceStatus?.running}
-                    >
-                      {serviceLoading ? "處理中..." : "啟動同步服務"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={stopService}
-                      disabled={serviceLoading || !serviceStatus?.running}
-                    >
-                      停止服務
-                    </button>
-                    <button
-                      type="button"
                       className="btn btn-ghost"
                       onClick={refreshServiceStatus}
                       disabled={serviceLoading}
                     >
                       重新整理
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setActiveTab("operations")}
+                    >
+                      前往操作頁控制 →
                     </button>
                   </div>
                 </section>
@@ -2216,56 +2185,18 @@ function App() {
                   <div className="button-row">
                     <button
                       type="button"
-                      className="btn btn-primary"
-                      onClick={startWatcher}
-                      disabled={watcherLoading || watcherStatus?.running}
-                    >
-                      啟動本機監看
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={stopWatcher}
-                      disabled={watcherLoading || !watcherStatus?.running}
-                    >
-                      停止監看
-                    </button>
-                    <button
-                      type="button"
                       className="btn btn-ghost"
                       onClick={refreshWatcherStatus}
                       disabled={watcherLoading}
                     >
                       重新整理
                     </button>
-                  </div>
-
-                  <div className="divider" />
-
-                  <div className="button-row">
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
-                      onClick={runPipelineOnce}
-                      disabled={opsLoading}
+                      onClick={() => setActiveTab("operations")}
                     >
-                      單次 Pipeline
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={runPipelineBatch}
-                      disabled={opsLoading}
-                    >
-                      批次 Pipeline (10步)
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={scanLocalOnce}
-                      disabled={opsLoading}
-                    >
-                      手動補掃描入列
+                      前往操作頁控制 →
                     </button>
                   </div>
                 </section>
@@ -2349,18 +2280,9 @@ function App() {
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
-                      onClick={initStorage}
-                      disabled={authLoading}
+                      onClick={() => setActiveTab("settings")}
                     >
-                      初始化同步資料庫
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={syncDefaultRoot}
-                      disabled={opsLoading}
-                    >
-                      同步設定至 Default Root
+                      前往設定與診斷 →
                     </button>
                   </div>
                 </section>
@@ -2392,6 +2314,28 @@ function App() {
                 </div>
 
                 <div className="action-groups">
+                  <div className="action-group">
+                    <span className="action-group-label">本機監看 (Watcher)</span>
+                    <div className="button-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={startWatcher}
+                        disabled={watcherLoading || watcherStatus?.running}
+                      >
+                        啟動本機監看
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={stopWatcher}
+                        disabled={watcherLoading || !watcherStatus?.running}
+                      >
+                        停止監看
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="action-group">
                     <span className="action-group-label">事件入列與執行</span>
                     <div className="button-row">
@@ -2775,7 +2719,7 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">目前認證與 OIDC 配置狀態</h2>
+                    <h2 className="card-title">設定檔</h2>
                     <p className="card-desc">檢視當前登入身分，或切換至獨立登入頁進行一般登入與 OIDC 配置</p>
                   </div>
                   <div className="button-row">
