@@ -26,6 +26,7 @@ type AppConfig = {
   ingestBacklogLimit: number;
   oidc?: OidcConfig;
   windowPreset?: "wide" | "compact";
+  explorerStatusIcons?: boolean;
 };
 
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
@@ -582,6 +583,9 @@ function App() {
     invoke<LocalWatcherStatus>("ensure_local_watcher")
       .then((status) => setWatcherStatus(status))
       .catch((err) => setWarning(`本機監看未能自動啟動：${String(err)}`));
+    invoke("ensure_explorer_icons").catch((err) =>
+      setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+    );
   }, [isAuthenticated]);
 
   // Whether Host and OIDC are currently configured in saved config
@@ -670,12 +674,34 @@ function App() {
       setSyncRoot(null);
       setMessage(successMessage);
       await refreshWatcherStatus().catch(() => undefined);
+      await invoke("ensure_explorer_icons").catch((err) =>
+        setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+      );
       return true;
     } catch (err) {
       setError(String(err));
       return false;
     } finally {
       setFolderBusy(false);
+    }
+  }
+
+  async function toggleExplorerIcons(enabled: boolean) {
+    setError(null);
+    try {
+      applyConfigToState(
+        await invoke<AppConfig>("update_app_config", {
+          update: { explorerStatusIcons: enabled },
+        }),
+      );
+      if (enabled) {
+        await invoke("ensure_explorer_icons").catch((err) =>
+          setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+        );
+      }
+      setMessage(enabled ? "已啟用檔案總管同步狀態圖示。" : "已關閉檔案總管同步狀態圖示。");
+    } catch (err) {
+      setError(String(err));
     }
   }
 
@@ -3654,7 +3680,21 @@ function App() {
 
               <section className="card">
                 <h2 className="card-title">進階設定</h2>
-                <p className="card-desc">輪詢間隔與佇列保護上限（所有資料夾共用）</p>
+                <p className="card-desc">輪詢間隔、佇列保護上限與檔案總管整合</p>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={config?.explorerStatusIcons !== false}
+                    disabled={!config}
+                    onChange={(event) => toggleExplorerIcons(event.currentTarget.checked)}
+                  />
+                  <span>
+                    <strong>在檔案總管顯示同步狀態圖示</strong>
+                    <span className="cell-secondary">
+                      綠色勾＝已同步、同步箭頭＝同步中。會把同步資料夾註冊為 Windows 同步根；關閉後會解除註冊。
+                    </span>
+                  </span>
+                </label>
                 {config ? (
                   <form
                     className="form-stack"

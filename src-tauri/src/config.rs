@@ -48,6 +48,13 @@ pub struct AppConfig {
     pub oidc: OidcConfig,
     #[serde(default = "default_window_preset")]
     pub window_preset: String,
+    /// 在檔案總管顯示同步狀態圖示（需將同步資料夾註冊為 Windows 同步根）
+    #[serde(default = "default_true")]
+    pub explorer_status_icons: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub const SYNC_MODE_BIDIRECTIONAL: &str = "bidirectional";
@@ -85,6 +92,7 @@ pub struct AppConfigUpdate {
     pub ingest_backlog_limit: Option<u32>,
     pub oidc: Option<OidcConfig>,
     pub window_preset: Option<String>,
+    pub explorer_status_icons: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -99,6 +107,7 @@ impl Default for AppConfig {
             ingest_backlog_limit: 200,
             oidc: OidcConfig::default(),
             window_preset: default_window_preset(),
+            explorer_status_icons: true,
         }
     }
 }
@@ -338,6 +347,10 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         } else {
             Some(server_host.trim().to_string())
         };
+    }
+
+    if let Some(enabled) = update.explorer_status_icons {
+        config.explorer_status_icons = enabled;
     }
 
     if let Some(window_preset) = update.window_preset {

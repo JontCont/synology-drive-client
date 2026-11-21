@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-use crate::{auth, config, storage};
+use crate::{auth, cloud_status, config, storage};
 
 const PHASE_LISTING: &str = "listing";
 const PHASE_DOWNLOADING: &str = "downloading";
@@ -323,6 +323,13 @@ fn run_download(
 
     // 2) 逐一下載
     state.update(&folder.id, |p| p.phase = PHASE_DOWNLOADING.to_string());
+    // 檔案總管的狀態圖示：開始時資料夾顯示「同步中」，每個檔案完成後立即顯示「已同步」
+    let show_icons = app
+        .state::<cloud_status::CloudStatusState>()
+        .is_enabled(&folder.id);
+    if show_icons {
+        cloud_status::mark_directories(&local_root, false);
+    }
     let mut consecutive_failures = 0u32;
     for (index, entry) in files.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
@@ -330,7 +337,13 @@ fn run_download(
         }
         state.update(&folder.id, |p| p.current_file = Some(entry.path.clone()));
 
-        match download_one(app, &auth, folder, &local_root, &remote_root, entry, index) {
+        let outcome = download_one(app, &auth, folder, &local_root, &remote_root, entry, index);
+        if show_icons && outcome.is_ok() {
+            if let Some(path) = local_path_for(&local_root, &remote_root, &entry.path) {
+                cloud_status::mark_file(&path, true);
+            }
+        }
+        match outcome {
             Ok(FileOutcome::Downloaded { bytes, conflict_copy }) => {
                 consecutive_failures = 0;
                 state.update(&folder.id, |p| {
@@ -364,6 +377,18 @@ fn run_download(
                     ));
                 }
             }
+        }
+    }
+    // 全部成功才把資料夾標成「已同步」；有失敗時保留「同步中」提醒尚未完成
+    if show_icons && !cancel.load(Ordering::SeqCst) {
+        let failed = state
+            .snapshot()
+            .iter()
+            .find(|p| p.folder_id == folder.id)
+            .map(|p| p.failed_files)
+            .unwrap_or(0);
+        if failed == 0 {
+            cloud_status::mark_directories(&local_root, true);
         }
     }
     Ok(())
