@@ -1674,6 +1674,11 @@ body {
   animation: stepReveal 0.22s ease-out both;
 }
 
+.host-status-bar.host-status-required {
+  background-color: var(--warning-bg);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
 .host-status-bar {
   display: flex;
   align-items: center;

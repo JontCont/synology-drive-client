@@ -708,6 +708,11 @@ function App() {
 
   async function loginByPassword(event: React.FormEvent) {
     event.preventDefault();
+    if (!isHostConfigured) {
+      setError("請先到「配置」設定 NAS 主機位址（必填）。");
+      setLoginTab("oidc-config");
+      return;
+    }
     setAuthLoading(true);
     setError(null);
     setMessage(null);
@@ -1575,7 +1580,7 @@ function App() {
             {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "standard" && (
               <div key="tab-standard" className="login-tab-panel animate-panel">
                 {/* Current Host indicator banner */}
-                <div className="host-status-bar">
+                <div className={`host-status-bar ${isHostConfigured ? "" : "host-status-required"}`}>
                   <div className="host-status-info">
                     <span
                       className={`status-dot ${
@@ -1584,7 +1589,7 @@ function App() {
                     />
                     <span className="host-status-label">NAS 主機：</span>
                     <code className="mono host-status-value">
-                      {isHostConfigured ? savedHost : "尚未設定（請先至「配置」填寫）"}
+                      {isHostConfigured ? savedHost : "尚未設定（必填，請先至「配置」填寫）"}
                     </code>
                   </div>
                   <button
@@ -1624,7 +1629,8 @@ function App() {
                       <button
                         type="submit"
                         className="btn btn-primary btn-block btn-lg btn-animated"
-                        disabled={authLoading}
+                        disabled={authLoading || !isHostConfigured}
+                        title={isHostConfigured ? undefined : "請先到「配置」設定 NAS 主機"}
                       >
                         <span>{authLoading ? "登入驗證中..." : "登入"}</span>
                       </button>
