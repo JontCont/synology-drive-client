@@ -152,6 +152,25 @@ function formatBytes(bytes: number): string {
 const normalizeLocalPath = (p: string) =>
   p.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 const normalizeRemotePath = (p: string) => p.trim().replace(/\/+$/, "").toLowerCase();
+function ShortSyncPath({ path }: { path: string }) {
+  const separator = /^[A-Za-z]:\\|^\\\\/.test(path) ? "\\" : "/";
+  const parts = path.split(separator).filter(Boolean);
+  const isNetworkPath = path.startsWith(separator.repeat(2));
+  const rootParts = isNetworkPath ? 2 : 1;
+  const shortened = parts.length > rootParts + 2;
+  const prefix = isNetworkPath ? separator.repeat(2) : path.startsWith(separator) ? separator : "";
+  return (
+    <span className="folder-path" title={path}>
+      {shortened ? (
+        <span className="folder-path-root">{prefix}{parts.slice(0, rootParts).join(separator)}{separator}…</span>
+      ) : null}
+      <span className="folder-path-tail">
+        {shortened ? `${separator}${parts.slice(-2).join(separator)}` : path}
+      </span>
+    </span>
+  );
+}
+
 const isWithinPath = (child: string, parent: string) =>
   parent === "" || child === parent || child.startsWith(`${parent}/`);
 
@@ -3274,11 +3293,11 @@ function App() {
                               </span>
                             </div>
                             <div className="folder-row-paths mono">
-                              <span>{folder.localPath}</span>
+                              <ShortSyncPath path={folder.localPath} />
                               <span className="folder-row-arrow" aria-hidden="true">
                                 {modeArrow(folder.mode)}
                               </span>
-                              <span>{folder.remotePath}</span>
+                              <ShortSyncPath path={folder.remotePath} />
                             </div>
                             {folder.mode === "upload_only" ? (
                               <div className="cell-secondary">
