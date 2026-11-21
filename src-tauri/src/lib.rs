@@ -470,30 +470,47 @@ fn active_local_paths(cfg: &config::AppConfig) -> Vec<String> {
         .collect()
 }
 
-/// 同步資料夾清單變動後，若監看正在執行就以最新清單重啟（沒有可監看的資料夾時停止）
-fn refresh_watcher(app: &tauri::AppHandle, watcher_state: &watcher::LocalWatcherState) {
-    if !watcher_state.status().map(|s| s.running).unwrap_or(false) {
-        return;
+/// 本機監看的自動管理：已登入且有啟用中的資料夾時保持開啟（清單變動時以最新清單重啟），否則停止
+fn ensure_watcher(
+    app: &tauri::AppHandle,
+    watcher_state: &watcher::LocalWatcherState,
+    auth_state: &auth::AuthState,
+) -> Result<watcher::LocalWatcherStatus, String> {
+    if auth_state.status()?.stage != "authenticated" {
+        return watcher_state.stop();
     }
-    let _ = watcher_state.stop();
-    if let Ok(cfg) = config::load(app) {
-        let roots = active_local_paths(&cfg);
-        if !roots.is_empty() {
-            let _ = watcher_state.start(roots);
-        }
+    let roots = active_local_paths(&config::load(app)?);
+    if roots.is_empty() {
+        return watcher_state.stop();
     }
+    let current = watcher_state.status()?;
+    if current.running && current.root_path.as_deref() == Some(roots.join(", ").as_str()) {
+        return Ok(current);
+    }
+    watcher_state.stop()?;
+    watcher_state.start(roots)
+}
+
+#[tauri::command]
+async fn ensure_local_watcher(
+    app: tauri::AppHandle,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
+) -> Result<watcher::LocalWatcherStatus, String> {
+    ensure_watcher(&app, &watcher_state, &auth_state)
 }
 
 #[tauri::command]
 async fn add_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
     local_path: String,
     remote_path: String,
     mode: String,
 ) -> Result<config::AppConfig, String> {
     let cfg = config::add_folder(&app, &local_path, &remote_path, &mode)?;
-    refresh_watcher(&app, &watcher_state);
+    let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     Ok(cfg)
 }
 
@@ -501,12 +518,13 @@ async fn add_sync_folder(
 async fn update_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
     id: String,
     mode: Option<String>,
     paused: Option<bool>,
 ) -> Result<config::AppConfig, String> {
     let cfg = config::update_folder(&app, &id, mode, paused)?;
-    refresh_watcher(&app, &watcher_state);
+    let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     Ok(cfg)
 }
 
@@ -514,21 +532,19 @@ async fn update_sync_folder(
 async fn remove_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
     id: String,
 ) -> Result<config::AppConfig, String> {
     let cfg = config::remove_folder(&app, &id)?;
-    refresh_watcher(&app, &watcher_state);
+    let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     Ok(cfg)
 }
 
 #[tauri::command]
 fn stop_sync_service(
     sync_state: State<'_, sync_service::SyncServiceState>,
-    watcher_state: State<'_, watcher::LocalWatcherState>,
 ) -> Result<sync_service::SyncServiceStatus, String> {
-    let status = sync_state.stop()?;
-    let _ = watcher_state.stop();
-    Ok(status)
+    sync_state.stop()
 }
 
 #[tauri::command]
@@ -609,7 +625,14 @@ fn complete_sso_login(
 }
 
 #[tauri::command]
-async fn logout(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthStatus, String> {
+async fn logout(
+    auth_state: State<'_, auth::AuthState>,
+    sync_state: State<'_, sync_service::SyncServiceState>,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+) -> Result<auth::AuthStatus, String> {
+    // 登出後不應在背景繼續同步
+    let _ = sync_state.stop();
+    let _ = watcher_state.stop();
     auth_state.logout()
 }
 
@@ -1062,6 +1085,7 @@ pub fn run() {
             apply_window_preset,
             pick_local_folder,
             add_sync_folder,
+            ensure_local_watcher,
             update_sync_folder,
             remove_sync_folder,
             list_nas_folders,

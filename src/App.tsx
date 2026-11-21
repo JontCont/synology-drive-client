@@ -468,6 +468,14 @@ function App() {
     }
   }, [viewMode, isAuthenticated, initialLoading]);
 
+  // 登入後自動啟動本機監看（需要至少一個啟用中的同步資料夾）
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    invoke<LocalWatcherStatus>("ensure_local_watcher")
+      .then((status) => setWatcherStatus(status))
+      .catch((err) => setWarning(`本機監看未能自動啟動：${String(err)}`));
+  }, [isAuthenticated]);
+
   // Whether Host and OIDC are currently configured in saved config
   const savedHost = config?.serverHost?.trim() || "";
   const isHostConfigured = Boolean(savedHost);
@@ -2547,7 +2555,9 @@ function App() {
                   <div className="card-header">
                     <div>
                       <h2 className="card-title">本機檔案監看 (Watcher)</h2>
-                      <p className="card-desc">即時偵測本機同步資料夾異動並排入佇列</p>
+                      <p className="card-desc">
+                        即時偵測本機同步資料夾異動並排入佇列；登入後會自動啟動
+                      </p>
                     </div>
                     <span
                       className={`badge ${
@@ -2712,7 +2722,9 @@ function App() {
 
                 <div className="action-groups">
                   <div className="action-group">
-                    <span className="action-group-label">本機監看 (Watcher)</span>
+                    <span className="action-group-label">
+                      本機監看 (Watcher)：登入後自動啟動，通常不需要手動操作
+                    </span>
                     <div className="button-row">
                       <button
                         type="button"
