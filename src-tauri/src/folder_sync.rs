@@ -1120,7 +1120,11 @@ fn execute_plan(
                 }
                 consecutive_failures += 1;
                 record_failure(state, folder, &item.rel_local.join("/"), &err);
-                // 連續失敗通常代表整體問題（權限、API 不相容、磁碟、NAS 空間），不再繼續逐檔重試
+                // 連續失敗通常代表整體問題（權限、API 不相容、磁碟、NAS 空間），不再繼續逐檔重試；
+                // 檔案太大被代理拒絕只是單一檔案的限制，不算在內
+                if auth::is_oversize_error(&err) {
+                    consecutive_failures = 0;
+                }
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     return Err(format!(
                         "連續 {MAX_CONSECUTIVE_FAILURES} 個檔案同步失敗，已停止。最後的錯誤：{err}"

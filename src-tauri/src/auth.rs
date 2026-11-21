@@ -96,6 +96,16 @@ const DSM_LIST_LIMIT: u32 = 1000;
 
 const MAX_OTP_ATTEMPTS: u8 = 3;
 const DSM_SESSION_NAME: &str = "SynologyDrive";
+/// 自訂錯誤碼：HTTP 413，請求內容超過 NAS 前端代理（例如 Cloudflare）的大小上限
+const DSM_CODE_BODY_TOO_LARGE: i64 = -413;
+/// Cloudflare 免費/Pro 方案的請求內容上限約 100 MB；超過此大小的上傳若連線中斷，視為被代理拒絕
+const PROXY_BODY_LIMIT_BYTES: u64 = 100_000_000;
+const OVERSIZE_HINT: &str = "要上傳大檔案，請改用不經代理的位址（區網位址，或直接連到 NAS 的網域）";
+
+/// 錯誤是否為「檔案超過前端代理上限」；這是每個檔案各自的限制，不代表整體同步有問題
+pub fn is_oversize_error(err: &str) -> bool {
+    err.contains(OVERSIZE_HINT)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct DsmError {
@@ -340,6 +350,9 @@ pub struct DsmAuthAdapter {
     agent: ureq::Agent,
     /// 下載大檔不能受整體逾時限制，只限制連線與等待回應
     download_agent: ureq::Agent,
+    upload_agent: ureq::Agent,
+    /// 觀察到被前端代理（例如 Cloudflare）拒絕的最小檔案大小；之後不小於此大小的檔案直接略過，不再重傳
+    upload_size_limit: Mutex<Option<u64>>,
     pending: Mutex<HashMap<String, PendingLogin>>,
     session: Mutex<Option<RemoteSession>>,
 }
@@ -357,9 +370,18 @@ impl DsmAuthAdapter {
             .http_status_as_error(false)
             .build()
             .into();
+        // 上傳完成後 NAS 還要寫入、建立版本與索引，大檔案回應會比較慢
+        let upload_agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_recv_response(Some(Duration::from_secs(600)))
+            .http_status_as_error(false)
+            .build()
+            .into();
         Self {
             agent,
             download_agent,
+            upload_agent,
+            upload_size_limit: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
         }
@@ -417,6 +439,14 @@ impl DsmAuthAdapter {
             1004 | 1005 => "NAS 空間不足或超過配額".to_string(),
             code => format!("NAS 回報上傳失敗（錯誤碼 {code}）"),
         }
+    }
+
+    /// 上傳被前端代理拒絕（檔案太大）的說明；`is_oversize_error` 以此判斷
+    fn oversize_message(size: u64) -> String {
+        format!(
+            "檔案 {} MB 太大，NAS 位址前面的代理伺服器（例如 Cloudflare，上限約 100 MB）拒絕了上傳。{OVERSIZE_HINT}",
+            size / (1024 * 1024)
+        )
     }
 
     /// 下載專用的錯誤說明：DSM 的下載/檔案錯誤碼與登入錯誤碼意義不同
@@ -619,7 +649,7 @@ impl DsmAuthAdapter {
 
         let url = format!("{origin}/webapi/entry.cgi");
         let mut response = self
-            .download_agent
+            .upload_agent
             .post(&url)
             .query("api", "SYNO.SynologyDrive.Files")
             .query("version", "2")
@@ -632,6 +662,9 @@ impl DsmAuthAdapter {
             .header("Content-Length", &total.to_string())
             .send(ureq::SendBody::from_reader(&mut body))
             .map_err(|_| DsmError { code: -2 })?;
+        if response.status().as_u16() == 413 {
+            return Err(DsmError { code: DSM_CODE_BODY_TOO_LARGE });
+        }
         let body = response.body_mut().read_to_string().unwrap_or_default();
         parse_dsm_data_response(&body).map(|_| ())
     }
@@ -835,11 +868,23 @@ impl AuthBackendAdapter for DsmAuthAdapter {
         new_version: bool,
     ) -> Result<(), String> {
         let (origin, sid) = self.current_session()?;
+        let size = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
+        let blocked_at = self.upload_size_limit.lock().ok().and_then(|l| *l);
+        if blocked_at.is_some_and(|limit| size >= limit) {
+            return Err(Self::oversize_message(size));
+        }
         // 與已驗證的列表 API 相同：先用一般字串路徑，失敗再改用 JSON 引號字串
         let mut result = self.put_drive_file(&origin, &sid, remote_path, local_path, new_version);
-        if matches!(&result, Err(e) if e.code != 119 && e.code != -2 && e.code != -3) {
+        if matches!(&result, Err(e) if e.code != 119 && e.code != -2 && e.code != -3 && e.code != DSM_CODE_BODY_TOO_LARGE) {
             let quoted = serde_json::to_string(remote_path).unwrap_or_else(|_| remote_path.to_string());
             result = self.put_drive_file(&origin, &sid, &quoted, local_path, new_version);
+        }
+        // 大檔案上傳連線被中斷或收到 413，幾乎都是前端代理的大小上限；記住這個大小，之後同樣大的檔案不再重傳
+        if matches!(&result, Err(e) if e.code == DSM_CODE_BODY_TOO_LARGE || (e.code == -2 && size > PROXY_BODY_LIMIT_BYTES)) {
+            if let Ok(mut limit) = self.upload_size_limit.lock() {
+                *limit = Some(limit.map_or(size, |current| current.min(size)));
+            }
+            return Err(Self::oversize_message(size));
         }
         result.map_err(|err| Self::describe_upload_failure(&err))
     }
@@ -1615,6 +1660,28 @@ mod tests {
             adapter.put_drive_file(&origin, "S", "/mydrive/x/b.txt", &dir.join("none.txt"), false),
             Err(DsmError { code: -3 })
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn payload_too_large_is_reported_as_proxy_limit() {
+        let (origin, _requests) = spawn_mock_server(vec![(
+            "413 Payload Too Large",
+            "text/html",
+            "",
+            b"<html>413</html>".to_vec(),
+        )]);
+        let adapter = DsmAuthAdapter::new();
+        let dir = std::env::temp_dir().join(format!("synoul-413-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.bin");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            adapter.put_drive_file(&origin, "S", "/mydrive/x/big.bin", &file, false),
+            Err(DsmError { code: DSM_CODE_BODY_TOO_LARGE })
+        );
+        assert!(is_oversize_error(&DsmAuthAdapter::oversize_message(148 * 1024 * 1024)));
+        assert!(!is_oversize_error("無法連線到 NAS"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
