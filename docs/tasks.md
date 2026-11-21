@@ -1,143 +1,83 @@
 # Tasks
 
-## Phase 0（先驗證）
-- [ ] T0 確認需求範圍與環境（NAS 版本、Windows 版本、資料規模）
-- [ ] T1 登入與 Provider Spike（帳密/OTP + OIDC/SSO）
-  - [x] T1a 建立 Spike 記錄模板（`docs/remote-spike.md`）
-- [ ] T2 定稿 Provider（WebDAV / Drive API 二擇一）
-- [x] T3 定義 RemoteProvider 契約與錯誤模型
-  - [x] T3a FakeRemote contract probe 指令（含報告落檔）
-  - [x] T3b 載入最近一次 probe 報告指令
-  - [x] T3c probe 歷史索引與 markdown 匯出
+核心功能已完成，目前重點是收斂：實機驗證、傳輸進度、清理舊的模擬流程、說明與打包。
+範圍定義見 `docs/plan.md`。
 
-## Phase 1（MVP）
-- [x] P1-0 專案骨架（Tauri + React + Rust）
-- [x] P1-1 系統匣與單一實例
-- [x] P1-2 關窗縮系統匣
-- [x] P1-3 安全基線（移除 opener、最小 capability、CSP）
-- [x] P1-4 設定檔骨架（`get_app_config` / `update_app_config`）
-- [x] P1-5 設定 UI（可修改與儲存設定）
-- [x] P1-6 認證流程骨架（帳密/OTP + SSO）
-  - [x] P1-6a 獨立登入頁 UI（一般登入 / 配置雙分頁切換，配置 OIDC 後自動顯示單一登入按鈕並持久化至 settings.json）
-  - [x] P1-6b Challenge-based 兩階段登入與可替換 `AuthBackendAdapter`（先送帳密，依伺服器回應決定直接 `authenticated` 或帶 `challengeId` 進入 `waitingOtp`）
-  - [x] P1-6c 登入配置區塊化（NAS Host 區塊 + OIDC 區塊 + 步驟引導）與登入頁動態視覺動畫強化
-- [x] P1-7 同步資料模型（baseline/operations/conflicts）
-  - [x] P1-7a 三方比對決策模型雛形（純函式 + 單元測試）
-  - [x] P1-7b SQLite schema 骨架（sync_roots/items/observations/baseline/tombstones/operations/conflicts）
-  - [x] P1-7c default sync_root 寫入/讀取（由設定檔同步到 SQLite）
-  - [x] P1-7d conflict 骨架指令（add/list + 前端檢視）
-  - [x] P1-7e conflict 狀態更新（resolve）
-  - [x] P1-7f conflict 統計與清理（status counts + purge resolved）
-- [x] P1-8 掃描與監看（notify + 補掃描）
-  - [x] P1-8a 背景同步服務骨架（可啟停、可查狀態）
-  - [x] P1-8b 本機監看骨架（notify 可啟停、事件計數）
-  - [x] P1-8c watcher 事件轉入 operation 佇列
-  - [x] P1-8d 同步服務 tick 結果回報（lastMessage / lastOperationId / lastStage）
-  - [x] P1-8e 補掃描骨架（手動掃描 local path 並入列 operation）
-  - [x] P1-8f pipeline ingest fallback（watcher 無事件時改用 scanner）
-  - [x] P1-8g pipeline batch 執行（單次多步 executor）
-  - [x] P1-8h sync service 自動 ingest（每 tick watcher/scanner 入列）
-  - [x] P1-8i ingest backlog guard（pending 過高時暫停入列）
-  - [x] P1-8j ingest 去重（相同 path pending 時不重複入列）
-  - [x] P1-8k ingest backlog 上限可設定（settings.json）
-- [x] P1-9 三方比對與 executor
-  - [x] P1-9a 操作佇列骨架（SQLite enqueue/list + 前端檢視）
-  - [x] P1-9b executor 單步執行骨架（claim planned → done）
-  - [x] P1-9c sync cycle 單步入口（先 init storage，再跑 executor）
-  - [x] P1-9d operation 重試入口（指定 id 重設為 planned）
-  - [x] P1-9e demo operation 批次灌入（快速壓測骨架）
-  - [x] P1-9f 一鍵 pipeline（watcher drain + executor）
-  - [x] P1-9g executor 失敗階段寫回（failed + last_error）
-  - [x] P1-9h retryable/backoff 骨架（next_retry_at + due 重試）
-  - [x] P1-9i operation stage 統計（queue 健康度可視化）
-  - [x] P1-9j retry 最大次數保護（避免無限重試）
-  - [x] P1-9k operation 清理入口（purge done/failed）
-  - [x] P1-9l executor 結果結構化（retry/failed 非系統錯誤）
-- [x] P1-10 真實 NAS 故障矩陣驗證（目前完成本機模擬演練，實機 NAS 待驗證）
-  - [x] P1-10a 故障矩陣種子資料（retry / hard-retry / unknown-op）
-  - [x] P1-10b 一鍵故障矩陣演練（seed + batch）
-  - [x] P1-10c 快速演練模式（自動釋放 retryable）
-- [x] P1-11 系統快照指令（設定/狀態/佇列數量集中檢視）
-  - [x] P1-11a 擴充快照聚合（operation/conflict 統計）
-- [x] P1-12 現代化桌面 UI 重構（側邊欄分頁導覽、總覽 KPI 儀表板、深淺色主題切換、佇列狀態篩選）
-  - [x] P1-12a Facebook 風格 Skeleton Shimmer 骨架屏載入 UI（啟動載入、功能分頁切換、表單/佇列/衝突/快照非同步操作流光佔位）
-- [ ] P1-13 同步可用性與說明收斂
-  - [ ] P1-13a 左上角 status 狀態定義與文案（含 `idle`/閒置）
-  - [x] P1-13b Toast/通知策略（App 內浮動 toast 自動消失；視窗縮到系統匣/最小化/失焦時，同步失敗、同步服務錯誤、新增衝突改發 Windows 系統通知；登入成功為前景操作，僅 toast）
-  - [ ] P1-13c NAS → Local 同步方式說明（流程圖 + 規則：觸發來源、方向、衝突、重試）
-- [x] P1-14 登入門檻與 Dashboard 資訊分層
-  - [x] P1-14d 帳密登入改為真實 DSM 驗證（SYNO.API.Auth + OTP，移除模擬 Adapter；OIDC callback 在 token 交換實作前停用）
-  - [x] P1-14a 未登入不可進入系統（Dashboard 強制導回登入頁）
-  - [x] P1-14b 「目前認證與 OIDC 配置狀態」改為設定檔分頁入口
-  - [x] P1-14c Dashboard 總覽加入只讀 chart，控制操作導向其他分頁
-- [x] P1-15 視窗解析度預設（設定頁可選，寫入設定檔）
-  - [x] P1-15a 設定檔新增 `windowPreset`（`wide` 1160×768 / `compact` 930×680，邏輯像素），舊設定檔向下相容
-  - [x] P1-15b 後端 `apply_window_preset` command（set_size + 置中，最大化時先還原）；啟動時依設定套用
-  - [x] P1-15c 設定頁「視窗解析度」卡片（兩個預設選項、即時套用並儲存、顯示目前視窗大小）
-  - [x] P1-15d 版面配合：既有 auto-fit grid 在 compact 寬度自然變 KPI 2×2、卡片單欄（無需額外 media query）
-  - [ ] P1-15e 驗收：用 `npm run tauri:dev` 實測兩個預設與參考截圖一致；重開後維持上次選擇
-- [x] P1-21 上傳（本機 → NAS）與雙向同步引擎
-  - [x] P1-21a 上傳 API：`SYNO.SynologyDrive.Files upload`（multipart `file` 欄位，串流、精確 Content-Length，不整檔讀入記憶體）與資料夾建立（`type=folder`）；格式依 synology-drive-api 專案的已知用法，並以本機假伺服器驗證請求內容；不覆蓋時用 `autorename`、覆蓋時用 `version`（NAS 保留舊內容為歷史版本）
-  - [x] P1-21b 上次同步紀錄（`sync_state.rs`，每資料夾一個 JSON）：記錄本機大小/修改時間與 NAS 大小，用來分辨「本機改了／NAS 改了／兩邊都改」
-  - [x] P1-21c 同步引擎 `folder_sync.rs`（取代 downloader）：列出 NAS 與本機 → 比對產生計畫（純函式，單元測試涵蓋）→ 逐項上傳/下載。規則：永不刪除任何一側；本機改動上傳為新版本；NAS 改動且本機沒動則取代；兩邊都改保留兩份；大小寫不同與 Windows 檔名清理後相同視為同一檔；暫存檔、`~$` 鎖定檔、desktop.ini、Thumbs.db 不上傳；掃描後檔案又變動則該次略過
-  - [x] P1-21d 自動觸發：同步服務執行中，從未同步過的資料夾立即同步；本機有變動且距離上次同步 ≥30 秒時上傳；每 5 分鐘檢查一次 NAS；上次失敗/出錯/取消則等下一次定期檢查，避免連鎖重試；檔案總管狀態標示改為已正確就不重複寫入，避免自己造成變動事件迴圈
-  - [x] P1-21e 設定頁進度顯示下載/上傳數量，每個資料夾皆可「立即同步」「取消同步」
-  - [x] P1-21i 同步服務自動啟動：登入後、新增/繼續資料夾、切換模式時，若已登入且有啟用中的資料夾就自動啟動（含本機監看）；啟動後立即跑第一輪（不再先等一個輪詢間隔）；登出時停止。手動「停止同步服務」仍可用，直到下次登入或資料夾變更才會再自動啟動；頂端列不再有啟動/停止按鈕，重新啟動/停止移到「操作佇列與監看」頁
-  - [x] P1-21m 區網直連（參考 Immich）：「同步設定」新增「區網位址」（私有網路位址，如 http://192.168.0.18:5000/drive/）與選填的「限定 Wi-Fi 名稱」；每次同步開始時偵測目前 Wi-Fi（netsh）並測試區網位址，連得到就讓登入後的列表/上傳/下載/刪除改走區網位址（不經 Cloudflare，無 100 MB 上限），用區網列出失敗就自動退回一般位址；登入仍走一般位址。實機驗證：區網位址 97 ms 可連、Wi-Fi 名稱可讀取；以區網位址上傳 148 MB 的 mp4 已實機驗證成功（登入 session 可在區網位址上使用）；區網下載與刪除尚未實機驗證
-  - [x] P1-21l 大檔案上傳：實測 NAS 位址經過 Cloudflare，請求內容超過約 100 MB 會被 413 拒絕（連線被中斷）。上傳改用獨立 agent（等待回應 10 分鐘）；偵測到被代理拒絕後顯示明確說明（改用不經代理的位址）、記住該大小之後不再重傳同樣大小以上的檔案、且不計入「連續失敗」。尚無分塊上傳（Drive 網頁 API 沒有公開的分塊方式）
-  - [x] P1-21k 「刪除也同步」（每個資料夾的選項，僅「雙向」「僅上傳」有；預設關閉）：同步過的檔案/資料夾只有一邊被刪除、另一邊沒改過時，另一邊移到資源回收桶（NAS：`SYNO.SynologyDrive.Files delete permanent=false`；本機：Windows 資源回收筒）；沒有同步紀錄的檔案絕不刪；僅上傳只會刪 NAS；資料夾底下還有保留/新增的項目時不刪資料夾；一次刪除超過已同步檔案一半（且 ≥10 個）會中止；刪除前再次確認本機狀態。NAS 刪除 API 尚未在真實 NAS 驗證
-  - [x] P1-21j 缺檔一律補回：同步時全部掃描，本機缺的檔案（即使之前同步過、後來被刪）會從 NAS 下載補回，NAS 缺的會重新上傳（依各資料夾模式）；仍然不刪除任何一側的檔案
-  - [x] P1-21h 「操作佇列與監看」分頁新增真實的「同步佇列」清單：列出每次比對後需要上傳/下載/建立資料夾的項目（狀態：等待中/進行中/失敗/已完成；動作、NAS 路徑、大小、失敗原因），可依資料夾與狀態篩選，每 2 秒更新、預設最多顯示 200 筆並提示總數；原本的模擬佇列保留為「開發用」
-  - [ ] P1-21f 待實機驗證（高優先，會改動 NAS 資料）：upload / create folder 的參數與回應在實際 NAS 上的行為（路徑是否需 JSON 引號，已內建兩種寫法自動退回）；建議先用只含少量測試檔的資料夾
-  - [ ] P1-21g 待辦：NAS 端修改時間比對（目前只比大小）、平行傳輸與頻寬限制、同步過程中的檔案鎖定處理（刪除同步已於 P1-21k 完成）
-- [ ] P1-22 同步佇列顯示傳輸進度（規劃中，尚未實作）
-  - [ ] P1-22a 後端：下載（寫入暫存檔的迴圈）與上傳（檔案串流）每傳一段回報已傳位元組，寫入佇列項目的 `doneBytes`；節流（每 ≥256 KB 或 ≥200 ms 更新一次），避免大檔傳輸時頻繁鎖定佇列而拖慢速度；需調整 `download_remote_file` / `upload_remote_file` 的簽名，傳入進度回報
-  - [ ] P1-22b 後端：依「已傳位元組 / 經過時間」計算速度與剩餘時間（`QueueItem` 增加 `doneBytes`、`bytesPerSecond`）
-  - [ ] P1-22c 前端：「同步佇列」進行中的項目顯示進度條、百分比、速度與剩餘時間；有進行中項目時輪詢由 2 秒縮短為 1 秒
-  - [ ] P1-22d 注意事項：上傳進度是「已送出」位元組，到 100% 後 NAS 可能還在寫入，畫面需註明；小檔案很快完成，進度條幾乎看不到；補單元測試（節流與速度/剩餘時間計算）
-- [x] P1-20 檔案總管同步狀態圖示（綠色勾／同步中箭頭）
-  - [x] P1-20a `cloud_status.rs`：以 Windows Cloud Files（`cloud-filter` crate）把同步資料夾註冊為同步根（AlwaysFull，檔案一律完整存在本機、不提供按需下載、不顯示釘選選項），並連線；刪除與改名放行
-  - [x] P1-20b 狀態標示：下載開始時資料夾顯示「同步中」，每個檔案完成後立即轉成 Placeholder 並標為「已同步」，全部成功後資料夾標為已同步；有失敗或取消時資料夾保持「同步中」
-  - [x] P1-20c 生命週期：登入後／新增／繼續資料夾時註冊並連線；暫停或登出時中斷連線；移除資料夾時解除註冊；設定頁可關閉（會解除所有註冊）
-  - [x] P1-20d Windows 實機整合測試（`cargo test cloud_status -- --ignored --nocapture`）：在一般執行緒註冊、登錄檔確認存在、檔案/資料夾雙向切換同步狀態、內容完好、解除註冊後登錄檔乾淨。已知：`SyncRootId::is_registered` 對本程式的註冊會誤報 false，故註冊/解除一律直接呼叫、不依賴它
-  - [ ] P1-20e 待實機確認：檔案總管「狀態」欄與圖示的實際外觀、左側導覽列是否出現入口（未打包 exe 的註冊可成功，但外觀未截圖驗證）；同步資料夾不可位於 OneDrive 等其他同步根之內，也應避免與官方 Synology Drive 客戶端的資料夾重疊
-- [x] P1-19 NAS → 本機下載（初次全量下載）
-  - [x] P1-19a NAS 檔案列表（`SYNO.SynologyDrive.Files list`，含分頁）與串流下載（`download`，下載專用 agent 不受 15 秒整體逾時限制）；已用本機假 HTTP 伺服器驗證串流、JSON 錯誤判斷、分頁
-  - [x] P1-19b 下載引擎 `downloader.rs`：遞迴列出 → 建立空資料夾 → 逐檔下載；先寫 `.synodl-part` 暫存檔，確認大小不小於預期才改名；單檔失敗不中斷整體；登入過期則中止
-  - [x] P1-19c 本機已有同名檔案：大小相同略過；內容不同則兩邊都保留（本機改名為「檔名 (衝突副本 時間).副檔名」並寫入衝突清單）；檔名依 Windows 規則清理且不會跳出本機根目錄
-  - [x] P1-19d 新增資料夾後立刻開始初次下載（僅上傳模式除外）；繼續同步/切換模式會補做；「立即同步」「取消下載」；登出時取消
-  - [x] P1-19e 設定頁每個資料夾顯示進度（讀取清單、已處理/總數、位元組、目前檔案）；完成/失敗以 toast 與系統通知提示
-  - [ ] P1-19f 待實機驗證：Drive 列表/下載 API 的欄位（`type`/`size`）與參數格式（目前會先試 JSON 引號、失敗再退回不帶引號）；團隊資料夾路徑下載
-  - [ ] P1-19g 待辦：定期自動拉取 NAS 的後續變更（目前只有初次下載與手動「立即同步」）；NAS 端刪除不會同步到本機；上傳；平行下載與頻寬限制
-- [x] P1-18 多資料夾同步（不限數量，依「是否已被涵蓋」限制）
-  - [x] P1-18a 設定檔 `syncFolders[]`（id/name/localPath/remotePath/mode/paused）；舊版單一路徑設定載入時自動轉成第一筆
-  - [x] P1-18b 重疊規則（本機與 NAS 兩側皆檢查，忽略大小寫與結尾斜線）：選了父層，子層不能再選；已含子層時不能再選其父層；未被涵蓋的同層資料夾可加入。後端 `validate_new_folder` 為最終把關並有單元測試，前端同規則即時提示
-  - [x] P1-18c 每個資料夾各自的同步模式、暫停/繼續、移除；名稱自動取本機資料夾名稱
-  - [x] P1-18d 單一 notify watcher 監看全部啟用中的本機資料夾，事件依路徑歸屬資料夾；operation 的 `root_id` 改為資料夾 id；executor 依資料夾模式處理、暫停中的資料夾不被 claim；資料夾變動時自動重啟監看
-  - [x] P1-18e 設定頁改為資料夾清單 + 新增面板；NAS 選取視窗把已涵蓋的資料夾停用並標示、內含已同步子層的資料夾標示不可選
-  - [x] P1-18f 本機監看自動管理：登入後、新增/繼續/移除資料夾時自動啟動或以最新清單重啟；登出時連同同步服務一併停止；停止同步服務不再關閉監看
-  - [ ] P1-18g 待辦：總覽/佇列/衝突依資料夾篩選與顯示所屬資料夾；移除資料夾時清理其未完成 operation；資料夾數量多時的掃描效能
-- [x] P1-17 同步模式與同步資料夾設定重做
-  - [x] P1-17a 設定檔新增 `syncMode`：`bidirectional` 雙向 / `upload_only` 僅上傳 / `download_only` 僅下載（舊設定檔預設雙向）
-  - [x] P1-17b 模式政策 `is_operation_allowed`：單向模式不執行刪除與改名；僅下載不接收本機變更；executor 依模式略過不允許的 operation
-  - [x] P1-17c 設定頁重做：步驟式（1 同步模式卡片 → 2 本機/NAS 資料夾含方向箭頭 → 進階折疊），本機資料夾可用系統對話框「瀏覽…」選取
-  - [x] P1-17d NAS 遠端資料夾瀏覽：登入後以 session 呼叫 `SYNO.SynologyDrive.Files list` / `TeamFolders list`（已用 `SYNO.API.Info` 確認 NAS 支援），設定頁以選取視窗取代文字輸入（本機與 NAS 皆為 UI 選取）
-  - [ ] P1-17e 待驗證：Drive 檔案列表 API 的實機回應（需登入後實測；目前以文件化的欄位與單元測試解析）；服務運行中改模式/路徑自動重啟；雙向模式的「大量刪除保護」
-- [ ] P1-16 同步服務與本機監看串接
-  - [x] P1-16a 啟動同步服務前需已登入；啟動時自動啟動本機監看，停止服務時一併停止
-  - [ ] P1-16b 補掃描 fallback 會對已完成的檔案無限重複入列（目前每 tick 都掃同一批路徑），需改為僅首次全量掃描 + 之後只吃 watcher 事件
-  - [ ] P1-16c Executor 仍為骨架（op 直接標 done，未真正上傳/下載），待 T2 Provider 定稿後接 RemoteProvider
-  - [ ] P1-16d 每 tick 只處理 1 筆 operation，需改為批次/連續處理直到佇列清空
+## 進行中 / 待辦
 
-## Phase 2（Files On-Demand）
-- [ ] P2-1 cfapi Spike（CloudMirror / CfRegisterSyncRoot）
-  - [ ] P2-1a 綁定入口（Explorer 左側導覽可見 Sync Root，效果對齊 iCloud Drive）
-  - [ ] P2-1b 註冊 Sync Root policy（hydration/population/in-sync policy）並完成解除註冊流程
-- [ ] P2-2 placeholder 建立與 hydration
-  - [ ] P2-2a 首次掃描建立 file/folder placeholder（含 metadata）
-  - [ ] P2-2b 雙擊/讀取觸發 hydration（NAS -> local）與失敗重試
-- [ ] P2-3 dehydration/釘選與狀態協調
-  - [ ] P2-3a sync state 對映 Windows 內建狀態（已同步/同步中/錯誤）並顯示 file/folder sync icon
-  - [ ] P2-3b 釘選（always available）與釋放空間（online-only）切換
-  - [ ] P2-3c 驗收：Explorer 入口 + file/folder icon overlay 皆可穩定顯示
+### P1-22 同步佇列顯示傳輸進度（規劃中）
+- [ ] P1-22a 後端：下載（寫入暫存檔的迴圈）與上傳（檔案串流）每傳一段回報已傳位元組，寫入佇列項目的 `doneBytes`；節流（每 ≥256 KB 或 ≥200 ms 更新一次），避免大檔傳輸時頻繁鎖定佇列而拖慢速度；需調整 `download_remote_file` / `upload_remote_file` 的簽名，傳入進度回報
+- [ ] P1-22b 後端：依「已傳位元組 / 經過時間」計算速度與剩餘時間（`QueueItem` 增加 `doneBytes`、`bytesPerSecond`）
+- [ ] P1-22c 前端：「同步佇列」進行中的項目顯示進度條、百分比、速度與剩餘時間；有進行中項目時輪詢由 2 秒縮短為 1 秒
+- [ ] P1-22d 注意事項：上傳進度是「已送出」位元組，到 100% 後 NAS 可能還在寫入，畫面需註明；補單元測試（節流與速度 / 剩餘時間計算）
 
+### 待實機驗證（會改動 NAS 資料時，先用只含少量測試檔的資料夾）
+- [ ] V1 「刪除也同步」：NAS 刪除 API（`SYNO.SynologyDrive.Files get` v3 + `delete` v2 `permanent=false`）實際行為，確認檔案進入 Drive 資源回收桶；本機端移到資源回收筒；大量刪除保護
+- [ ] V2 區網直連：下載、刪除、建立資料夾走區網位址；換到其他網路時自動退回一般位址；限定 Wi-Fi 名稱的行為
+- [ ] V3 團隊資料夾路徑的列表、下載、上傳
+- [ ] V4 檔案總管「狀態」欄與圖示的實際外觀（截圖確認）；同步資料夾不可位於 OneDrive 等其他同步根之內，也應避免與官方 Synology Drive 客戶端的資料夾重疊
+- [ ] V5 雙向模式兩邊同時修改同一檔案 → 衝突副本與衝突管理紀錄
+- [ ] V6 視窗解析度預設（寬版 / 精簡版）重開後維持上次選擇
+
+### P2 收斂與清理
+- [ ] P2-1 清理早期的模擬流程：Pipeline / 單步 Executor / 故障矩陣 / Demo 佇列 / 舊的 `operations` 表與相關指令與 UI（「操作佇列與監看」頁的「開發用模擬佇列」）；保留真實的同步佇列、同步服務、本機監看
+- [ ] P2-2 總覽圖表與側邊欄徽章改用真實同步佇列（目前仍用舊模擬佇列的統計）
+- [ ] P2-3 移除不再使用的程式碼與依賴（例如模擬 executor、舊模式政策 `is_operation_allowed`、`remote.rs` 契約 / FakeRemote、`docs/remote-spike.md`）
+- [ ] P2-4 登入頁移除 OIDC 配置區塊與相關設定欄位（OIDC 已不在範圍內）
+- [ ] P2-5 衝突管理頁只顯示真實同步產生的衝突（移除模擬資料）
+- [ ] P2-6 資料夾數量多、檔案很多時的掃描與列表效能檢查
+
+### P3 說明與發佈
+- [ ] P3-1 使用說明：模式、同步規則、衝突與刪除處理、區網直連、Cloudflare 100 MB 限制與常見問題
+- [ ] P3-2 左上角 / 側邊狀態文案定稿（含閒置）
+- [ ] P3-3 打包安裝檔（Windows installer）、開機自動啟動選項、更新 README
+
+## 不在範圍內（已移出，不再追蹤）
+- Files On-Demand（placeholder、hydration、dehydration、釘選、釋放空間）：檔案一律完整存在本機，只做狀態圖示
+- OIDC / SSO token 交換與登入
+- 分塊上傳（Drive 網頁 API 沒有；改用區網直連）
+- WebDAV Provider、`RemoteProvider` 抽象、Provider Spike
+- 平行傳輸、頻寬限制、NAS 端修改時間比對
+- 檔案總管左側導覽入口
+- 同步過程中的檔案鎖定處理（目前以「掃描後又被修改則該次略過」處理）
+
+## 已完成
+
+### 基礎（P1-0 ~ P1-6）
+- [x] 專案骨架（Tauri + React + Rust）、系統匣與單一實例、關窗縮系統匣
+- [x] 安全基線（移除 opener、最小 capability、CSP）
+- [x] 設定檔（`settings.json`，`get_app_config` / `update_app_config`）與設定 UI
+- [x] 真實 DSM 登入：`SYNO.API.Auth` v6、OTP（錯誤碼 403 需要 OTP、404 OTP 錯誤，最多 3 次）、登出；未登入一律導回登入頁
+- [x] 登入頁：NAS Host 必填且只在「配置」設定、「測試連線」（`SYNO.API.Info`，不需登入）、Host 燈號（灰 / 綠 / 黃 / 紅 / 閃爍，每 30 秒檢查）、OTP 彈跳視窗、toast 統一
+- [x] UI：側邊欄分頁、總覽 KPI 儀表板、深淺色主題、Skeleton 載入、視窗解析度預設（寬版 1160×768 / 精簡版 930×680）、總覽「開始設定同步」引導
+
+### 同步設定與多資料夾（P1-17、P1-18）
+- [x] 設定檔 `syncFolders[]`（id / name / localPath / remotePath / mode / paused / syncDeletes），舊的單一路徑設定自動遷移
+- [x] 模式：雙向 / 僅上傳 / 僅下載，每個資料夾各自設定、暫停 / 繼續 / 移除
+- [x] 重疊規則：選了父層，子層不能選，反之亦然，本機與 NAS 兩側皆檢查，忽略大小寫與結尾斜線，不限數量；後端 `validate_new_folder` 把關，前端同規則即時提示
+- [x] NAS 資料夾選取視窗（`SYNO.SynologyDrive.Files list` / `TeamFolders list`）與本機資料夾對話框
+- [x] 單一 notify watcher 監看全部啟用中的本機資料夾；登入後、新增 / 繼續 / 移除資料夾時自動啟動或重啟；登出時一併停止
+
+### 同步引擎（P1-19、P1-21）
+- [x] 下載：`download`（`files=["路徑"]`、`json_error=true`，錯誤碼在標頭 `x-syno-webapi-download-error-code`），串流寫入 `.synodl-part` 暫存檔，確認大小後才改名
+- [x] 上傳：`upload`（multipart `file`，串流、精確 Content-Length）與建立資料夾；覆蓋時 `conflict_action=version`（NAS 保留舊版）、不覆蓋時 `autorename`；路徑先試一般字串、失敗退回 JSON 引號
+- [x] 同步引擎 `folder_sync.rs`：三方比對（本機 / NAS / 上次同步紀錄）、純函式決策與單元測試
+- [x] 缺檔一律補回；兩邊都改保留兩份並寫入衝突管理
+- [x] 「刪除也同步」（每個資料夾的選項，僅雙向 / 僅上傳，預設關閉）：移到資源回收桶、沒有同步紀錄不刪、資料夾需整個都被刪才刪、大量刪除保護、刪除前再次確認
+- [x] 自動同步：同步服務登入後自動啟動、啟動後立即跑第一輪；本機變動 ≥30 秒後上傳；定期檢查 NAS（預設 5 分鐘，可設 1 分鐘 ~ 每天）；可關閉自動同步；頂端列不再有啟動 / 停止按鈕，重新啟動移到「操作佇列與監看」頁
+- [x] 同步佇列清單（等待中 / 進行中 / 失敗 / 已完成，可依資料夾與狀態篩選，每 2 秒更新）；資料夾進度（已處理 / 總數、位元組、目前檔案）、「立即同步」「取消同步」
+- [x] 通知：App 內 toast；視窗縮到系統匣 / 最小化 / 失焦時，同步失敗、同步服務錯誤、新增衝突改發 Windows 系統通知
+- [x] 錯誤訊息：列表失敗會帶資料夾路徑（1002 / 1003 = 找不到資料夾或沒有權限）並重試一次；NAS 刪除失敗、上傳失敗各有說明
+
+### 連線與大檔（P1-21l、P1-21m）
+- [x] 實測 NAS 位址經 Cloudflare，請求內容超過約 100 MB 會被 413 拒絕；上傳改用獨立 agent（等待回應 10 分鐘）；被代理拒絕時顯示說明、記住該大小之後不再重傳、不計入連續失敗
+- [x] 區網直連：區網位址（僅私有網路位址）+ 可選的限定 Wi-Fi 名稱（`netsh`）；每次同步開始偵測並測試，連得到就改走區網；用區網列出失敗自動退回一般位址。已實機驗證：區網位址可連、Wi-Fi 名稱可讀取、148 MB mp4 經區網上傳成功
+
+### 檔案總管同步圖示（P1-20）
+- [x] `cloud_status.rs`：以 Windows Cloud Files（`cloud-filter`）把同步資料夾註冊為同步根（AlwaysFull，檔案完整存在本機），下載 / 上傳時標示「同步中」，完成後標為「已同步」；登入後 / 新增 / 繼續時註冊並連線，暫停 / 登出時中斷，移除時解除註冊；設定頁可關閉
+- [x] Windows 實機整合測試（`cargo test cloud_status -- --ignored --nocapture`）；已知 `SyncRootId::is_registered` 對本程式的註冊會誤報 false，註冊 / 解除一律直接呼叫
+
+### 早期骨架（已完成，待 P2-1 清理）
+- [x] 同步資料模型與 SQLite schema（baseline / operations / conflicts）、衝突狀態與統計
+- [x] 模擬的操作佇列、executor、pipeline、故障矩陣與 Demo 佇列（現已被真實同步引擎取代）
+- [x] 系統快照指令
