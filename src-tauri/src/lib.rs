@@ -616,6 +616,7 @@ async fn remove_sync_folder(
     id: String,
 ) -> Result<config::AppConfig, String> {
     sync_run_state.cancel(&id);
+    sync_run_state.forget(&id);
     // 先解除同步根註冊，資料夾才不會留下雲端檔案篩選的殘餘狀態
     let _ = cloud_state.unregister(&id);
     let cfg = config::remove_folder(&app, &id)?;
@@ -640,6 +641,20 @@ async fn start_folder_sync(
 #[tauri::command]
 fn cancel_folder_sync(sync_run_state: State<'_, folder_sync::SyncRunState>, id: String) {
     sync_run_state.cancel(&id);
+}
+
+#[tauri::command]
+fn get_sync_queue(
+    sync_run_state: State<'_, folder_sync::SyncRunState>,
+    folder_id: Option<String>,
+    status: Option<String>,
+    limit: Option<u32>,
+) -> folder_sync::QueueSnapshot {
+    sync_run_state.queue_snapshot(
+        folder_id.as_deref(),
+        status.as_deref(),
+        limit.unwrap_or(200).clamp(1, 1000) as usize,
+    )
 }
 
 #[tauri::command]
@@ -1214,6 +1229,7 @@ pub fn run() {
             start_folder_sync,
             cancel_folder_sync,
             get_sync_progress,
+            get_sync_queue,
             update_sync_folder,
             remove_sync_folder,
             list_nas_folders,

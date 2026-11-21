@@ -55,6 +55,66 @@ type SyncProgress = {
   lastError: string | null;
 };
 
+type SyncQueueItem = {
+  folderId: string;
+  path: string;
+  action: string;
+  size: number | null;
+  status: "waiting" | "running" | "done" | "failed" | string;
+  error: string | null;
+};
+
+type SyncQueueSnapshot = {
+  items: SyncQueueItem[];
+  waiting: number;
+  running: number;
+  done: number;
+  failed: number;
+  matched: number;
+};
+
+const EMPTY_SYNC_QUEUE: SyncQueueSnapshot = {
+  items: [],
+  waiting: 0,
+  running: 0,
+  done: 0,
+  failed: 0,
+  matched: 0,
+};
+
+const QUEUE_STATUS_FILTERS: { id: string; label: string }[] = [
+  { id: "", label: "全部" },
+  { id: "waiting", label: "等待中" },
+  { id: "running", label: "進行中" },
+  { id: "failed", label: "失敗" },
+  { id: "done", label: "已完成" },
+];
+
+const QUEUE_STATUS_LABEL: Record<string, string> = {
+  waiting: "等待中",
+  running: "進行中",
+  failed: "失敗",
+  done: "已完成",
+};
+
+const QUEUE_STATUS_BADGE: Record<string, string> = {
+  waiting: "badge-neutral",
+  running: "badge-info",
+  failed: "badge-danger",
+  done: "badge-success",
+};
+
+const QUEUE_ACTIONS: Record<string, { arrow: string; label: string }> = {
+  download: { arrow: "↓", label: "下載" },
+  download_overwrite: { arrow: "↓", label: "下載（取代本機舊版）" },
+  keep_both_download: { arrow: "↓", label: "下載（本機版本另存為衝突副本）" },
+  upload: { arrow: "↑", label: "上傳" },
+  upload_version: { arrow: "↑", label: "上傳新版本（NAS 保留舊版）" },
+  create_remote_dir: { arrow: "↑", label: "在 NAS 建立資料夾" },
+  create_local_dir: { arrow: "↓", label: "在本機建立資料夾" },
+  conflict: { arrow: "⚠", label: "名稱衝突（一邊是檔案、一邊是資料夾）" },
+};
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -344,6 +404,11 @@ function App() {
   const [folderBusy, setFolderBusy] = useState(false);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [downloads, setDownloads] = useState<SyncProgress[]>([]);
+  const [syncQueue, setSyncQueue] = useState<SyncQueueSnapshot>(EMPTY_SYNC_QUEUE);
+  const [queueFolderId, setQueueFolderId] = useState("");
+  const [queueStatus, setQueueStatus] = useState("");
+  const queueQueryRef = useRef({ folderId: "", status: "" });
+  queueQueryRef.current = { folderId: queueFolderId, status: queueStatus };
   const [pollIntervalSeconds, setPollIntervalSeconds] = useState("30");
   const [ingestBacklogLimit, setIngestBacklogLimit] = useState("200");
 
@@ -496,9 +561,25 @@ function App() {
       refreshServiceStatus().catch(() => undefined);
       refreshWatcherStatus().catch(() => undefined);
       refreshDownloads().catch(() => undefined);
+      refreshSyncQueue().catch(() => undefined);
     }, 2000);
     return () => window.clearInterval(timer);
   }, []);
+
+  async function refreshSyncQueue() {
+    const { folderId, status } = queueQueryRef.current;
+    const snapshot = await invoke<SyncQueueSnapshot>("get_sync_queue", {
+      folderId: folderId || null,
+      status: status || null,
+      limit: 200,
+    });
+    setSyncQueue(snapshot);
+  }
+
+  // 切換篩選條件時立即重新整理，不必等下一次輪詢
+  useEffect(() => {
+    if (activeTab === "operations") refreshSyncQueue().catch(() => undefined);
+  }, [queueFolderId, queueStatus, activeTab]);
 
   // 下載進度：偵測「進行中 → 結束」的變化並以 toast 通知
   const previousDownloadPhases = useRef<Map<string, string>>(new Map());
@@ -2877,7 +2958,122 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">Pipeline 與執行器控制台</h2>
+                    <h2 className="card-title">
+                      同步佇列（NAS ⇄ 本機）
+                      {syncQueue.waiting + syncQueue.running > 0 ? (
+                        <span className="badge badge-info" style={{ marginLeft: 8 }}>
+                          待處理 {syncQueue.waiting + syncQueue.running}
+                        </span>
+                      ) : null}
+                    </h2>
+                    <p className="card-desc">
+                      每次同步比對後，需要上傳、下載或建立資料夾的項目會列在這裡；沒有變動的檔案不會出現
+                    </p>
+                  </div>
+                  <select
+                    className="input folder-mode-select"
+                    value={queueFolderId}
+                    aria-label="依同步資料夾篩選"
+                    onChange={(event) => setQueueFolderId(event.currentTarget.value)}
+                  >
+                    <option value="">全部資料夾</option>
+                    {syncFolders.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="filter-bar">
+                  {QUEUE_STATUS_FILTERS.map((f) => {
+                    const count =
+                      f.id === ""
+                        ? syncQueue.waiting + syncQueue.running + syncQueue.failed + syncQueue.done
+                        : f.id === "waiting"
+                          ? syncQueue.waiting
+                          : f.id === "running"
+                            ? syncQueue.running
+                            : f.id === "failed"
+                              ? syncQueue.failed
+                              : syncQueue.done;
+                    return (
+                      <button
+                        key={f.id || "all"}
+                        type="button"
+                        className={`filter-pill ${queueStatus === f.id ? "active" : ""}`}
+                        onClick={() => setQueueStatus(f.id)}
+                      >
+                        {f.label} {count}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {syncQueue.items.length > 0 ? (
+                  <div className="table-wrapper">
+                    <table className="modern-table">
+                      <thead>
+                        <tr>
+                          <th>狀態</th>
+                          <th>動作</th>
+                          <th>NAS 路徑</th>
+                          <th>大小</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {syncQueue.items.map((item, idx) => {
+                          const folderName =
+                            syncFolders.find((f) => f.id === item.folderId)?.name ?? "";
+                          const meta = QUEUE_ACTIONS[item.action];
+                          return (
+                            <tr key={`${item.folderId}-${item.path}-${idx}`}>
+                              <td>
+                                <span className={`badge ${QUEUE_STATUS_BADGE[item.status] ?? "badge-neutral"}`}>
+                                  {QUEUE_STATUS_LABEL[item.status] ?? item.status}
+                                </span>
+                              </td>
+                              <td>
+                                <div className="cell-primary">
+                                  {meta ? `${meta.arrow} ${meta.label}` : item.action}
+                                </div>
+                                {queueFolderId === "" && folderName ? (
+                                  <div className="cell-secondary">{folderName}</div>
+                                ) : null}
+                              </td>
+                              <td>
+                                <div className="cell-primary mono">{item.path}</div>
+                                {item.error ? (
+                                  <div className="cell-error">錯誤：{item.error}</div>
+                                ) : null}
+                              </td>
+                              <td className="cell-secondary">
+                                {item.size !== null ? formatBytes(item.size) : "-"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    {syncQueue.waiting + syncQueue.running + syncQueue.failed + syncQueue.done === 0
+                      ? "目前沒有待同步的項目。新增資料夾、按「立即同步」或啟動同步服務後，比對出的項目會顯示在這裡"
+                      : "沒有符合篩選條件的項目"}
+                  </div>
+                )}
+                {syncQueue.matched > syncQueue.items.length ? (
+                  <div className="cell-secondary">
+                    僅顯示前 {syncQueue.items.length} 筆，共 {syncQueue.matched} 筆
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
                     <p className="card-desc">
                       手動觸發 Watcher 事件轉入、本機補掃描或單步/批次執行同步佇列
                     </p>

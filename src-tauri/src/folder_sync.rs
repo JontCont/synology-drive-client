@@ -49,10 +49,83 @@ pub struct SyncProgress {
     pub finished_at_ms: Option<u64>,
 }
 
+const QUEUE_WAITING: &str = "waiting";
+const QUEUE_RUNNING: &str = "running";
+const QUEUE_DONE: &str = "done";
+const QUEUE_FAILED: &str = "failed";
+
+/// 同步佇列中的一個待處理項目（只包含需要上傳、下載或建立資料夾的項目）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItem {
+    pub folder_id: String,
+    pub path: String,
+    /// download / download_overwrite / keep_both_download / upload / upload_version / create_remote_dir / create_local_dir / conflict
+    pub action: String,
+    pub size: Option<u64>,
+    /// waiting / running / done / failed
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSnapshot {
+    pub items: Vec<QueueItem>,
+    pub waiting: u64,
+    pub running: u64,
+    pub done: u64,
+    pub failed: u64,
+    /// 符合條件的項目總數（`items` 可能因 limit 而較少）
+    pub matched: u64,
+}
+
+fn queue_action_label(action: &Action) -> Option<&'static str> {
+    Some(match action {
+        Action::Download => "download",
+        Action::DownloadOverwrite => "download_overwrite",
+        Action::KeepBothThenDownload => "keep_both_download",
+        Action::Upload => "upload",
+        Action::UploadVersion => "upload_version",
+        Action::CreateRemoteDir => "create_remote_dir",
+        Action::CreateLocalDir => "create_local_dir",
+        Action::TypeMismatch => "conflict",
+        _ => return None,
+    })
+}
+
+/// 由計畫產生佇列；回傳的 positions 與 plan 等長，記錄每個計畫項目在佇列中的位置
+fn build_queue(folder_id: &str, plan: &[PlanItem]) -> (Vec<QueueItem>, Vec<Option<usize>>) {
+    let mut queue = Vec::new();
+    let mut positions = Vec::with_capacity(plan.len());
+    for item in plan {
+        match queue_action_label(&item.action) {
+            Some(label) => {
+                positions.push(Some(queue.len()));
+                let size = match item.action {
+                    Action::Upload | Action::UploadVersion => item.local.as_ref().map(|l| l.size),
+                    _ => item.remote.as_ref().and_then(|r| r.size),
+                };
+                queue.push(QueueItem {
+                    folder_id: folder_id.to_string(),
+                    path: item.remote_path.clone(),
+                    action: label.to_string(),
+                    size,
+                    status: QUEUE_WAITING.to_string(),
+                    error: None,
+                });
+            }
+            None => positions.push(None),
+        }
+    }
+    (queue, positions)
+}
+
 #[derive(Default)]
 pub struct SyncRunState {
     progress: Mutex<HashMap<String, SyncProgress>>,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    queues: Mutex<HashMap<String, Vec<QueueItem>>>,
 }
 
 pub fn now_ms() -> u64 {
@@ -72,6 +145,76 @@ impl SyncRunState {
             .lock()
             .map(|p| p.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// 資料夾被移除後清掉它的進度與佇列
+    pub fn forget(&self, folder_id: &str) {
+        if let Ok(mut p) = self.progress.lock() {
+            p.remove(folder_id);
+        }
+        if let Ok(mut q) = self.queues.lock() {
+            q.remove(folder_id);
+        }
+        if let Ok(mut c) = self.cancels.lock() {
+            c.remove(folder_id);
+        }
+    }
+
+    fn set_queue(&self, folder_id: &str, queue: Vec<QueueItem>) {
+        if let Ok(mut queues) = self.queues.lock() {
+            queues.insert(folder_id.to_string(), queue);
+        }
+    }
+
+    fn set_queue_status(&self, folder_id: &str, pos: usize, status: &str, error: Option<String>) {
+        if let Ok(mut queues) = self.queues.lock() {
+            if let Some(item) = queues.get_mut(folder_id).and_then(|q| q.get_mut(pos)) {
+                item.status = status.to_string();
+                item.error = error;
+            }
+        }
+    }
+
+    /// 取得同步佇列。`folder_id` 為 None 時包含所有資料夾；`status` 為 None 時不過濾；
+    /// 排序：進行中 → 失敗 → 等待中 → 已完成，同狀態維持計畫順序
+    pub fn queue_snapshot(
+        &self,
+        folder_id: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> QueueSnapshot {
+        let Ok(queues) = self.queues.lock() else {
+            return QueueSnapshot::default();
+        };
+        let mut snapshot = QueueSnapshot::default();
+        let mut matched: Vec<&QueueItem> = Vec::new();
+        for (id, queue) in queues.iter() {
+            if folder_id.is_some_and(|wanted| wanted != id) {
+                continue;
+            }
+            for item in queue {
+                match item.status.as_str() {
+                    QUEUE_WAITING => snapshot.waiting += 1,
+                    QUEUE_RUNNING => snapshot.running += 1,
+                    QUEUE_DONE => snapshot.done += 1,
+                    QUEUE_FAILED => snapshot.failed += 1,
+                    _ => {}
+                }
+                if status.is_none_or(|wanted| wanted == item.status) {
+                    matched.push(item);
+                }
+            }
+        }
+        let rank = |s: &str| match s {
+            QUEUE_RUNNING => 0,
+            QUEUE_FAILED => 1,
+            QUEUE_WAITING => 2,
+            _ => 3,
+        };
+        matched.sort_by_key(|item| rank(&item.status));
+        snapshot.matched = matched.len() as u64;
+        snapshot.items = matched.into_iter().take(limit).cloned().collect();
+        snapshot
     }
 
     pub fn is_running(&self, folder_id: &str) -> bool {
@@ -666,6 +809,8 @@ fn run_sync(
         })
         .sum();
     let has_transfers = plan.iter().any(|i| i.action.is_transfer());
+    let (queue, positions) = build_queue(&folder.id, &plan);
+    state.set_queue(&folder.id, queue);
     state.update(&folder.id, |p| {
         p.phase = PHASE_SYNCING.to_string();
         p.total_files = file_items;
@@ -682,7 +827,7 @@ fn run_sync(
 
     // 3) 逐項執行；無論成功、失敗或取消，都要保存已完成項目的同步紀錄
     let result = execute_plan(
-        app, state, folder, &auth, &local_root, &plan, &mut baseline, cancel, show_icons,
+        app, state, folder, &auth, &local_root, &plan, &positions, &mut baseline, cancel, show_icons,
     );
     let completed = result.is_ok() && !cancel.load(Ordering::SeqCst);
     if completed {
@@ -715,6 +860,7 @@ fn execute_plan(
     auth: &auth::AuthState,
     local_root: &Path,
     plan: &[PlanItem],
+    positions: &[Option<usize>],
     baseline: &mut Baseline,
     cancel: &AtomicBool,
     show_icons: bool,
@@ -726,6 +872,10 @@ fn execute_plan(
             return Ok(());
         }
         let local_path = rel_to_path(local_root, &item.rel_local);
+        let queue_pos = positions.get(index).copied().flatten();
+        if let Some(pos) = queue_pos {
+            state.set_queue_status(&folder.id, pos, QUEUE_RUNNING, None);
+        }
 
         if item.is_dir {
             let result = match item.action {
@@ -735,11 +885,21 @@ fn execute_plan(
                 Action::TypeMismatch => Err("此名稱在本機與 NAS 一邊是檔案、一邊是資料夾".to_string()),
                 _ => Ok(()),
             };
-            if let Err(err) = result {
-                if is_session_error(&err) {
-                    return Err(err);
+            match result {
+                Ok(()) => {
+                    if let Some(pos) = queue_pos {
+                        state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
+                    }
                 }
-                record_failure(state, folder, &item.rel_local.join("/"), &err);
+                Err(err) => {
+                    if let Some(pos) = queue_pos {
+                        state.set_queue_status(&folder.id, pos, QUEUE_FAILED, Some(err.clone()));
+                    }
+                    if is_session_error(&err) {
+                        return Err(err);
+                    }
+                    record_failure(state, folder, &item.rel_local.join("/"), &err);
+                }
             }
             continue;
         }
@@ -771,10 +931,16 @@ fn execute_plan(
         match outcome {
             Ok(None) => {
                 consecutive_failures = 0;
+                if let Some(pos) = queue_pos {
+                    state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
+                }
                 state.update(&folder.id, |p| p.skipped_files += 1);
             }
             Ok(Some(transfer)) => {
                 consecutive_failures = 0;
+                if let Some(pos) = queue_pos {
+                    state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
+                }
                 if show_icons {
                     cloud_status::mark_file(&local_path, true);
                 }
@@ -803,6 +969,9 @@ fn execute_plan(
                 });
             }
             Err(err) => {
+                if let Some(pos) = queue_pos {
+                    state.set_queue_status(&folder.id, pos, QUEUE_FAILED, Some(err.clone()));
+                }
                 if is_session_error(&err) {
                     return Err(err);
                 }
@@ -1146,6 +1315,55 @@ mod tests {
         // 進行中不會重複啟動
         state.progress.lock().unwrap().get_mut("f").unwrap().phase = PHASE_SYNCING.to_string();
         assert!(!state.auto_sync_due("f", u64::MAX / 2, true));
+    }
+
+    #[test]
+    fn queue_lists_only_actionable_items_and_sorts_by_status() {
+        let remote = vec![
+            rn("/mydrive/W/a.txt", false, Some(3)),
+            rn("/mydrive/W/same.txt", false, Some(4)),
+        ];
+        let local = vec![
+            ln(&["same.txt"], false, 4, 100),
+            ln(&["up.txt"], false, 9, 100),
+            ln(&["newdir"], true, 0, 0),
+        ];
+        let plan = build_plan(BI, "/mydrive/W", &remote, &local, &Baseline::default());
+        let (queue, positions) = build_queue("f", &plan);
+        // same.txt 兩邊一致（只記錄）不進佇列；其餘三項：資料夾、下載、上傳
+        assert_eq!(positions.len(), plan.len());
+        let labels: Vec<&str> = queue.iter().map(|q| q.action.as_str()).collect();
+        assert_eq!(labels.len(), 3);
+        assert!(labels.contains(&"create_remote_dir"));
+        assert!(labels.contains(&"download"));
+        assert!(labels.contains(&"upload"));
+        assert_eq!(
+            queue.iter().find(|q| q.action == "upload").unwrap().size,
+            Some(9)
+        );
+        assert_eq!(
+            queue.iter().find(|q| q.action == "download").unwrap().size,
+            Some(3)
+        );
+
+        let state = SyncRunState::new();
+        state.set_queue("f", queue);
+        state.set_queue_status("f", 0, QUEUE_DONE, None);
+        state.set_queue_status("f", 1, QUEUE_FAILED, Some("boom".to_string()));
+        state.set_queue_status("f", 2, QUEUE_RUNNING, None);
+        let all = state.queue_snapshot(None, None, 10);
+        assert_eq!((all.running, all.failed, all.waiting, all.done), (1, 1, 0, 1));
+        let order: Vec<&str> = all.items.iter().map(|i| i.status.as_str()).collect();
+        assert_eq!(order, vec!["running", "failed", "done"]);
+        // 過濾與數量上限
+        let failed = state.queue_snapshot(Some("f"), Some("failed"), 10);
+        assert_eq!(failed.items.len(), 1);
+        assert_eq!(failed.items[0].error.as_deref(), Some("boom"));
+        let limited = state.queue_snapshot(None, None, 2);
+        assert_eq!((limited.items.len(), limited.matched), (2, 3));
+        assert_eq!(state.queue_snapshot(Some("other"), None, 10).matched, 0);
+        state.forget("f");
+        assert_eq!(state.queue_snapshot(None, None, 10).matched, 0);
     }
 
     #[test]
