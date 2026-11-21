@@ -237,16 +237,6 @@ type SyncStorageInfo = {
   schemaVersion: number;
 };
 
-type SyncRootRow = {
-  id: string;
-  accountId: string;
-  localPath: string;
-  remotePath: string;
-  mode: string;
-  cursor: string | null;
-  scanGeneration: number;
-};
-
 type SyncServiceStatus = {
   running: boolean;
   intervalSeconds: number | null;
@@ -307,14 +297,6 @@ type ConflictStatusCount = {
   count: number;
 };
 
-type ExecutorRunResult = {
-  processed: boolean;
-  operationId: string | null;
-  stage: string | null;
-  outcome: string;
-  message: string;
-};
-
 type SystemSnapshot = {
   config: AppConfig | null;
   authStatus: AuthStatus | null;
@@ -330,6 +312,14 @@ type SystemSnapshot = {
 type WatcherDrainResult = {
   queuedCount: number;
   operationIds: string[];
+};
+
+type ExecutorRunResult = {
+  processed: boolean;
+  operationId: string | null;
+  stage: string | null;
+  outcome: string;
+  message: string;
 };
 
 type PipelineRunResult = {
@@ -365,7 +355,7 @@ type FaultMatrixFastRunResult = {
   operationStageCounts: OperationStageCount[];
 };
 
-type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings" | "docs";
+type NavTab = "overview" | "operations" | "conflicts" | "auth" | "settings" | "docs" | "devtools";
 type LoginViewTab = "standard" | "config";
 
 function getStageBadgeClass(stage: string | null | undefined): string {
@@ -393,7 +383,6 @@ function App() {
   const invoke = async <T,>(
     command: string,
     args?: Record<string, unknown>,
-  const [chartType, setChartType] = useState<"bar" | "line">("bar");
   ): Promise<T> => {
     if (!hasTauriBridge) {
       throw new Error("偵測不到 Tauri runtime。請使用 `npm run tauri dev` 啟動。");
@@ -404,6 +393,7 @@ function App() {
   const [viewMode, setViewMode] = useState<"login" | "dashboard">("login");
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
   const [activeTab, setActiveTab] = useState<NavTab>("overview");
+  const [chartType, setChartType] = useState<"bar" | "line">("bar");
   const [theme, setTheme] = useState<"system" | "light" | "dark">("system");
   const [windowPreset, setWindowPreset] = useState<"wide" | "compact">("wide");
   const [nasPicker, setNasPicker] = useState<{
@@ -422,7 +412,6 @@ function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [storageInfo, setStorageInfo] = useState<SyncStorageInfo | null>(null);
-  const [syncRoot, setSyncRoot] = useState<SyncRootRow | null>(null);
   const [serviceStatus, setServiceStatus] = useState<SyncServiceStatus | null>(null);
   const [watcherStatus, setWatcherStatus] = useState<LocalWatcherStatus | null>(null);
   const [operations, setOperations] = useState<OperationRow[]>([]);
@@ -431,7 +420,6 @@ function App() {
   const [conflictStatusCounts, setConflictStatusCounts] = useState<ConflictStatusCount[]>([]);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const folderToRemove = config?.syncFolders.find((folder) => folder.id === confirmRemoveId) ?? null;
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -443,6 +431,7 @@ function App() {
   const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [folderBusy, setFolderBusy] = useState(false);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const folderToRemove = config?.syncFolders.find((folder) => folder.id === confirmRemoveId) ?? null;
   const [downloads, setDownloads] = useState<SyncProgress[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueSnapshot>(EMPTY_SYNC_QUEUE);
   const [overviewQueue, setOverviewQueue] = useState<SyncQueueSnapshot | null>(null);
@@ -567,10 +556,6 @@ function App() {
       invoke<ConflictStatusCount[]>("get_conflict_status_counts")
         .then((rows) => setConflictStatusCounts(rows))
         .catch(() => setConflictStatusCounts([])),
-
-      invoke<SyncRootRow>("get_default_sync_root")
-        .then((row) => setSyncRoot(row))
-        .catch(() => setSyncRoot(null)),
 
       invoke<SystemSnapshot>("get_system_snapshot")
         .then((s) => setSnapshot(s))
@@ -817,7 +802,6 @@ function App() {
     setError(null);
     try {
       applyConfigToState(await action());
-      setSyncRoot(null);
       setMessage(successMessage);
       await refreshWatcherStatus().catch(() => undefined);
       await invoke("ensure_explorer_icons").catch((err) =>
@@ -886,7 +870,6 @@ function App() {
     return runFolderAction(
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
       patch.syncDeletes !== undefined
-    if (removed) setConfirmRemoveId(null);
         ? patch.syncDeletes
           ? "已開啟「同步刪除」，下一輪同步起生效。"
           : "已關閉「同步刪除」。"
@@ -903,6 +886,7 @@ function App() {
       () => invoke<AppConfig>("remove_sync_folder", { id }),
       "已移除同步資料夾（本機與 NAS 上的檔案不會被刪除）。",
     );
+    if (removed) setConfirmRemoveId(null);
   }
 
   async function browseLocalFolder() {
@@ -1262,6 +1246,37 @@ function App() {
     }
   }
 
+  async function scanLocalOnce() {
+    setOpsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await invoke<WatcherDrainResult>("scan_local_once_to_operations", {
+        limit: 50,
+      });
+      await refreshOperations();
+      setMessage(`補掃描已轉入 ${result.queuedCount} 筆 operation。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpsLoading(false);
+    }
+  }
+
+  async function refreshOperations() {
+    const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 20 });
+    setOperations(rows);
+    const stageCounts = await invoke<OperationStageCount[]>("get_operation_stage_counts");
+    setOperationStageCounts(stageCounts);
+  }
+
+  async function refreshConflicts() {
+    const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 });
+    setConflicts(rows);
+    const statusCounts = await invoke<ConflictStatusCount[]>("get_conflict_status_counts");
+    setConflictStatusCounts(statusCounts);
+  }
+
   async function drainWatcherEvents() {
     setOpsLoading(true);
     setError(null);
@@ -1317,37 +1332,6 @@ function App() {
     } finally {
       setOpsLoading(false);
     }
-  }
-
-  async function scanLocalOnce() {
-    setOpsLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const result = await invoke<WatcherDrainResult>("scan_local_once_to_operations", {
-        limit: 50,
-      });
-      await refreshOperations();
-      setMessage(`補掃描已轉入 ${result.queuedCount} 筆 operation。`);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setOpsLoading(false);
-    }
-  }
-
-  async function refreshOperations() {
-    const rows = await invoke<OperationRow[]>("list_sync_operations", { limit: 20 });
-    setOperations(rows);
-    const stageCounts = await invoke<OperationStageCount[]>("get_operation_stage_counts");
-    setOperationStageCounts(stageCounts);
-  }
-
-  async function refreshConflicts() {
-    const rows = await invoke<ConflictRow[]>("list_sync_conflicts", { limit: 20 });
-    setConflicts(rows);
-    const statusCounts = await invoke<ConflictStatusCount[]>("get_conflict_status_counts");
-    setConflictStatusCounts(statusCounts);
   }
 
   async function addSampleOperation() {
@@ -1425,66 +1409,6 @@ function App() {
       setError(String(err));
     } finally {
       setOpsLoading(false);
-    }
-  }
-
-  async function addDemoConflict() {
-    setConflictsLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const conflictId = `conflict-${Date.now()}`;
-      await invoke<ConflictRow>("add_sync_conflict", {
-        conflict: {
-          id: conflictId,
-          itemId: `item-${Date.now()}`,
-          reason: "both_modified",
-          localVersion: "local-v2",
-          remoteVersion: "remote-v3",
-          localCopyPath: "/conflict/local-copy.txt",
-          remoteCopyPath: "/conflict/remote-copy.txt",
-          status: "open",
-        },
-      });
-      await refreshConflicts();
-      setMessage("已新增示範 conflict。");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setConflictsLoading(false);
-    }
-  }
-
-  async function resolveConflict(id: string) {
-    setConflictsLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      await invoke<ConflictRow>("resolve_sync_conflict", { id });
-      await refreshConflicts();
-      setMessage(`conflict ${id} 已標記 resolved。`);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setConflictsLoading(false);
-    }
-  }
-
-  async function purgeConflicts(status: "resolved") {
-    setConflictsLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const deleted = await invoke<number>("purge_sync_conflicts", {
-        status,
-        limit: 200,
-      });
-      await refreshConflicts();
-      setMessage(`已清理 ${deleted} 筆 ${status} conflict。`);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setConflictsLoading(false);
     }
   }
 
@@ -1600,6 +1524,66 @@ function App() {
     }
   }
 
+  async function addDemoConflict() {
+    setConflictsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const conflictId = `conflict-${Date.now()}`;
+      await invoke<ConflictRow>("add_sync_conflict", {
+        conflict: {
+          id: conflictId,
+          itemId: `item-${Date.now()}`,
+          reason: "both_modified",
+          localVersion: "local-v2",
+          remoteVersion: "remote-v3",
+          localCopyPath: "/conflict/local-copy.txt",
+          remoteCopyPath: "/conflict/remote-copy.txt",
+          status: "open",
+        },
+      });
+      await refreshConflicts();
+      setMessage("已新增示範 conflict。");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setConflictsLoading(false);
+    }
+  }
+
+  async function resolveConflict(id: string) {
+    setConflictsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await invoke<ConflictRow>("resolve_sync_conflict", { id });
+      await refreshConflicts();
+      setMessage(`conflict ${id} 已標記 resolved。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setConflictsLoading(false);
+    }
+  }
+
+  async function purgeConflicts(status: "resolved") {
+    setConflictsLoading(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const deleted = await invoke<number>("purge_sync_conflicts", {
+        status,
+        limit: 200,
+      });
+      await refreshConflicts();
+      setMessage(`已清理 ${deleted} 筆 ${status} conflict。`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setConflictsLoading(false);
+    }
+  }
+
   async function retryOperationById(id: string) {
     if (!id.trim()) {
       setError("請輸入 operation id。");
@@ -1652,21 +1636,6 @@ function App() {
       setSnapshot(null);
     } finally {
       window.setTimeout(() => setSnapshotLoading(false), 260);
-    }
-  }
-
-  async function syncDefaultRoot() {
-    setOpsLoading(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const row = await invoke<SyncRootRow>("sync_default_root_from_config");
-      setSyncRoot(row);
-      setMessage("已將設定同步到 default sync_root。");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setOpsLoading(false);
     }
   }
 
@@ -2062,13 +2031,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-              />
-            </svg>
+            <img src="/app-logo.png" alt="" className="brand-logo-img" />
           </div>
           <div className="brand-text">
             <span className="brand-title">Synology Drive</span>
@@ -2112,20 +2075,18 @@ function App() {
 
           <button
             type="button"
-            className={`nav-item ${activeTab === "operations" ? "active" : ""}`}
-            onClick={() => switchDashboardTab("operations")}
+            className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
+            onClick={() => switchDashboardTab("settings")}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                d="M4 6h16M4 12h16M4 18h16"
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
               />
+              <circle cx="12" cy="12" r="3" />
             </svg>
-            <span>操作佇列與監看</span>
-            {totalSyncQueueItems > 0 ? (
-              <span className="nav-badge">{totalSyncQueueItems}</span>
-            ) : null}
+            <span>同步檔案</span>
           </button>
 
           <button
@@ -2148,6 +2109,35 @@ function App() {
 
           <button
             type="button"
+            className={`nav-item ${activeTab === "operations" ? "active" : ""}`}
+            onClick={() => switchDashboardTab("operations")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M4 6h16M4 12h16M4 18h16"
+              />
+            </svg>
+            <span>操作佇列與監看</span>
+            {totalSyncQueueItems > 0 ? (
+              <span className="nav-badge">{totalSyncQueueItems}</span>
+            ) : null}
+          </button>
+
+          <button
+            type="button"
+            className={`nav-item nav-item-bottom ${activeTab === "docs" ? "active" : ""}`}
+            onClick={() => switchDashboardTab("docs")}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 3h9l4 4v14H6a2 2 0 01-2-2V5a2 2 0 012-2zM14 3v5h5M8 12h7M8 16h7" />
+            </svg>
+            <span>文件說明</span>
+          </button>
+
+          <button
+            type="button"
             className={`nav-item ${activeTab === "auth" ? "active" : ""}`}
             onClick={() => switchDashboardTab("auth")}
           >
@@ -2158,39 +2148,29 @@ function App() {
                 d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
               />
             </svg>
-            <span>設定檔</span>
+            <span>環境設定</span>
             <span
               className={`status-dot-sm ${
                 authStatus?.stage === "authenticated" ? "status-online" : "status-idle"
               }`}
             />
           </button>
-
-          <button
-            type="button"
-            className={`nav-item ${activeTab === "settings" ? "active" : ""}`}
-            onClick={() => switchDashboardTab("settings")}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-              />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
-            <span>同步設定</span>
-          </button>
-          <button
-            type="button"
-            className={`nav-item ${activeTab === "docs" ? "active" : ""}`}
-            onClick={() => switchDashboardTab("docs")}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 3h9l4 4v14H6a2 2 0 01-2-2V5a2 2 0 012-2zM14 3v5h5M8 12h7M8 16h7" />
-            </svg>
-            <span>文件說明</span>
-          </button>
+          {!import.meta.env.PROD && (
+            <button
+              type="button"
+              className={`nav-item ${activeTab === "devtools" ? "active" : ""}`}
+              onClick={() => switchDashboardTab("devtools")}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"
+                />
+              </svg>
+              <span>開發工具</span>
+            </button>
+          )}
         </nav>
 
         <div className="sidebar-footer">
@@ -2233,15 +2213,47 @@ function App() {
               {activeTab === "overview" && "總覽儀表板"}
               {activeTab === "operations" && "操作佇列與本機監看"}
               {activeTab === "conflicts" && "同步衝突管理"}
-              {activeTab === "auth" && "設定檔"}
-              {activeTab === "settings" && "同步設定"}
+              {activeTab === "auth" && "環境設定"}
+              {activeTab === "settings" && "同步檔案"}
               {activeTab === "docs" && "文件說明"}
+              {activeTab === "devtools" && "開發工具"}
             </h1>
             <p className="page-subtitle">
               {syncFolders.length > 0
                 ? `${syncFolders.length} 個同步資料夾（${syncFolders.filter((f) => !f.paused).length} 個啟用中）`
                 : "尚未新增同步資料夾"}
             </p>
+          </div>
+
+          <div className="topbar-actions">
+            <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
+              {authStatus?.stage === "authenticated"
+                ? `已登入 (${authStatus.username ?? "User"})`
+                : `認證：${authStatus?.stage ?? "idle"}`}
+            </span>
+            {authStatus?.stage === "authenticated" ? (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={logout}
+                disabled={authLoading}
+              >
+                登出
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setViewMode("login")}
+              >
+                前往登入頁
+              </button>
+            )}
+          </div>
+        </header>
+
+        {toastStack}
+
         {folderToRemove ? (
           <div className="modal-overlay" role="presentation">
             <div
@@ -2281,37 +2293,6 @@ function App() {
             </div>
           </div>
         ) : null}
-
-          </div>
-
-          <div className="topbar-actions">
-            <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
-              {authStatus?.stage === "authenticated"
-                ? `已登入 (${authStatus.username ?? "User"})`
-                : `認證：${authStatus?.stage ?? "idle"}`}
-            </span>
-            {authStatus?.stage === "authenticated" ? (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={logout}
-                disabled={authLoading}
-              >
-                登出
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => setViewMode("login")}
-              >
-                前往登入頁
-              </button>
-            )}
-          </div>
-        </header>
-
-        {toastStack}
 
         {nasPicker.open ? (
           <div className="modal-overlay" role="presentation">
@@ -2666,7 +2647,7 @@ function App() {
                     <div className="alert alert-error">{serviceStatus.lastError}</div>
                   ) : null}
 
-                  <div className="button-row">
+                  <div className="button-row button-row-end">
                     <button
                       type="button"
                       className="btn btn-ghost"
@@ -2723,7 +2704,7 @@ function App() {
                     </div>
                   </div>
 
-                  <div className="button-row">
+                  <div className="button-row button-row-end">
                     <button
                       type="button"
                       className="btn btn-ghost"
@@ -2805,19 +2786,11 @@ function App() {
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">預設 Sync Root</span>
-                      <span className="stat-val mono">
-                        {syncRoot
-                          ? `${syncRoot.id}: ${syncRoot.localPath} ⇄ ${syncRoot.remotePath}`
-                          : "尚未綁定"}
-                      </span>
-                    </div>
-                    <div className="stat-item">
                       <span className="stat-key">未解決衝突數</span>
                       <span className="stat-val">{openConflictCount} 筆</span>
                     </div>
                   </div>
-                  <div className="button-row">
+                  <div className="button-row button-row-end">
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
@@ -3217,7 +3190,7 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">設定檔</h2>
+                    <h2 className="card-title">環境設定</h2>
                     <p className="card-desc">目前登入帳號資訊（唯讀）</p>
                   </div>
                   <div className="button-row">
@@ -3389,8 +3362,8 @@ function App() {
                                         : "任刪除已同步過的檔案時，另邊會移到回收筒"}
                                     </span>
                                   </span>
-                                </span>
-                              </label>
+                                </label>
+                              </div>
                             ) : null}
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
@@ -3766,9 +3739,9 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
+                    <h2 className="card-title">同步服務與本機監看控制</h2>
                     <p className="card-desc">
-                      手動觸發 Watcher 事件轉入、本機補掃描或單步/批次執行同步佇列
+                      手動啟停背景同步服務、本機監看 (Watcher) 或補掃描本機資料夾
                     </p>
                   </div>
                   <div className="button-row">
@@ -3829,9 +3802,284 @@ function App() {
                       >
                         停止監看
                       </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={scanLocalOnce}
+                        disabled={opsLoading}
+                      >
+                        補掃描本機資料夾
+                      </button>
                     </div>
                   </div>
+                </div>
+              </section>
 
+              <div>
+                <section className="card">
+                  <h2 className="card-title">SQLite 儲存引擎</h2>
+                  <p className="card-desc">管理本機同步狀態資料庫 Schema 與路徑</p>
+                  <div className="stats-list">
+                    <div className="stat-item">
+                      <span className="stat-key">Schema 版本</span>
+                      <span className="stat-val">
+                        {storageInfo ? `v${storageInfo.schemaVersion}` : "尚未初始化"}
+                      </span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-key">資料庫檔案位置</span>
+                      <span className="stat-val mono">
+                        {storageInfo?.dbPath ?? "尚未建立"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={initStorage}
+                      disabled={authLoading}
+                    >
+                      {authLoading ? "處理中..." : "初始化同步資料庫"}
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">系統診斷快照 (System Snapshot)</h2>
+                    <p className="card-desc">
+                      集中檢視設定、認證、背景服務、監看器與資料庫佇列聚合統計
+                    </p>
+                  </div>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={refreshSnapshot}>
+                    重新整理快照
+                  </button>
+                </div>
+                {snapshotLoading ? (
+                  <div className="fb-skeleton-container" aria-busy="true" aria-label="快照載入中">
+                    <div className="fb-skeleton fb-skeleton-line w-60" />
+                    <div className="fb-skeleton fb-skeleton-line w-80" />
+                    <div className="fb-skeleton fb-skeleton-line w-45" />
+                    <div className="fb-skeleton fb-skeleton-line w-70" />
+                    <div className="fb-skeleton fb-skeleton-line w-30" />
+                  </div>
+                ) : snapshot ? (
+                  <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
+                ) : (
+                  <div className="empty-state">尚未載入系統快照。</div>
+                )}
+              </section>
+            </div>
+          )}
+          {!initialLoading && !tabSwitching && activeTab === "docs" && (
+            <article className="docs-article">
+              {/* Blog Hero */}
+              <header className="docs-hero card">
+                <div className="docs-hero-eyebrow">使用手冊 · Synology Drive Client</div>
+                <h2 className="docs-hero-title">從連線設定到日常同步，一篇看懂所有操作</h2>
+                <p className="docs-hero-lead">
+                  這份說明把常用設定分成四個主題。初次使用只要照著「快速開始」走完三步，之後就能讓程式在系統匣背景自動同步。
+                </p>
+                <nav className="docs-toc" aria-label="文件章節目錄">
+                  <a href="#docs-group-start" className="docs-toc-chip">1. 快速開始</a>
+                  <a href="#docs-group-auth" className="docs-toc-chip">2. 連線與帳號安全</a>
+                  <a href="#docs-group-sync" className="docs-toc-chip">3. 同步模式與衝突</a>
+                  <a href="#docs-group-ops" className="docs-toc-chip">4. 佇列、系統匣與進階</a>
+                </nav>
+              </header>
+
+              {/* Group 1: 快速開始 */}
+              <section id="docs-group-start" className="docs-group card">
+                <div className="docs-group-header">
+                  <span className="docs-group-tag">Group 1 · 新手入門</span>
+                  <h3 className="docs-group-title">三步驟開始同步</h3>
+                  <p className="docs-group-subtitle">
+                    第一次打開程式時，只要完成連線、配對資料夾兩件事，同步就會自動接手。
+                  </p>
+                </div>
+
+                <div className="docs-step-grid">
+                  <div className="docs-step-card">
+                    <span className="docs-step-num">01</span>
+                    <h4>設定 NAS 主機並登入</h4>
+                    <p>
+                      前往「環境設定」填寫 NAS 的 <strong>HTTPS</strong> 位址並登入帳號（支援 2FA OTP 兩步驟驗證）。若有勾選「記住登入」，下次開啟會自動恢復連線。
+                    </p>
+                  </div>
+                  <div className="docs-step-card">
+                    <span className="docs-step-num">02</span>
+                    <h4>新增同步資料夾</h4>
+                    <p>
+                      前往「同步檔案」選擇本機資料夾與 NAS 遠端目錄，並決定同步方向（雙向、僅上傳或僅下載）。
+                    </p>
+                  </div>
+                  <div className="docs-step-card">
+                    <span className="docs-step-num">03</span>
+                    <h4>觀察同步與佇列狀態</h4>
+                    <p>
+                      登入後本機監看與背景同步會自動啟動。隨時可到「操作佇列與監看」查看等待中、進行中或失敗的項目。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              {/* Group 2: 連線與帳號安全 */}
+              <section id="docs-group-auth" className="docs-group card">
+                <div className="docs-group-header">
+                  <span className="docs-group-tag">Group 2 · 連線與帳號</span>
+                  <h3 className="docs-group-title">主機位址、區網加速與登入保存</h3>
+                  <p className="docs-group-subtitle">
+                    兼顧外網安全連線與回家後的區網高速傳輸。
+                  </p>
+                </div>
+
+                <div className="docs-prose">
+                  <div className="docs-item">
+                    <h4>主機位址（HTTPS）</h4>
+                    <p>
+                      NAS 主機位址必須使用 <code>https://</code> 與有效憑證。在「環境設定」儲存主機或區網設定時，登入身分欄位為唯讀顯示；儲存設定不會重設密碼，也不會中斷目前登入。
+                    </p>
+                  </div>
+
+                  <div className="docs-item">
+                    <h4>區網直連與 Wi-Fi 條件</h4>
+                    <p>
+                      如果外網連線有經過反向代理（例如 Cloudflare 有單檔 100 MB 上傳限制），可在「環境設定」選填區網位址來加速大檔傳輸。
+                      Wi-Fi 名稱可用逗號分隔多個 SSID；留空時，只要區網位址可連通就會自動切換為區網直連。
+                    </p>
+                  </div>
+
+                  <div className="docs-callout docs-callout-info">
+                    <strong>記住登入怎麼保存憑證？</strong>
+                    <p>
+                      勾選「記住登入」後，程式只會將驗證後的 Session Token 安全存放在 <strong>Windows 認證管理員</strong>，不會將密碼或 OTP 寫入設定檔或資料庫。若 NAS 端 Session 過期或被手動撤銷，重新登入一次即可。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              {/* Group 3: 同步模式與衝突 */}
+              <section id="docs-group-sync" className="docs-group card">
+                <div className="docs-group-header">
+                  <span className="docs-group-tag">Group 3 · 同步核心</span>
+                  <h3 className="docs-group-title">同步方向、刪除規則與衝突處理</h3>
+                  <p className="docs-group-subtitle">
+                    不同資料夾可以各自設定適合的同步策略，避免誤刪重要檔案。
+                  </p>
+                </div>
+
+                <div className="docs-mode-grid">
+                  <div className="docs-mode-card">
+                    <span className="docs-mode-badge docs-badge-both">雙向同步</span>
+                    <p>本機與 NAS 的新增、修改會互相保持一致，適合日常工作資料夾。</p>
+                  </div>
+                  <div className="docs-mode-card">
+                    <span className="docs-mode-badge docs-badge-up">僅上傳</span>
+                    <p>只把本機的新增與修改送到 NAS，不會把 NAS 的內容下載回來。</p>
+                  </div>
+                  <div className="docs-mode-card">
+                    <span className="docs-mode-badge docs-badge-down">僅下載</span>
+                    <p>只把 NAS 的變更下載到本機，本機的修改不會回傳到 NAS。</p>
+                  </div>
+                </div>
+
+                <div className="docs-callout docs-callout-warn">
+                  <strong>關於「同步刪除」</strong>
+                  <p>
+                    「同步刪除」預設為<strong>關閉</strong>（支援雙向同步與僅上傳模式，刪除時會移至 NAS 資源回收桶）。開啟前請先確認同步方向與資料夾範圍是否正確。
+                  </p>
+                </div>
+
+                <div className="docs-prose">
+                  <div className="docs-item">
+                    <h4>自動同步、路徑顯示與暫存檔</h4>
+                    <ul className="docs-list">
+                      <li><strong>自動同步與檢查間隔：</strong> 可在「同步檔案」開關自動同步與調整檢查 NAS 的頻率；關閉後仍可手動按「立即同步」。</li>
+                      <li><strong>路徑精簡顯示：</strong> 資料夾路徑以單行顯示並保留最後兩層，將滑鼠移上去即可看到完整路徑。</li>
+                      <li><strong>下載暫存檔：</strong> 檔案下載過程中會先寫入 <code>.synodl-part</code> 暫存檔，完成後再原子置換，避免產生損壞的半成品。</li>
+                    </ul>
+                  </div>
+
+                  <div className="docs-item">
+                    <h4>遇到同步衝突怎麼辦？</h4>
+                    <p>
+                      當本機與 NAS 同一份檔案在兩端都被修改時，系統會標記為衝突，不會擅自覆蓋任何一方。請到「衝突管理」檢視兩邊版本與時間再決定保留方式。
+                    </p>
+                  </div>
+                </div>
+              </section>
+
+              {/* Group 4: 佇列、系統匣與進階 */}
+              <section id="docs-group-ops" className="docs-group card">
+                <div className="docs-group-header">
+                  <span className="docs-group-tag">Group 4 · 日常運作</span>
+                  <h3 className="docs-group-title">操作佇列、系統匣常駐與診斷工具</h3>
+                  <p className="docs-group-subtitle">
+                    了解程式在背景如何持續運作，以及關閉視窗後的行為。
+                  </p>
+                </div>
+
+                <div className="docs-prose">
+                  <div className="docs-item">
+                    <h4>操作佇列與本機監看（Watcher）</h4>
+                    <p>
+                      登入且至少有一個啟用中的同步資料夾時，本機監看與同步服務會自動啟動。你可以在「操作佇列」看到每筆檔案的狀態（等待中、執行中、失敗、完成）以及大檔傳輸進度；若同步服務異常停止，也可在該頁手動重啟。
+                    </p>
+                  </div>
+
+                  <div className="docs-item">
+                    <h4>關閉視窗與系統匣常駐</h4>
+                    <p>
+                      點擊視窗右上角關閉時，程式會<strong>縮小到右下角系統匣常駐</strong>，並繼續執行背景同步（不等於登出）。若要完全關閉程式，請右鍵點擊系統匣圖示選擇「結束」。
+                    </p>
+                  </div>
+
+                  <div className="docs-item">
+                    <h4>SQLite 儲存引擎與 Sync Root 是什麼？（不只是 Log）</h4>
+                    <p>
+                      總覽頁顯示的 <strong>SQLite 資料庫</strong> 不是單純的文字紀錄檔，而是同步引擎的狀態資料庫：它會保存上次同步基準線（<code>baseline</code>，用來做本機／NAS／基準線三方比對）、待處理佇列、重試狀態與衝突紀錄，讓程式重開後也不會忘記同步進度。
+                    </p>
+                    <p style={{ marginTop: 6 }}>
+                      <strong>Sync Root</strong> 則是「本機資料夾 ⇄ NAS 遠端資料夾」的配對起點與邊界，同步引擎只會掃描與監看落在 Sync Root 範圍內的檔案。
+                    </p>
+                  </div>
+
+                  <div className="docs-item">
+                    <h4>視窗大小與開發診斷面板</h4>
+                    <p>
+                      視窗解析度可在「環境設定」調整並立即套用，且不會遺失尚未儲存的表單內容。非正式環境（開發模式）側邊欄會顯示「開發工具」分頁供測試 Pipeline 與模擬佇列，一般日常使用不需要操作。
+                    </p>
+                  </div>
+                </div>
+              </section>
+            </article>
+          )}
+          {!import.meta.env.PROD && !initialLoading && !tabSwitching && activeTab === "devtools" && (
+            <div className="section-stack">
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
+                    <p className="card-desc">
+                      僅於非 PROD 環境顯示；手動觸發 Watcher 事件轉入、單步/批次執行同步佇列與 Fault Matrix 演練
+                    </p>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={refreshOperations}
+                      disabled={opsLoading}
+                    >
+                      重新整理佇列
+                    </button>
+                  </div>
+                </div>
+
+                <div className="action-groups">
                   <div className="action-group">
                     <span className="action-group-label">事件入列與執行</span>
                     <div className="button-row">
@@ -3874,14 +4122,6 @@ function App() {
                         disabled={opsLoading}
                       >
                         轉入 Watcher 事件
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={scanLocalOnce}
-                        disabled={opsLoading}
-                      >
-                        補掃描本機資料夾
                       </button>
                     </div>
                   </div>
@@ -3956,125 +4196,6 @@ function App() {
                     </div>
                   </div>
                 </div>
-              </section>
-
-              <div>
-                <section className="card">
-                  <h2 className="card-title">SQLite 儲存引擎與 Sync Root</h2>
-                  <p className="card-desc">管理本機狀態資料庫 Schema 與預設同步根目錄映射</p>
-                  <div className="stats-list">
-                    <div className="stat-item">
-                      <span className="stat-key">Schema 版本</span>
-                      <span className="stat-val">
-                        {storageInfo ? `v${storageInfo.schemaVersion}` : "尚未初始化"}
-                      </span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-key">資料庫檔案位置</span>
-                      <span className="stat-val mono">
-                        {storageInfo?.dbPath ?? "尚未建立"}
-                      </span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-key">Default Sync Root</span>
-                      <span className="stat-val mono">
-                        {syncRoot
-                          ? `${syncRoot.id} (${syncRoot.localPath} ⇄ ${syncRoot.remotePath})`
-                          : "尚未建立 default sync_root"}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={initStorage}
-                      disabled={authLoading}
-                    >
-                      {authLoading ? "處理中..." : "初始化同步資料庫"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={syncDefaultRoot}
-                      disabled={opsLoading}
-                    >
-                      {opsLoading ? "處理中..." : "將設定寫入 Default Sync Root"}
-                    </button>
-                  </div>
-                </section>
-              </div>
-
-              <section className="card">
-                <div className="card-header">
-                  <div>
-                    <h2 className="card-title">系統診斷快照 (System Snapshot)</h2>
-                    <p className="card-desc">
-                      集中檢視設定、認證、背景服務、監看器與資料庫佇列聚合統計
-                    </p>
-                  </div>
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={refreshSnapshot}>
-                    重新整理快照
-                  </button>
-                </div>
-                {snapshotLoading ? (
-                  <div className="fb-skeleton-container" aria-busy="true" aria-label="快照載入中">
-                    <div className="fb-skeleton fb-skeleton-line w-60" />
-                    <div className="fb-skeleton fb-skeleton-line w-80" />
-                    <div className="fb-skeleton fb-skeleton-line w-45" />
-                    <div className="fb-skeleton fb-skeleton-line w-70" />
-                    <div className="fb-skeleton fb-skeleton-line w-30" />
-                  </div>
-                ) : snapshot ? (
-                  <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
-                ) : (
-                  <div className="empty-state">尚未載入系統快照。</div>
-                )}
-              </section>
-            </div>
-          )}
-          {!initialLoading && !tabSwitching && activeTab === "docs" && (
-            <div className="section-stack">
-              <section className="card">
-                <h2 className="card-title">快速開始</h2>
-                <ol>
-                  <li>在「設定檔」填寫 NAS 主機位址，依需要設定區網位址與 Wi-Fi 名稱。</li>
-                  <li>在「同步設定」新增本機與 NAS 資料夾配對，選擇同步方向。</li>
-                  <li>到「操作佇列與監看」查看真實同步進度、等待項目與失敗原因。</li>
-                </ol>
-              </section>
-              <section className="card">
-                <h2 className="card-title">連線與登入</h2>
-                <p className="card-desc">
-                  NAS 主機位址須使用 HTTPS 與有效憑證。區網位址為選填，Wi-Fi 名稱可用逗號分隔；
-                  留空時，只要區網位址可連線就會使用區網直連。
-                </p>
-                <p className="card-desc">
-                  「設定檔」可直接儲存連線設定，登入身分為唯讀；儲存不會重設密碼或立即登出。
-                  登入時若勾選「記住登入」，session 會安全存於 Windows 認證管理員，不保存密碼或 OTP。
-                  NAS session 過期或撤銷時，需要重新登入。
-                </p>
-              </section>
-              <section className="card">
-                <h2 className="card-title">同步方向與刪除</h2>
-                <ul>
-                  <li>雙向同步：本機與 NAS 的新增及修改互相同步。</li>
-                  <li>僅上傳：將本機的新增及修改傳到 NAS，不下載。</li>
-                  <li>僅下載：將 NAS 的變更下載到本機，不上傳。</li>
-                  <li>「同步刪除」預設關閉；啟用前請確認同步方向與資料夾範圍。</li>
-                  <li>發生同步衝突時，到「同步衝突管理」確認檔案版本再處理。</li>
-                </ul>
-              </section>
-              <section className="card">
-                <h2 className="card-title">介面與背景運作</h2>
-                <p className="card-desc">
-                  視窗解析度在「設定檔」調整，立即套用並保留未儲存的連線輸入。
-                  關閉視窗只會縮到系統匣，不等於登出；從系統匣選擇「結束」才會關閉程式。
-                </p>
-                <p className="card-desc">
-                  Pipeline 與執行器控制台位於「同步設定」，用於開發診斷與模擬佇列；
-                  一般同步不需要操作這些控制項。
-                </p>
               </section>
             </div>
           )}
