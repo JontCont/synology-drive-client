@@ -27,6 +27,8 @@ type AppConfig = {
   oidc?: OidcConfig;
   windowPreset?: "wide" | "compact";
   explorerStatusIcons?: boolean;
+  autoSync?: boolean;
+  remoteCheckMinutes?: number;
 };
 
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
@@ -773,6 +775,16 @@ function App() {
       return false;
     } finally {
       setFolderBusy(false);
+    }
+  }
+
+  async function updateSyncSchedule(update: { autoSync?: boolean; remoteCheckMinutes?: number }) {
+    setError(null);
+    try {
+      applyConfigToState(await invoke<AppConfig>("update_app_config", { update }));
+      setMessage("同步排程已更新。");
+    } catch (err) {
+      setError(String(err));
     }
   }
 
@@ -3894,7 +3906,48 @@ function App() {
 
               <section className="card">
                 <h2 className="card-title">進階設定</h2>
-                <p className="card-desc">輪詢間隔、佇列保護上限與檔案總管整合</p>
+                <p className="card-desc">同步排程、輪詢間隔、佇列保護上限與檔案總管整合</p>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={config?.autoSync !== false}
+                    disabled={!config}
+                    onChange={(event) =>
+                      updateSyncSchedule({ autoSync: event.currentTarget.checked })
+                    }
+                  />
+                  <span>
+                    <strong>自動同步</strong>
+                    <span className="cell-secondary">
+                      本機有變動時自動上傳，並定期檢查 NAS 下載新檔案；關閉後只有按「立即同步」才會同步。
+                    </span>
+                  </span>
+                </label>
+                <label className="form-field" style={{ margin: "12px 0" }}>
+                  <span>檢查 NAS 新檔案的間隔</span>
+                  <select
+                    className="input"
+                    disabled={!config || config.autoSync === false}
+                    value={String(config?.remoteCheckMinutes ?? 5)}
+                    onChange={(event) =>
+                      updateSyncSchedule({ remoteCheckMinutes: Number(event.currentTarget.value) })
+                    }
+                  >
+                    {[
+                      [1, "每 1 分鐘"],
+                      [5, "每 5 分鐘（預設）"],
+                      [15, "每 15 分鐘"],
+                      [30, "每 30 分鐘"],
+                      [60, "每 1 小時"],
+                      [360, "每 6 小時"],
+                      [1440, "每天"],
+                    ].map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="checkbox-row">
                   <input
                     type="checkbox"

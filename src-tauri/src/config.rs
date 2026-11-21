@@ -51,6 +51,18 @@ pub struct AppConfig {
     /// 在檔案總管顯示同步狀態圖示（需將同步資料夾註冊為 Windows 同步根）
     #[serde(default = "default_true")]
     pub explorer_status_icons: bool,
+    /// 是否自動同步（本機變動後上傳、定期檢查 NAS 並下載）；關閉時只在按「立即同步」才會同步
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
+    /// 自動檢查 NAS 是否有新檔案的間隔（分鐘）
+    #[serde(default = "default_remote_check_minutes")]
+    pub remote_check_minutes: u32,
+}
+
+pub const MAX_REMOTE_CHECK_MINUTES: u32 = 24 * 60;
+
+fn default_remote_check_minutes() -> u32 {
+    5
 }
 
 fn default_true() -> bool {
@@ -93,6 +105,8 @@ pub struct AppConfigUpdate {
     pub oidc: Option<OidcConfig>,
     pub window_preset: Option<String>,
     pub explorer_status_icons: Option<bool>,
+    pub auto_sync: Option<bool>,
+    pub remote_check_minutes: Option<u32>,
 }
 
 impl Default for AppConfig {
@@ -108,6 +122,8 @@ impl Default for AppConfig {
             oidc: OidcConfig::default(),
             window_preset: default_window_preset(),
             explorer_status_icons: true,
+            auto_sync: true,
+            remote_check_minutes: default_remote_check_minutes(),
         }
     }
 }
@@ -351,6 +367,19 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
 
     if let Some(enabled) = update.explorer_status_icons {
         config.explorer_status_icons = enabled;
+    }
+
+    if let Some(enabled) = update.auto_sync {
+        config.auto_sync = enabled;
+    }
+
+    if let Some(minutes) = update.remote_check_minutes {
+        if minutes == 0 || minutes > MAX_REMOTE_CHECK_MINUTES {
+            return Err(format!(
+                "檢查 NAS 的間隔必須介於 1 到 {MAX_REMOTE_CHECK_MINUTES} 分鐘"
+            ));
+        }
+        config.remote_check_minutes = minutes;
     }
 
     if let Some(window_preset) = update.window_preset {

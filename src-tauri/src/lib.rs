@@ -1153,6 +1153,8 @@ async fn apply_window_preset(
             oidc: None,
             window_preset: Some(preset),
             explorer_status_icons: None,
+            auto_sync: None,
+            remote_check_minutes: None,
         },
     )
 }

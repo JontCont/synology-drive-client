@@ -25,7 +25,8 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASELINE_SAVE_EVERY: u64 = 25;
 /// NTFS 與 NAS 的時間精度不同，差距在此範圍內視為沒有改動
 const MTIME_TOLERANCE_MS: u64 = 2000;
-/// 同步服務執行中，每個資料夾至少每隔這段時間向 NAS 檢查一次
+/// 測試用的 NAS 檢查間隔；實際值來自設定的 remoteCheckMinutes
+#[cfg(test)]
 const REMOTE_POLL_MS: u64 = 5 * 60 * 1000;
 /// 本機偵測到變動後，距離上次同步結束至少要隔這段時間才會自動再同步一次
 const EVENT_COOLDOWN_MS: u64 = 30 * 1000;
@@ -230,7 +231,13 @@ impl SyncRunState {
 
     /// 自動同步是否該啟動：從未同步過就立刻做；之後本機有變動時隔一小段時間做，否則定期檢查 NAS。
     /// 上次失敗、出錯或被取消時一律等到下一次定期檢查，避免反覆重試與連續通知
-    pub fn auto_sync_due(&self, folder_id: &str, now_ms: u64, local_dirty: bool) -> bool {
+    pub fn auto_sync_due(
+        &self,
+        folder_id: &str,
+        now_ms: u64,
+        local_dirty: bool,
+        remote_poll_ms: u64,
+    ) -> bool {
         let Some(p) = self
             .progress
             .lock()
@@ -247,7 +254,7 @@ impl SyncRunState {
         };
         let since = now_ms.saturating_sub(finished);
         let trouble = p.phase != PHASE_DONE || p.failed_files > 0;
-        since >= REMOTE_POLL_MS || (local_dirty && !trouble && since >= EVENT_COOLDOWN_MS)
+        since >= remote_poll_ms || (local_dirty && !trouble && since >= EVENT_COOLDOWN_MS)
     }
 
     pub fn cancel(&self, folder_id: &str) {
@@ -1293,26 +1300,26 @@ mod tests {
             );
         };
         // 從未同步過：立刻同步
-        assert!(state.auto_sync_due("f", 1_000, false));
+        assert!(state.auto_sync_due("f", 1_000, false, REMOTE_POLL_MS));
         // 剛完成：沒有本機變動不會再跑；有變動也要等冷卻
         finished(PHASE_DONE, 0, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + 1_000, false));
-        assert!(!state.auto_sync_due("f", 10_000 + 1_000, true));
-        assert!(state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, true));
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, false));
+        assert!(!state.auto_sync_due("f", 10_000 + 1_000, false, REMOTE_POLL_MS));
+        assert!(!state.auto_sync_due("f", 10_000 + 1_000, true, REMOTE_POLL_MS));
+        assert!(state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, true, REMOTE_POLL_MS));
+        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, false, REMOTE_POLL_MS));
         // 定期檢查 NAS
-        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, false));
+        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, false, REMOTE_POLL_MS));
         // 有失敗或出錯：即使本機有變動，也等到定期檢查才重試
         finished(PHASE_DONE, 2, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true));
-        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, true));
+        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
+        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, true, REMOTE_POLL_MS));
         finished(PHASE_ERROR, 0, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true));
+        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
         finished(PHASE_CANCELLED, 0, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true));
+        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
         // 進行中不會重複啟動
         state.progress.lock().unwrap().get_mut("f").unwrap().phase = PHASE_SYNCING.to_string();
-        assert!(!state.auto_sync_due("f", u64::MAX / 2, true));
+        assert!(!state.auto_sync_due("f", u64::MAX / 2, true, REMOTE_POLL_MS));
     }
 
     #[test]

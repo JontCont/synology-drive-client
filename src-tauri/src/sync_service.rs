@@ -341,14 +341,17 @@ impl SyncServiceState {
         let Ok(cfg) = config::load(app) else {
             return;
         };
-        if !authenticated {
+        if !authenticated || !cfg.auto_sync {
             return;
         }
+        let remote_poll_ms = u64::from(cfg.remote_check_minutes.max(1)) * 60 * 1000;
         let runs = app.state::<folder_sync::SyncRunState>();
         let now = folder_sync::now_ms();
         for folder in config::active_folders(&cfg) {
             let dirty = dirty_folders.contains(&folder.id);
-            if runs.auto_sync_due(&folder.id, now, dirty) && runs.start(app, &folder.id).is_ok() {
+            if runs.auto_sync_due(&folder.id, now, dirty, remote_poll_ms)
+                && runs.start(app, &folder.id).is_ok()
+            {
                 dirty_folders.remove(&folder.id);
             }
         }
