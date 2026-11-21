@@ -103,6 +103,7 @@ impl SyncServiceState {
         let handle = thread::Builder::new()
             .name("sync-service-loop".to_string())
             .spawn(move || {
+                let mut last_notified_error: Option<String> = None;
                 loop {
                     match stop_rx.recv_timeout(sleep_duration) {
                         Ok(_) => break,
@@ -124,6 +125,25 @@ impl SyncServiceState {
                                 executor::run_once(&app_for_thread)
                             })();
                             if let Ok(mut m) = metrics_for_thread.lock() {
+                                match &result {
+                                    Ok(run_result) if run_result.outcome == "failed" => {
+                                        crate::notify_if_background(
+                                            &app_for_thread,
+                                            "同步失敗",
+                                            &run_result.message,
+                                        );
+                                    }
+                                    Err(err) if last_notified_error.as_deref() != Some(err) => {
+                                        crate::notify_if_background(
+                                            &app_for_thread,
+                                            "同步服務錯誤",
+                                            err,
+                                        );
+                                        last_notified_error = Some(err.clone());
+                                    }
+                                    Ok(_) => last_notified_error = None,
+                                    _ => {}
+                                }
                                 match result {
                                     Ok(run_result) => {
                                         if run_result.processed {

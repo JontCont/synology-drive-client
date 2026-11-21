@@ -12,6 +12,7 @@ use crate::remote::RemoteProvider;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, Runtime, State, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -52,7 +53,9 @@ fn add_sync_conflict(
     app: tauri::AppHandle,
     conflict: storage::NewConflict,
 ) -> Result<storage::ConflictRow, String> {
-    storage::add_conflict(&app, conflict)
+    let row = storage::add_conflict(&app, conflict)?;
+    notify_if_background(&app, "同步衝突", "偵測到新的同步衝突，請開啟應用程式處理");
+    Ok(row)
 }
 
 #[tauri::command]
@@ -905,9 +908,31 @@ fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// 視窗隱藏（縮到系統匣）、最小化或失焦時，改用系統通知提示使用者
+pub fn notify_if_background<R: Runtime>(app: &tauri::AppHandle<R>, title: &str, body: &str) {
+    let in_foreground = app
+        .get_webview_window("main")
+        .map(|w| {
+            w.is_visible().unwrap_or(false)
+                && !w.is_minimized().unwrap_or(false)
+                && w.is_focused().unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if in_foreground {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(auth::AuthState::new())
         .manage(sync_service::SyncServiceState::new())
         .manage(watcher::LocalWatcherState::new())

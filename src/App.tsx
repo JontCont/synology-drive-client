@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -230,6 +230,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const [localSyncPath, setLocalSyncPath] = useState("");
   const [remotePath, setRemotePath] = useState("");
@@ -1164,6 +1165,44 @@ function App() {
     conflictStatusCounts.find((c) => c.status === "open")?.count ??
     conflicts.filter((c) => c.status !== "resolved").length;
 
+  // Toast 自動消失（錯誤停留較久）
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+  useEffect(() => {
+    if (!warning) return;
+    const timer = window.setTimeout(() => setWarning(null), 7000);
+    return () => window.clearTimeout(timer);
+  }, [warning]);
+  useEffect(() => {
+    if (!error) return;
+    const timer = window.setTimeout(() => setError(null), 9000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
+
+  const prevOpenConflictCount = useRef<number | null>(null);
+  useEffect(() => {
+    if (initialLoading) return;
+    const prev = prevOpenConflictCount.current;
+    prevOpenConflictCount.current = openConflictCount;
+    if (prev !== null && openConflictCount > prev) {
+      setWarning(`偵測到新的同步衝突，目前共 ${openConflictCount} 筆待處理`);
+    }
+  }, [openConflictCount, initialLoading]);
+
+  const prevFailedCount = useRef<number | null>(null);
+  const currentFailedCount = serviceStatus?.failedCount ?? 0;
+  useEffect(() => {
+    if (initialLoading) return;
+    const prev = prevFailedCount.current;
+    prevFailedCount.current = currentFailedCount;
+    if (prev !== null && currentFailedCount > prev) {
+      setError(`同步失敗：${serviceStatus?.lastError ?? serviceStatus?.lastMessage ?? "未知錯誤"}`);
+    }
+  }, [currentFailedCount, initialLoading]);
+
   const filteredOperations =
     stageFilter === "all"
       ? operations
@@ -1916,9 +1955,25 @@ function App() {
           </div>
         </header>
 
-        {/* Feedback Banners */}
-        {error || message ? (
-          <div className="banner-stack">
+        {/* Toast notifications */}
+        {error || message || warning ? (
+          <div className="banner-stack" aria-live="polite">
+            {warning ? (
+              <div className="alert alert-warning" role="status">
+                <div className="alert-content">
+                  <strong>注意：</strong>
+                  <span>{warning}</span>
+                </div>
+                <button
+                  type="button"
+                  className="alert-close"
+                  onClick={() => setWarning(null)}
+                  aria-label="關閉警告訊息"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
             {error ? (
               <div className="alert alert-error" role="alert">
                 <div className="alert-content">

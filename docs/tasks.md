@@ -63,7 +63,7 @@
   - [x] P1-12a Facebook 風格 Skeleton Shimmer 骨架屏載入 UI（啟動載入、功能分頁切換、表單/佇列/衝突/快照非同步操作流光佔位）
 - [ ] P1-13 同步可用性與說明收斂
   - [ ] P1-13a 左上角 status 狀態定義與文案（含 `idle`/閒置）
-  - [ ] P1-13b Toast/通知策略（縮小到系統匣後仍可提示：登入、同步成功、失敗、衝突）
+  - [x] P1-13b Toast/通知策略（App 內浮動 toast 自動消失；視窗縮到系統匣/最小化/失焦時，同步失敗、同步服務錯誤、新增衝突改發 Windows 系統通知；登入成功為前景操作，僅 toast）
   - [ ] P1-13c NAS → Local 同步方式說明（流程圖 + 規則：觸發來源、方向、衝突、重試）
 - [x] P1-14 登入門檻與 Dashboard 資訊分層
   - [x] P1-14d 帳密登入改為真實 DSM 驗證（SYNO.API.Auth + OTP，移除模擬 Adapter；OIDC callback 在 token 交換實作前停用）
