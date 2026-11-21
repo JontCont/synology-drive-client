@@ -708,10 +708,20 @@ function App() {
 
   async function loginByPassword(event: React.FormEvent) {
     event.preventDefault();
+    const trimmedHost = serverHost.trim();
+    if (!trimmedHost) {
+      setError("請輸入 NAS 主機位址（例如 https://nas.example.com:5001）。");
+      return;
+    }
     setAuthLoading(true);
     setError(null);
     setMessage(null);
     try {
+      if (trimmedHost !== (config?.serverHost ?? "")) {
+        applyConfigToState(
+          await invoke<AppConfig>("update_app_config", { update: { serverHost: trimmedHost } }),
+        );
+      }
       const status = await invoke<AuthStatus>("login_with_password", {
         request: {
           username,
@@ -1574,30 +1584,20 @@ function App() {
             {/* OPTION 1: 一般登入 (Challenge-based: Step 1 帳密 -> Step 2 若伺服器回 waitingOtp 才顯示 OTP) */}
             {!initialLoading && !loginTabSwitching && !authLoading && !saving && loginTab === "standard" && (
               <div key="tab-standard" className="login-tab-panel animate-panel">
-                {/* Current Host indicator banner */}
-                <div className="host-status-bar">
-                  <div className="host-status-info">
-                    <span
-                      className={`status-dot ${
-                        isHostConfigured ? "status-online" : "status-idle"
-                      }`}
-                    />
-                    <span className="host-status-label">NAS 主機：</span>
-                    <code className="mono host-status-value">
-                      {isHostConfigured ? savedHost : "尚未設定（請先至「配置」填寫）"}
-                    </code>
-                  </div>
-                  <button
-                    type="button"
-                    className="link-btn"
-                    onClick={() => switchLoginTab("oidc-config")}
-                  >
-                    配置 →
-                  </button>
-                </div>
-
                 <>
                     <form className="form-stack" onSubmit={loginByPassword}>
+                      <label className="form-field">
+                        <span>NAS 主機</span>
+                        <input
+                          className="input mono"
+                          value={serverHost}
+                          onChange={(event) => setServerHost(event.currentTarget.value)}
+                          placeholder="https://nas.example.com:5001"
+                          autoComplete="url"
+                          inputMode="url"
+                        />
+                      </label>
+
                       <label className="form-field">
                         <span>DSM 帳號</span>
                         <input
