@@ -445,6 +445,8 @@ function App() {
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [downloads, setDownloads] = useState<SyncProgress[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueSnapshot>(EMPTY_SYNC_QUEUE);
+  const [overviewQueue, setOverviewQueue] = useState<SyncQueueSnapshot | null>(null);
+  const [syncQueueError, setSyncQueueError] = useState<string | null>(null);
   const [queueFolderId, setQueueFolderId] = useState("");
   const [queueStatus, setQueueStatus] = useState("");
   const queueQueryRef = useRef({ folderId: "", status: "" });
@@ -573,6 +575,8 @@ function App() {
       invoke<SystemSnapshot>("get_system_snapshot")
         .then((s) => setSnapshot(s))
         .catch(() => setSnapshot(null)),
+
+      refreshSyncQueue(),
     ]).finally(() => {
       window.setTimeout(() => setInitialLoading(false), 320);
     });
@@ -605,12 +609,29 @@ function App() {
 
   async function refreshSyncQueue() {
     const { folderId, status } = queueQueryRef.current;
-    const snapshot = await invoke<SyncQueueSnapshot>("get_sync_queue", {
-      folderId: folderId || null,
-      status: status || null,
-      limit: 200,
-    });
-    setSyncQueue(snapshot);
+    try {
+      const [snapshot, allFolders] = await Promise.all([
+        invoke<SyncQueueSnapshot>("get_sync_queue", {
+          folderId: folderId || null,
+          status: status || null,
+          limit: 200,
+        }),
+        folderId
+          ? invoke<SyncQueueSnapshot>("get_sync_queue", {
+              folderId: null,
+              status: null,
+              limit: 1,
+            })
+          : Promise.resolve(null),
+      ]);
+      setSyncQueue(snapshot);
+      setOverviewQueue(allFolders ?? snapshot);
+      setSyncQueueError(null);
+    } catch (err) {
+      setOverviewQueue(null);
+      setSyncQueueError(String(err));
+      throw err;
+    }
   }
 
   // 切換篩選條件時立即重新整理，不必等下一次輪詢
@@ -1649,7 +1670,9 @@ function App() {
     }
   }
 
-  const totalQueuedOperations = operationStageCounts.reduce((acc, item) => acc + item.count, 0);
+  const totalSyncQueueItems = overviewQueue
+    ? overviewQueue.waiting + overviewQueue.running + overviewQueue.done + overviewQueue.failed
+    : 0;
   const openConflictCount =
     conflictStatusCounts.find((c) => c.status === "open")?.count ??
     conflicts.filter((c) => c.status !== "resolved").length;
@@ -1672,11 +1695,6 @@ function App() {
   }, [error]);
 
   const prevOpenConflictCount = useRef<number | null>(null);
-  const overviewLinePoints = overviewChartData.map((item, index) => ({
-    ...item,
-    x: 48 + index * 126,
-    y: 160 - (item.value / overviewChartMax) * 140,
-  }));
   useEffect(() => {
     if (initialLoading) return;
     const prev = prevOpenConflictCount.current;
@@ -1701,13 +1719,16 @@ function App() {
     stageFilter === "all"
       ? operations
       : operations.filter((op) => op.stage === stageFilter);
-  const stageOrder = ["planned", "processing", "retryable", "done", "failed"];
-  const stageCountMap = new Map(operationStageCounts.map((it) => [it.stage, it.count]));
-  const overviewChartData = stageOrder.map((stage) => ({
-    label: stage,
-    value: stageCountMap.get(stage) ?? 0,
+  const overviewChartData = (["waiting", "running", "done", "failed"] as const).map((status) => ({
+    label: QUEUE_STATUS_LABEL[status],
+    value: overviewQueue?.[status] ?? 0,
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
+  const overviewLinePoints = overviewChartData.map((item, index) => ({
+    ...item,
+    x: 48 + (index * 504) / (overviewChartData.length - 1),
+    y: 160 - (item.value / overviewChartMax) * 140,
+  }));
   const syncFolders = config?.syncFolders ?? [];
   const syncModeArrow = SYNC_MODES.find((m) => m.id === syncMode)?.arrow ?? "⇄";
   const modeArrow = (mode: SyncMode) => SYNC_MODES.find((m) => m.id === mode)?.arrow ?? "⇄";
@@ -2102,8 +2123,8 @@ function App() {
               />
             </svg>
             <span>操作佇列與監看</span>
-            {totalQueuedOperations > 0 ? (
-              <span className="nav-badge">{totalQueuedOperations}</span>
+            {totalSyncQueueItems > 0 ? (
+              <span className="nav-badge">{totalSyncQueueItems}</span>
             ) : null}
           </button>
 
@@ -2484,14 +2505,18 @@ function App() {
 
                 <div className="kpi-card">
                   <div className="kpi-header">
-                    <span className="kpi-label">操作佇列總計</span>
+                    <span className="kpi-label">同步佇列總計</span>
                     <span className="badge badge-info">Queue</span>
                   </div>
-                  <div className="kpi-value">{totalQueuedOperations} 筆</div>
+                  <div className="kpi-value">
+                    {overviewQueue ? `${totalSyncQueueItems} 筆` : syncQueueError ? "讀取失敗" : "讀取中..."}
+                  </div>
                   <div className="kpi-meta">
-                    {operationStageCounts.length > 0
-                      ? operationStageCounts.map((it) => `${it.stage}: ${it.count}`).join(" · ")
-                      : "目前無排隊項目"}
+                    {overviewQueue
+                      ? totalSyncQueueItems > 0
+                        ? overviewChartData.map((item) => `${item.label}: ${item.value}`).join(" · ")
+                        : "目前無同步項目"
+                      : syncQueueError ? "同步佇列暫時無法讀取" : "讀取同步佇列中..."}
                   </div>
                 </div>
 
@@ -2519,7 +2544,10 @@ function App() {
                 <div className="card-header">
                   <div>
                     <h2 className="card-title">同步狀態圖表</h2>
-                    <p className="card-desc">比較各狀態筆數；控制操作請至其他分頁。</p>
+                    <p className="card-desc">
+                      全部資料夾的實際同步佇列，每 2 秒更新，不受清單筆數與篩選限制。
+                      包含檔案與資料夾操作，不包含沒有變動的檔案，因此筆數可能與檔案進度不同。
+                    </p>
                   </div>
                   <div className="button-row" role="group" aria-label="圖表類型">
                     <button
@@ -2540,7 +2568,13 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {chartType === "bar" ? (
+                {syncQueueError ? (
+                  <div className="alert alert-error" role="alert">
+                    同步佇列讀取失敗：{syncQueueError}
+                  </div>
+                ) : !overviewQueue ? (
+                  <p className="card-desc" role="status">讀取同步佇列中...</p>
+                ) : chartType === "bar" ? (
                   <div className="status-chart">
                     {overviewChartData.map((item) => (
                       <div key={item.label} className="status-chart-row">
@@ -2854,6 +2888,12 @@ function App() {
                     );
                   })}
                 </div>
+
+                {syncQueueError ? (
+                  <div className="alert alert-error" role="alert">
+                    同步佇列讀取失敗：{syncQueueError}
+                  </div>
+                ) : null}
 
                 {syncQueue.items.length > 0 ? (
                   <div className="table-wrapper">
