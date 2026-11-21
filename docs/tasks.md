@@ -66,6 +66,7 @@
   - [ ] P1-13b Toast/通知策略（縮小到系統匣後仍可提示：登入、同步成功、失敗、衝突）
   - [ ] P1-13c NAS → Local 同步方式說明（流程圖 + 規則：觸發來源、方向、衝突、重試）
 - [x] P1-14 登入門檻與 Dashboard 資訊分層
+  - [x] P1-14d 帳密登入改為真實 DSM 驗證（SYNO.API.Auth + OTP，移除模擬 Adapter；OIDC callback 在 token 交換實作前停用）
   - [x] P1-14a 未登入不可進入系統（Dashboard 強制導回登入頁）
   - [x] P1-14b 「目前認證與 OIDC 配置狀態」改為設定檔分頁入口
   - [x] P1-14c Dashboard 總覽加入只讀 chart，控制操作導向其他分頁

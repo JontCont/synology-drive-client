@@ -486,15 +486,17 @@ fn get_auth_status(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthS
 }
 
 #[tauri::command]
-fn login_with_password(
+async fn login_with_password(
+    app: tauri::AppHandle,
     auth_state: State<'_, auth::AuthState>,
     request: auth::PasswordLoginRequest,
 ) -> Result<auth::AuthStatus, String> {
-    auth_state.login_with_password(request)
+    let host = config::load(&app)?.server_host.unwrap_or_default();
+    auth_state.login_with_password(&host, request)
 }
 
 #[tauri::command]
-fn submit_otp(
+async fn submit_otp(
     auth_state: State<'_, auth::AuthState>,
     request: auth::OtpRequest,
 ) -> Result<auth::AuthStatus, String> {
@@ -518,7 +520,7 @@ fn complete_sso_login(
 }
 
 #[tauri::command]
-fn logout(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthStatus, String> {
+async fn logout(auth_state: State<'_, auth::AuthState>) -> Result<auth::AuthStatus, String> {
     auth_state.logout()
 }
 

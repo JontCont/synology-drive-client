@@ -1303,7 +1303,7 @@ function App() {
                           className="input"
                           value={username}
                           onChange={(event) => setUsername(event.currentTarget.value)}
-                          placeholder="輸入使用者帳號（含 2fa/otp 將觸發 MFA）"
+                          placeholder="輸入 DSM 使用者帳號"
                           autoComplete="username"
                         />
                       </label>
@@ -1331,9 +1331,8 @@ function App() {
 
                     <div className="challenge-guide-chip">
                       <span>
-                        Challenge 流程：先驗證帳密，若伺服器回應需 2FA（帳號或密碼含{" "}
-                        <code className="mono">2fa</code> / <code className="mono">otp</code>
-                        ）才進入 OTP 步驟。
+                        登入流程：直接向 NAS（DSM）驗證帳密；若該帳號啟用兩步驟驗證，伺服器會要求
+                        OTP，驗證通過後才會進入系統。
                       </span>
                     </div>
                   </>

@@ -29,7 +29,7 @@ This template should help get you started developing with Tauri, React and Types
 - Auth skeleton:
   - backend auth state machine (`idle -> waitingOtp -> authenticated` or `idle -> authenticated`) and replaceable `AuthBackendAdapter` trait in `src-tauri/src/auth.rs`
   - commands: `get_auth_status`, `login_with_password`, `submit_otp`, `start_sso_login`, `complete_sso_login`, `logout`
-  - challenge-based password login: step 1 sends only `username` + `password`; backend adapter returns either direct `Authenticated` or `MfaRequired { challenge_id }`, and step 2 verifies OTP against the active `challengeId`
+  - challenge-based password login against real Synology DSM (`SYNO.API.Auth` at `<origin>/webapi/auth.cgi`, HTTPS only, certificate verified): step 1 sends `username` + `password`; DSM error 403 becomes `MfaRequired { challenge_id }`, and step 2 re-submits with `otp_code` (max 3 attempts per challenge). NAS host comes from `settings.json` `serverHost`. OIDC callback completion is intentionally disabled until real token exchange (state/PKCE) is implemented
   - dedicated login page with `一般登入` and `OIDC 配置` tabs; saving OIDC config (`issuerUrl`, `clientId`, `redirectUri`, `scopes`, `providerName`) persists to `settings.json` and dynamically enables the OIDC login button on the standard login view
 - Sync storage skeleton:
   - SQLite schema bootstrap in `src-tauri/src/storage.rs`
