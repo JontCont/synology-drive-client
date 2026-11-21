@@ -575,6 +575,31 @@ body {
   position: fixed;
   inset: 0;
   z-index: 900;
+.status-line-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.status-line-chart text {
+  fill: var(--text-secondary);
+  font-size: 12px;
+}
+
+.status-line-chart-grid {
+  stroke: var(--border-color);
+}
+
+.status-line-chart-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.status-line-chart-point {
+  fill: var(--accent);
+}
+
   display: flex;
   align-items: center;
   justify-content: center;

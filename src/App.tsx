@@ -393,6 +393,7 @@ function App() {
   const invoke = async <T,>(
     command: string,
     args?: Record<string, unknown>,
+  const [chartType, setChartType] = useState<"bar" | "line">("bar");
   ): Promise<T> => {
     if (!hasTauriBridge) {
       throw new Error("偵測不到 Tauri runtime。請使用 `npm run tauri dev` 啟動。");
@@ -1671,6 +1672,11 @@ function App() {
   }, [error]);
 
   const prevOpenConflictCount = useRef<number | null>(null);
+  const overviewLinePoints = overviewChartData.map((item, index) => ({
+    ...item,
+    x: 48 + index * 126,
+    y: 160 - (item.value / overviewChartMax) * 140,
+  }));
   useEffect(() => {
     if (initialLoading) return;
     const prev = prevOpenConflictCount.current;
@@ -2571,25 +2577,68 @@ function App() {
                 <div className="card-header">
                   <div>
                     <h2 className="card-title">同步狀態圖表</h2>
-                    <p className="card-desc">總覽僅提供狀態觀察，控制操作請至其他分頁。</p>
+                    <p className="card-desc">比較各狀態筆數；控制操作請至其他分頁。</p>
+                  </div>
+                  <div className="button-row" role="group" aria-label="圖表類型">
+                    <button
+                      type="button"
+                      className={`filter-pill ${chartType === "bar" ? "active" : ""}`}
+                      aria-pressed={chartType === "bar"}
+                      onClick={() => setChartType("bar")}
+                    >
+                      Bar 長條圖
+                    </button>
+                    <button
+                      type="button"
+                      className={`filter-pill ${chartType === "line" ? "active" : ""}`}
+                      aria-pressed={chartType === "line"}
+                      onClick={() => setChartType("line")}
+                    >
+                      Line 折線圖
+                    </button>
                   </div>
                 </div>
-                <div className="status-chart">
-                  {overviewChartData.map((item) => (
-                    <div key={item.label} className="status-chart-row">
-                      <span className="status-chart-label">{item.label}</span>
-                      <div className="status-chart-track">
-                        <div
-                          className="status-chart-bar"
-                          style={{
-                            width: `${Math.round((item.value / overviewChartMax) * 100)}%`,
-                          }}
-                        />
+                {chartType === "bar" ? (
+                  <div className="status-chart">
+                    {overviewChartData.map((item) => (
+                      <div key={item.label} className="status-chart-row">
+                        <span className="status-chart-label">{item.label}</span>
+                        <div className="status-chart-track">
+                          <div
+                            className="status-chart-bar"
+                            style={{
+                              width: `${Math.round((item.value / overviewChartMax) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="status-chart-value">{item.value}</span>
                       </div>
-                      <span className="status-chart-value">{item.value}</span>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : (
+                  <svg className="status-line-chart" viewBox="0 0 600 210" role="img" aria-label="同步狀態折線圖">
+                    <title>同步狀態折線圖</title>
+                    <desc>{overviewChartData.map((item) => `${item.label}: ${item.value}`).join("；")}</desc>
+                    {[20, 90, 160].map((y) => (
+                      <line key={y} className="status-line-chart-grid" x1="48" x2="552" y1={y} y2={y} />
+                    ))}
+                    <text x="36" y="24" textAnchor="end">{overviewChartMax}</text>
+                    <text x="36" y="164" textAnchor="end">0</text>
+                    <polyline
+                      className="status-line-chart-path"
+                      points={overviewLinePoints.map((point) => `${point.x},${point.y}`).join(" ")}
+                    />
+                    {overviewLinePoints.map((point) => (
+                      <g key={point.label}>
+                        <circle className="status-line-chart-point" cx={point.x} cy={point.y} r="4">
+                          <title>{point.label}: {point.value}</title>
+                        </circle>
+                        <text x={point.x} y={point.y - 10} textAnchor="middle">{point.value}</text>
+                        <text x={point.x} y="190" textAnchor="middle">{point.label}</text>
+                      </g>
+                    ))}
+                  </svg>
+                )}
               </section>
 
               {/* Sync Service & Watcher Control Cards */}

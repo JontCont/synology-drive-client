@@ -33,6 +33,7 @@ This template should help get you started developing with Tauri, React and Types
   - dedicated login page with `一般登入` and NAS `配置` tabs; only DSM account/password login with OTP when required is supported
   - dashboard `設定檔` shows read-only account identity, a separate connection form block for NAS host, LAN host and Wi-Fi names (with connection tests), and window-size presets. Saving connection settings preserves the active login and does not navigate to the login page. Changing window size preserves unsaved connection edits. LAN configuration and window-size presets live here rather than in sync settings.
   - developer Pipeline/Executor controls live in `同步設定`; the real sync queue stays in `操作佇列與監看`.
+  - overview status counts can be switched between Bar (default) and Line charts; both show the same per-status snapshot, not a time-series history
   - sync-folder paths stay on one line, abbreviate intermediate directories while retaining the root and last two levels, and expose the unmodified full path on hover
   - removing a sync-folder pairing opens a confirmation modal; cancel/Escape leaves it unchanged, failed removal keeps the dialog open with an error, and local/NAS files are never deleted by this action
   - sidebar `文件說明` provides an in-app guide to connection settings, remembered login, sync directions, deletion options, window sizing and tray behavior.
