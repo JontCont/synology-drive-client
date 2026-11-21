@@ -386,6 +386,18 @@ impl DsmAuthAdapter {
         }
     }
 
+    /// 下載專用的錯誤說明：DSM 的下載/檔案錯誤碼與登入錯誤碼意義不同
+    fn describe_download_failure(err: &DsmError) -> String {
+        match err.code {
+            119 | -2 | -3 => Self::describe_failure(err),
+            -1 => "NAS 回應了無法辨識的內容（下載 API 可能與此 DSM 版本不相容）".to_string(),
+            105 | 106 | 107 => "NAS 登入權限不足或已過期，請重新登入".to_string(),
+            114 | 101 | 120 => format!("NAS 拒絕下載請求（參數錯誤，錯誤碼 {}）", err.code),
+            1003 => "NAS 找不到此檔案或沒有存取權限（錯誤碼 1003）".to_string(),
+            code => format!("NAS 回報下載失敗（錯誤碼 {code}）"),
+        }
+    }
+
     fn describe_failure(err: &DsmError) -> String {
         match err.code {
             119 => "NAS 登入已過期，請重新登入".to_string(),
@@ -485,14 +497,16 @@ impl DsmAuthAdapter {
         }
     }
 
-    /// 下載檔案內容到 `dest`；回應若是 JSON 代表 DSM 回報錯誤
+    /// 下載檔案內容到 `dest`。Synology Drive 的下載 API 以 `files=["路徑"]` 指定檔案，
+    /// 並需 `json_error=true` 才會用 JSON 回報錯誤；沒有 JSON 時改讀標頭的錯誤碼
     fn fetch_drive_file(
         &self,
         origin: &str,
         sid: &str,
-        path_param: &str,
+        remote_path: &str,
         dest: &std::path::Path,
     ) -> Result<u64, DsmError> {
+        let files = serde_json::to_string(&[remote_path]).map_err(|_| DsmError { code: -1 })?;
         let url = format!("{origin}/webapi/entry.cgi");
         let mut response = self
             .download_agent
@@ -500,21 +514,30 @@ impl DsmAuthAdapter {
             .query("api", "SYNO.SynologyDrive.Files")
             .query("version", "2")
             .query("method", "download")
-            .query("path", path_param)
+            .query("files", &files)
+            .query("force_download", "true")
+            .query("json_error", "true")
             .query("_sid", sid)
             .call()
             .map_err(|_| DsmError { code: -2 })?;
 
+        let header_code = response
+            .headers()
+            .get("x-syno-webapi-download-error-code")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<i64>().ok());
         let is_json = response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.contains("json"));
-        if is_json || !response.status().is_success() {
+        if is_json || header_code.is_some() || !response.status().is_success() {
             let body = response.body_mut().read_to_string().unwrap_or_default();
             return match parse_dsm_data_response(&body) {
-                Ok(_) => Err(DsmError { code: -1 }),
-                Err(err) => Err(err),
+                Err(err) if err.code != -1 => Err(err),
+                _ => Err(DsmError {
+                    code: header_code.unwrap_or(-1),
+                }),
             };
         }
 
@@ -679,15 +702,8 @@ impl AuthBackendAdapter for DsmAuthAdapter {
 
     fn download_remote_file(&self, remote_path: &str, dest: &std::path::Path) -> Result<u64, String> {
         let (origin, sid) = self.current_session()?;
-        let quoted =
-            serde_json::to_string(remote_path).unwrap_or_else(|_| format!("\"{remote_path}\""));
-        let result = match self.fetch_drive_file(&origin, &sid, &quoted, dest) {
-            Err(err) if err.code != 119 && err.code != -2 && err.code != -3 => {
-                self.fetch_drive_file(&origin, &sid, remote_path, dest)
-            }
-            other => other,
-        };
-        result.map_err(|err| Self::describe_failure(&err))
+        self.fetch_drive_file(&origin, &sid, remote_path, dest)
+            .map_err(|err| Self::describe_download_failure(&err))
     }
 
     fn logout_remote(&self) {
@@ -1179,15 +1195,16 @@ mod tests {
     }
 
     /// 依序回應預先指定內容的簡易假 HTTP 伺服器（每個連線回應一個項目），回傳 (網址, 收到的請求首行)
+    /// 項目為 (狀態行, Content-Type, 額外標頭, 內容)
     fn spawn_mock_server(
-        responses: Vec<(&'static str, Vec<u8>)>,
+        responses: Vec<(&'static str, &'static str, &'static str, Vec<u8>)>,
     ) -> (String, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            for (content_type, body) in responses {
+            for (status, content_type, extra_header, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 1024];
@@ -1217,7 +1234,7 @@ mod tests {
                 }
                 let _ = tx.send(head.lines().next().unwrap_or("").to_string());
                 let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 stream.write_all(header.as_bytes()).unwrap();
@@ -1228,11 +1245,23 @@ mod tests {
     }
 
     #[test]
-    fn download_streams_file_and_detects_json_errors() {
+    fn download_streams_file_and_detects_errors() {
         let payload = vec![7u8; 5000];
         let (origin, requests) = spawn_mock_server(vec![
-            ("application/octet-stream", payload.clone()),
-            ("application/json", br#"{"success":false,"error":{"code":119}}"#.to_vec()),
+            ("200 OK", "application/octet-stream", "", payload.clone()),
+            (
+                "200 OK",
+                "application/json",
+                "",
+                br#"{"success":false,"error":{"code":119}}"#.to_vec(),
+            ),
+            // 實機上缺少參數時：HTTP 400、無 JSON 內容、錯誤碼只在標頭
+            (
+                "400 Bad Request",
+                "text/plain",
+                "x-syno-webapi-download-error-code: 114\r\n",
+                Vec::new(),
+            ),
         ]);
         let adapter = DsmAuthAdapter::new();
         let dir = std::env::temp_dir().join(format!("synodl-test-{}", std::process::id()));
@@ -1240,21 +1269,31 @@ mod tests {
 
         let ok_path = dir.join("ok.bin");
         let bytes = adapter
-            .fetch_drive_file(&origin, "SID123", "\"/mydrive/a b.bin\"", &ok_path)
+            .fetch_drive_file(&origin, "SID123", "/mydrive/a b.bin", &ok_path)
             .expect("download should succeed");
         assert_eq!(bytes, 5000);
         assert_eq!(std::fs::read(&ok_path).unwrap(), payload);
         let request_line = requests.recv().unwrap();
         assert!(request_line.starts_with("GET /webapi/entry.cgi?"));
         assert!(request_line.contains("method=download"));
+        assert!(request_line.contains("json_error=true"));
         assert!(request_line.contains("_sid=SID123"));
+        // files 參數是 JSON 陣列（URL 編碼後）
+        assert!(request_line.contains("files=%5B%22%2Fmydrive%2Fa%20b.bin%22%5D")
+            || request_line.contains("files=%5B%22/mydrive/a%20b.bin%22%5D"));
 
         let err_path = dir.join("err.bin");
         let err = adapter
-            .fetch_drive_file(&origin, "SID123", "\"/x\"", &err_path)
+            .fetch_drive_file(&origin, "SID123", "/x", &err_path)
             .unwrap_err();
         assert_eq!(err, DsmError { code: 119 });
         assert!(!err_path.exists(), "JSON error must not leave a file behind");
+
+        let header_err = adapter
+            .fetch_drive_file(&origin, "SID123", "/x", &err_path)
+            .unwrap_err();
+        assert_eq!(header_err, DsmError { code: 114 });
+        assert!(!err_path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1267,8 +1306,8 @@ mod tests {
             format!(r#"{{"success":true,"data":{{"items":[{}]}}}}"#, items.join(",")).into_bytes()
         };
         let (origin, _requests) = spawn_mock_server(vec![
-            ("application/json", page(DSM_LIST_LIMIT as usize, 0)),
-            ("application/json", page(2, DSM_LIST_LIMIT as usize)),
+            ("200 OK", "application/json", "", page(DSM_LIST_LIMIT as usize, 0)),
+            ("200 OK", "application/json", "", page(2, DSM_LIST_LIMIT as usize)),
         ]);
         let adapter = DsmAuthAdapter::new();
         let entries = adapter

@@ -15,6 +15,7 @@ const PHASE_DONE: &str = "done";
 const PHASE_CANCELLED: &str = "cancelled";
 const PHASE_ERROR: &str = "error";
 const TEMP_SUFFIX: &str = ".synodl-part";
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -274,7 +275,7 @@ fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 fn is_session_error(err: &str) -> bool {
-    err.contains("登入已過期") || err.contains("尚未登入") || err.contains("請先登入")
+    err.contains("請重新登入") || err.contains("尚未登入") || err.contains("請先登入")
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +323,7 @@ fn run_download(
 
     // 2) 逐一下載
     state.update(&folder.id, |p| p.phase = PHASE_DOWNLOADING.to_string());
+    let mut consecutive_failures = 0u32;
     for (index, entry) in files.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             return Ok(());
@@ -330,6 +332,7 @@ fn run_download(
 
         match download_one(app, &auth, folder, &local_root, &remote_root, entry, index) {
             Ok(FileOutcome::Downloaded { bytes, conflict_copy }) => {
+                consecutive_failures = 0;
                 state.update(&folder.id, |p| {
                     p.done_files += 1;
                     p.done_bytes += bytes;
@@ -339,6 +342,7 @@ fn run_download(
                 });
             }
             Ok(FileOutcome::Skipped) => {
+                consecutive_failures = 0;
                 state.update(&folder.id, |p| {
                     p.skipped_files += 1;
                     p.done_bytes += entry.size.unwrap_or(0);
@@ -348,10 +352,17 @@ fn run_download(
                 if is_session_error(&err) {
                     return Err(err);
                 }
+                consecutive_failures += 1;
                 state.update(&folder.id, |p| {
                     p.failed_files += 1;
                     p.last_error = Some(format!("{}：{err}", entry.name));
                 });
+                // 連續失敗通常代表整體問題（權限、API 不相容、磁碟），不再繼續逐檔重試
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    return Err(format!(
+                        "連續 {MAX_CONSECUTIVE_FAILURES} 個檔案下載失敗，已停止。最後的錯誤：{err}"
+                    ));
+                }
             }
         }
     }
