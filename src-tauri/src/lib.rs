@@ -3,6 +3,7 @@ mod cloud_status;
 mod config;
 mod executor;
 mod folder_sync;
+mod lan;
 mod remote;
 mod scanner;
 mod storage;
@@ -745,6 +746,22 @@ async fn test_nas_host(host: String) -> Result<auth::NasProbeResult, String> {
 }
 
 #[tauri::command]
+async fn test_lan_host(host: String) -> Result<auth::NasProbeResult, String> {
+    let origin = lan::normalize_lan_origin(&host)?;
+    tauri::async_runtime::spawn_blocking(move || auth::probe_origin(&origin, 4))
+        .await
+        .map_err(|e| format!("測試連線失敗：{e}"))
+}
+
+/// 重新判斷現在是否使用區網位址（會偵測 Wi-Fi 並測試連線），回傳目前狀態
+#[tauri::command]
+async fn get_lan_status(app: tauri::AppHandle) -> Result<lan::LanStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || lan::refresh(&app))
+        .await
+        .map_err(|e| format!("檢查區網狀態失敗：{e}"))
+}
+
+#[tauri::command]
 async fn list_nas_folders(
     auth_state: State<'_, auth::AuthState>,
     path: String,
@@ -1156,6 +1173,8 @@ async fn apply_window_preset(
             explorer_status_icons: None,
             auto_sync: None,
             remote_check_minutes: None,
+            lan_host: None,
+            lan_wifi_names: None,
         },
     )
 }
@@ -1272,6 +1291,8 @@ pub fn run() {
             remove_sync_folder,
             list_nas_folders,
             test_nas_host,
+            test_lan_host,
+            get_lan_status,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,

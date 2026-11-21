@@ -37,6 +37,14 @@ pub trait AuthBackendAdapter: Send + Sync {
     /// 登出時通知伺服器銷毀 session（盡力而為）
     fn logout_remote(&self) {}
 
+    /// 設定登入後檔案操作改用的區網位址（`None` 代表使用登入時的位址）
+    fn set_lan_origin(&self, _origin: Option<String>) {}
+
+    /// 目前是否正在使用區網位址
+    fn lan_active(&self) -> bool {
+        false
+    }
+
     /// 列出 NAS Drive 指定路徑下的子資料夾（`/` 代表根：我的 Drive 與團隊資料夾）
     fn list_remote_folders(&self, _path: &str) -> Result<Vec<RemoteFolderEntry>, String> {
         Err("目前的認證方式不支援瀏覽 NAS 資料夾".to_string())
@@ -100,7 +108,7 @@ const DSM_SESSION_NAME: &str = "SynologyDrive";
 const DSM_CODE_BODY_TOO_LARGE: i64 = -413;
 /// Cloudflare 免費/Pro 方案的請求內容上限約 100 MB；超過此大小的上傳若連線中斷，視為被代理拒絕
 const PROXY_BODY_LIMIT_BYTES: u64 = 100_000_000;
-const OVERSIZE_HINT: &str = "要上傳大檔案，請改用不經代理的位址（區網位址，或直接連到 NAS 的網域）";
+const OVERSIZE_HINT: &str = "要上傳大檔案，請在「配置」填寫區網位址並連上家裡的網路，或改用不經代理的位址";
 
 /// 錯誤是否為「檔案超過前端代理上限」；這是每個檔案各自的限制，不代表整體同步有問題
 pub fn is_oversize_error(err: &str) -> bool {
@@ -275,19 +283,28 @@ pub struct NasProbeResult {
 
 /// 測試 NAS 是否存活：不需登入，向 `SYNO.API.Info` 查詢並確認回應確實來自 DSM
 pub fn probe_nas_host(host: &str) -> NasProbeResult {
+    match normalize_dsm_origin(host) {
+        Ok(origin) => probe_origin(&origin, 8),
+        Err(message) => NasProbeResult {
+            ok: false,
+            latency_ms: None,
+            drive_available: false,
+            message,
+        },
+    }
+}
+
+/// 對已正規化的 origin（`https://host[:port]` 或區網的 `http://host[:port]`）做存活測試
+pub fn probe_origin(origin: &str, timeout_secs: u64) -> NasProbeResult {
     let fail = |message: String, latency_ms: Option<u64>| NasProbeResult {
         ok: false,
         latency_ms,
         drive_available: false,
         message,
     };
-    let origin = match normalize_dsm_origin(host) {
-        Ok(origin) => origin,
-        Err(message) => return fail(message, None),
-    };
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(8)))
+        .timeout_global(Some(Duration::from_secs(timeout_secs)))
         .http_status_as_error(false)
         .build()
         .into();
@@ -301,7 +318,10 @@ pub fn probe_nas_host(host: &str) -> NasProbeResult {
     let mut response = match response {
         Ok(response) => response,
         Err(ureq::Error::Timeout(_)) => {
-            return fail("連線逾時（8 秒內沒有回應），請確認主機位址、連接埠與網路".to_string(), None)
+            return fail(
+                format!("連線逾時（{timeout_secs} 秒內沒有回應），請確認主機位址、連接埠與網路"),
+                None,
+            )
         }
         Err(err) => {
             return fail(
@@ -351,6 +371,8 @@ pub struct DsmAuthAdapter {
     /// 下載大檔不能受整體逾時限制，只限制連線與等待回應
     download_agent: ureq::Agent,
     upload_agent: ureq::Agent,
+    /// 目前使用中的區網位址；有值時，登入後的檔案操作都改走這個位址
+    lan_origin: Mutex<Option<String>>,
     /// 觀察到被前端代理（例如 Cloudflare）拒絕的最小檔案大小；之後不小於此大小的檔案直接略過，不再重傳
     upload_size_limit: Mutex<Option<u64>>,
     pending: Mutex<HashMap<String, PendingLogin>>,
@@ -381,6 +403,7 @@ impl DsmAuthAdapter {
             agent,
             download_agent,
             upload_agent,
+            lan_origin: Mutex::new(None),
             upload_size_limit: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
@@ -482,11 +505,12 @@ impl DsmAuthAdapter {
     }
 
     fn current_session(&self) -> Result<(String, String), String> {
+        let lan = self.lan_origin.lock().ok().and_then(|o| o.clone());
         self.session
             .lock()
             .map_err(|_| "登入狀態鎖定失敗".to_string())?
             .as_ref()
-            .map(|s| (s.origin.clone(), s.sid.clone()))
+            .map(|s| (lan.unwrap_or_else(|| s.origin.clone()), s.sid.clone()))
             .ok_or_else(|| "尚未登入 NAS".to_string())
     }
 
@@ -956,6 +980,9 @@ impl AuthBackendAdapter for DsmAuthAdapter {
     }
 
     fn logout_remote(&self) {
+        if let Ok(mut lan) = self.lan_origin.lock() {
+            *lan = None;
+        }
         let session = self.session.lock().ok().and_then(|mut s| s.take());
         if let Ok(mut pending) = self.pending.lock() {
             pending.clear();
@@ -970,6 +997,23 @@ impl AuthBackendAdapter for DsmAuthAdapter {
                 ("_sid", sid.as_str()),
             ]);
         }
+    }
+
+    fn set_lan_origin(&self, origin: Option<String>) {
+        let Ok(mut current) = self.lan_origin.lock() else {
+            return;
+        };
+        if *current != origin {
+            // 換了連線路徑，原本記下的「代理拒絕的檔案大小」不再適用
+            if let Ok(mut limit) = self.upload_size_limit.lock() {
+                *limit = None;
+            }
+            *current = origin;
+        }
+    }
+
+    fn lan_active(&self) -> bool {
+        self.lan_origin.lock().map(|o| o.is_some()).unwrap_or(false)
     }
 }
 
@@ -1195,6 +1239,14 @@ impl AuthState {
             return Err("請先登入 NAS".to_string());
         }
         self.adapter.delete_remote_path(remote_path)
+    }
+
+    pub fn set_lan_origin(&self, origin: Option<String>) {
+        self.adapter.set_lan_origin(origin);
+    }
+
+    pub fn lan_active(&self) -> bool {
+        self.adapter.lan_active()
     }
 
     pub fn list_remote_folders(&self, path: &str) -> Result<Vec<RemoteFolderEntry>, String> {

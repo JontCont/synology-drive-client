@@ -30,6 +30,15 @@ type AppConfig = {
   explorerStatusIcons?: boolean;
   autoSync?: boolean;
   remoteCheckMinutes?: number;
+  lanHost?: string | null;
+  lanWifiNames?: string[];
+};
+
+type LanStatus = {
+  configured: boolean;
+  active: boolean;
+  ssid: string | null;
+  message: string;
 };
 
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
@@ -425,6 +434,13 @@ function App() {
     result: null,
   });
   const [username, setUsername] = useState("");
+  const [lanHost, setLanHost] = useState("");
+  const [lanWifiNames, setLanWifiNames] = useState("");
+  const [lanTest, setLanTest] = useState<{ loading: boolean; result: NasProbeResult | null }>({
+    loading: false,
+    result: null,
+  });
+  const [lanStatus, setLanStatus] = useState<LanStatus | null>(null);
   const [password, setPassword] = useState("");
   const [otpCode, setOtpCode] = useState("");
 
@@ -479,6 +495,8 @@ function App() {
   function applyConfigToState(value: AppConfig) {
     setConfig(value);
     setServerHost(value.serverHost ?? "");
+    setLanHost(value.lanHost ?? "");
+    setLanWifiNames((value.lanWifiNames ?? []).join(", "));
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
     setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
@@ -586,6 +604,10 @@ function App() {
   useEffect(() => {
     if (activeTab === "operations") refreshSyncQueue().catch(() => undefined);
   }, [queueFolderId, queueStatus, activeTab]);
+
+  useEffect(() => {
+    if (activeTab === "settings" && isAuthenticated) refreshLanStatus().catch(() => undefined);
+  }, [activeTab, isAuthenticated]);
 
   // 下載進度：偵測「進行中 → 結束」的變化並以 toast 通知
   const previousDownloadPhases = useRef<Map<string, string>>(new Map());
@@ -903,6 +925,52 @@ function App() {
           message: String(err),
         },
       });
+    }
+  }
+
+  async function refreshLanStatus() {
+    try {
+      setLanStatus(await invoke<LanStatus>("get_lan_status"));
+    } catch {
+      setLanStatus(null);
+    }
+  }
+
+  async function testLanHost() {
+    setLanTest({ loading: true, result: null });
+    try {
+      const result = await invoke<NasProbeResult>("test_lan_host", { host: lanHost });
+      setLanTest({ loading: false, result });
+    } catch (err) {
+      setLanTest({
+        loading: false,
+        result: { ok: false, latencyMs: null, driveAvailable: false, message: String(err) },
+      });
+    }
+  }
+
+  async function saveLanConfig(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await invoke<AppConfig>("update_app_config", {
+        update: {
+          lanHost: lanHost.trim(),
+          lanWifiNames: lanWifiNames
+            .split(/[,，]/)
+            .map((name) => name.trim())
+            .filter(Boolean),
+        },
+      });
+      applyConfigToState(next);
+      setMessage(next.lanHost ? "已儲存區網位址。" : "已清除區網位址。");
+      await refreshLanStatus();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -3943,6 +4011,85 @@ function App() {
                     </div>
                   </div>
                 ) : null}
+              </section>
+
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">區網直連</h2>
+                    <p className="card-desc">
+                      在家裡的區網內改走 NAS 的區網位址傳輸：不經過 Cloudflare，沒有 100 MB 的單檔上傳上限，速度也快得多。登入仍使用「配置」裡的一般位址
+                    </p>
+                  </div>
+                  {lanStatus?.configured ? (
+                    <span className={`badge ${lanStatus.active ? "badge-success" : "badge-neutral"}`}>
+                      {lanStatus.active ? "使用區網中" : "使用一般位址"}
+                    </span>
+                  ) : null}
+                </div>
+                <form className="form-stack" onSubmit={saveLanConfig}>
+                  <label className="form-field">
+                    <span>區網位址（選填）</span>
+                    <div className="inline-input-row">
+                      <input
+                        className="input mono"
+                        value={lanHost}
+                        onChange={(event) => {
+                          setLanHost(event.currentTarget.value);
+                          setLanTest((prev) => ({ ...prev, result: null }));
+                        }}
+                        placeholder="例如 http://192.168.0.18:5000/drive/"
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={lanTest.loading || !lanHost.trim()}
+                        onClick={testLanHost}
+                      >
+                        {lanTest.loading ? "測試中..." : "測試連線"}
+                      </button>
+                    </div>
+                  </label>
+                  <label className="form-field">
+                    <span>限定 Wi-Fi 名稱（選填）</span>
+                    <input
+                      className="input"
+                      value={lanWifiNames}
+                      onChange={(event) => setLanWifiNames(event.currentTarget.value)}
+                      placeholder="例如 TP-Network（多個以逗號分隔；留空＝只要連得到區網位址就使用）"
+                    />
+                  </label>
+                  {lanTest.result ? (
+                    <div
+                      className={`alert ${lanTest.result.ok ? "alert-success" : "alert-error"}`}
+                      role="status"
+                    >
+                      <div className="alert-content">
+                        <span>
+                          {lanTest.result.ok ? "✓ " : "✕ "}
+                          {lanTest.result.message}
+                          {lanTest.result.latencyMs !== null
+                            ? `（${lanTest.result.latencyMs} ms）`
+                            : ""}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
+                  {lanStatus?.configured ? (
+                    <div className="cell-secondary">
+                      {lanStatus.message}
+                      {lanStatus.ssid ? `（目前 Wi-Fi：${lanStatus.ssid}）` : ""}
+                    </div>
+                  ) : null}
+                  <div className="button-row">
+                    <button type="submit" className="btn btn-primary" disabled={saving}>
+                      儲存區網設定
+                    </button>
+                    <button type="button" className="btn btn-ghost" onClick={refreshLanStatus}>
+                      重新偵測
+                    </button>
+                  </div>
+                </form>
               </section>
 
               <section className="card">

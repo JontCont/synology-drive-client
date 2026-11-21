@@ -867,10 +867,18 @@ fn run_sync(
     std::fs::create_dir_all(&local_root).map_err(|e| format!("無法建立本機資料夾：{e}"))?;
     let remote_root = folder.remote_path.trim_end_matches('/').to_string();
 
-    // 1) 列出兩邊
-    let remote = list_remote_tree(&auth, &remote_root, cancel, |files| {
+    // 1) 列出兩邊。人在區網時先用區網位址；用區網位址列出失敗（例如換了網路）就退回一般位址再試一次
+    crate::lan::refresh(app);
+    let on_progress = |files: u64| {
         state.update(&folder.id, |p| p.total_files = files);
-    })?;
+    };
+    let remote = match list_remote_tree(&auth, &remote_root, cancel, on_progress) {
+        Err(_) if auth.lan_active() => {
+            auth.set_lan_origin(None);
+            list_remote_tree(&auth, &remote_root, cancel, on_progress)?
+        }
+        other => other?,
+    };
     if cancel.load(Ordering::SeqCst) {
         return Ok(());
     }

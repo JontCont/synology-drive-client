@@ -60,6 +60,12 @@ pub struct AppConfig {
     /// 自動檢查 NAS 是否有新檔案的間隔（分鐘）
     #[serde(default = "default_remote_check_minutes")]
     pub remote_check_minutes: u32,
+    /// NAS 的區網位址（例如 http://192.168.0.18:5000/drive/）；在區網內時改走這個位址，不受 Cloudflare 的 100 MB 上限影響
+    #[serde(default)]
+    pub lan_host: Option<String>,
+    /// 只在連上這些 Wi-Fi 時使用區網位址；留空表示只要連得到區網位址就使用
+    #[serde(default)]
+    pub lan_wifi_names: Vec<String>,
 }
 
 pub const MAX_REMOTE_CHECK_MINUTES: u32 = 24 * 60;
@@ -110,6 +116,9 @@ pub struct AppConfigUpdate {
     pub explorer_status_icons: Option<bool>,
     pub auto_sync: Option<bool>,
     pub remote_check_minutes: Option<u32>,
+    /// 空字串代表清除
+    pub lan_host: Option<String>,
+    pub lan_wifi_names: Option<Vec<String>>,
 }
 
 impl Default for AppConfig {
@@ -127,6 +136,8 @@ impl Default for AppConfig {
             explorer_status_icons: true,
             auto_sync: true,
             remote_check_minutes: default_remote_check_minutes(),
+            lan_host: None,
+            lan_wifi_names: Vec::new(),
         }
     }
 }
@@ -389,6 +400,24 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
             ));
         }
         config.remote_check_minutes = minutes;
+    }
+
+    if let Some(lan_host) = update.lan_host {
+        let trimmed = lan_host.trim();
+        if trimmed.is_empty() {
+            config.lan_host = None;
+        } else {
+            crate::lan::normalize_lan_origin(trimmed)?;
+            config.lan_host = Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(names) = update.lan_wifi_names {
+        config.lan_wifi_names = names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .collect();
     }
 
     if let Some(window_preset) = update.window_preset {
