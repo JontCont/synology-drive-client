@@ -1221,6 +1221,37 @@ function App() {
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
 
+  const setupSteps: {
+    label: string;
+    hint: string;
+    done: boolean;
+    action?: string;
+    target?: NavTab;
+  }[] = [
+    { label: "登入 NAS", hint: "已完成", done: isAuthenticated },
+    {
+      label: "設定本機同步資料夾",
+      hint: config?.localSyncPath || "例如 C:\\Users\\you\\SynologyDrive（資料夾需已存在）",
+      done: Boolean(config?.localSyncPath?.trim()),
+      action: "前往設定",
+      target: "settings",
+    },
+    {
+      label: "設定 NAS 遠端路徑",
+      hint: config?.remotePath || "例如 /Drive/SyncRoot",
+      done: Boolean(config?.remotePath?.trim()),
+      action: "前往設定",
+      target: "settings",
+    },
+    {
+      label: "啟動同步服務",
+      hint: serviceStatus?.running ? "同步服務運行中" : "在「操作佇列與監看」頁右上角啟動",
+      done: Boolean(serviceStatus?.running),
+      action: "前往啟動",
+      target: "operations",
+    },
+  ];
+
   const toastStack =
     error || message || warning ? (
       <div className="banner-stack" aria-live="polite">
@@ -1878,7 +1909,7 @@ function App() {
               />
               <circle cx="12" cy="12" r="3" />
             </svg>
-            <span>同步設定與診斷</span>
+            <span>同步設定</span>
           </button>
         </nav>
 
@@ -1923,7 +1954,7 @@ function App() {
               {activeTab === "operations" && "操作佇列與本機監看"}
               {activeTab === "conflicts" && "同步衝突管理"}
               {activeTab === "auth" && "設定檔"}
-              {activeTab === "settings" && "同步設定、資料庫與系統快照"}
+              {activeTab === "settings" && "同步設定"}
             </h1>
             <p className="page-subtitle">
               {syncRoot
@@ -2024,6 +2055,44 @@ function App() {
           {/* TAB 1: OVERVIEW */}
           {!initialLoading && !tabSwitching && activeTab === "overview" && (
             <div className="section-stack">
+              {setupSteps.some((step) => !step.done) ? (
+                <section className="card setup-card">
+                  <div className="card-header">
+                    <div>
+                      <h2 className="card-title">開始設定同步</h2>
+                      <p className="card-desc">
+                        完成以下步驟後即可開始 NAS 與本機資料夾同步
+                      </p>
+                    </div>
+                  </div>
+                  <ol className="setup-steps">
+                    {setupSteps.map((step, index) => (
+                      <li
+                        key={step.label}
+                        className={`setup-step ${step.done ? "done" : ""}`}
+                      >
+                        <span className="setup-step-index" aria-hidden="true">
+                          {step.done ? "✓" : index + 1}
+                        </span>
+                        <div className="setup-step-body">
+                          <span className="setup-step-label">{step.label}</span>
+                          <span className="setup-step-hint">{step.hint}</span>
+                        </div>
+                        {!step.done && step.target ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={() => switchDashboardTab(step.target!)}
+                          >
+                            {step.action}
+                          </button>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : null}
+
               {/* KPI Summary Grid */}
               <div className="kpi-grid">
                 <div className="kpi-card">
