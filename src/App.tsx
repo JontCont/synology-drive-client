@@ -2596,19 +2596,6 @@ function App() {
                     </div>
                   </div>
 
-                  {serviceStatus?.lastMessage ? (
-                    <div className="info-box">
-                      <div className="info-box-title">最新 Tick 結果</div>
-                      <div className="info-box-text">
-                        {serviceStatus.lastMessage}
-                        {serviceStatus.lastOperationId
-                          ? ` (op: ${serviceStatus.lastOperationId})`
-                          : ""}
-                        {serviceStatus.lastStage ? ` [${serviceStatus.lastStage}]` : ""}
-                      </div>
-                    </div>
-                  ) : null}
-
                   {serviceStatus?.lastError ? (
                     <div className="alert alert-error">{serviceStatus.lastError}</div>
                   ) : null}
