@@ -556,12 +556,43 @@ async fn ensure_local_watcher(
     ensure_watcher(&app, &watcher_state, &auth_state)
 }
 
+/// 同步服務的自動管理：已登入且有啟用中的資料夾時確保服務已啟動（含本機監看）
+fn ensure_sync_service(
+    app: &tauri::AppHandle,
+    sync_state: &sync_service::SyncServiceState,
+    watcher_state: &watcher::LocalWatcherState,
+    auth_state: &auth::AuthState,
+) -> Result<(), String> {
+    if auth_state.status()?.stage != "authenticated" || sync_state.status()?.running {
+        return Ok(());
+    }
+    let cfg = config::load(app)?;
+    if config::active_folders(&cfg).is_empty() {
+        return Ok(());
+    }
+    ensure_watcher(app, watcher_state, auth_state)?;
+    sync_state.start(app.clone(), cfg.poll_interval_seconds)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn ensure_sync_service_running(
+    app: tauri::AppHandle,
+    sync_state: State<'_, sync_service::SyncServiceState>,
+    watcher_state: State<'_, watcher::LocalWatcherState>,
+    auth_state: State<'_, auth::AuthState>,
+) -> Result<sync_service::SyncServiceStatus, String> {
+    ensure_sync_service(&app, &sync_state, &watcher_state, &auth_state)?;
+    sync_state.status()
+}
+
 #[tauri::command]
 async fn add_sync_folder(
     app: tauri::AppHandle,
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
     sync_run_state: State<'_, folder_sync::SyncRunState>,
+    sync_service_state: State<'_, sync_service::SyncServiceState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
     local_path: String,
     remote_path: String,
@@ -571,10 +602,11 @@ async fn add_sync_folder(
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     // 下載前先註冊同步根，同步時才能標示狀態圖示
     let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
-    // 新增後立刻開始初次同步（NAS 有的下載、本機有的上傳）
+    // 新增後立刻開始初次同步（NAS 有的下載、本機有的上傳），並確保同步服務在執行
     if let Some(folder) = cfg.sync_folders.last() {
         if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
             let _ = sync_run_state.start(&app, &folder.id);
+            let _ = ensure_sync_service(&app, &sync_service_state, &watcher_state, &auth_state);
         }
     }
     Ok(cfg)
@@ -586,6 +618,7 @@ async fn update_sync_folder(
     watcher_state: State<'_, watcher::LocalWatcherState>,
     auth_state: State<'_, auth::AuthState>,
     sync_run_state: State<'_, folder_sync::SyncRunState>,
+    sync_service_state: State<'_, sync_service::SyncServiceState>,
     cloud_state: State<'_, cloud_status::CloudStatusState>,
     id: String,
     mode: Option<String>,
@@ -597,10 +630,11 @@ async fn update_sync_folder(
     if paused == Some(true) {
         sync_run_state.cancel(&id);
     }
-    // 繼續同步或切換模式後，補做一次同步
+    // 繼續同步或切換模式後，補做一次同步，並確保同步服務在執行
     if paused == Some(false) || mode.is_some() {
         if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
             let _ = sync_run_state.start(&app, &id);
+            let _ = ensure_sync_service(&app, &sync_service_state, &watcher_state, &auth_state);
         }
     }
     Ok(cfg)
@@ -1225,6 +1259,7 @@ pub fn run() {
             pick_local_folder,
             add_sync_folder,
             ensure_local_watcher,
+            ensure_sync_service_running,
             ensure_explorer_icons,
             start_folder_sync,
             cancel_folder_sync,

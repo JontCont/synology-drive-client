@@ -672,6 +672,10 @@ function App() {
     invoke("ensure_explorer_icons").catch((err) =>
       setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
     );
+    // 已登入且有同步資料夾時自動啟動同步服務，新增或修改的檔案才會自動上傳
+    invoke<SyncServiceStatus>("ensure_sync_service_running")
+      .then((status) => setServiceStatus(status))
+      .catch((err) => setWarning(`同步服務未能自動啟動：${String(err)}`));
   }, [isAuthenticated]);
 
   // Whether Host and OIDC are currently configured in saved config

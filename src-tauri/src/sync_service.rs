@@ -103,10 +103,13 @@ impl SyncServiceState {
                 let mut last_notified_error: Option<String> = None;
                 // 本機有變動、但因為正在同步或冷卻中而尚未自動同步的資料夾
                 let mut dirty_folders: HashSet<String> = HashSet::new();
+                // 啟動後馬上跑第一輪，之後才依輪詢間隔
+                let mut wait = Duration::from_millis(500);
                 loop {
-                    match stop_rx.recv_timeout(sleep_duration) {
+                    match stop_rx.recv_timeout(wait) {
                         Ok(_) => break,
                         Err(RecvTimeoutError::Timeout) => {
+                            wait = sleep_duration;
                             if let Ok(mut m) = metrics_for_thread.lock() {
                                 m.tick_count += 1;
                                 m.last_tick_at = Some(SystemTime::now());
