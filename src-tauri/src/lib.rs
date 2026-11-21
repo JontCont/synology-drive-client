@@ -578,6 +578,14 @@ fn get_local_watcher_status(
 }
 
 #[tauri::command]
+async fn test_nas_host(host: String) -> Result<auth::NasProbeResult, String> {
+    // 網路 I/O 為阻塞呼叫，放到執行緒池避免卡住 UI
+    tauri::async_runtime::spawn_blocking(move || auth::probe_nas_host(&host))
+        .await
+        .map_err(|e| format!("測試連線失敗：{e}"))
+}
+
+#[tauri::command]
 async fn list_nas_folders(
     auth_state: State<'_, auth::AuthState>,
     path: String,
@@ -1089,6 +1097,7 @@ pub fn run() {
             update_sync_folder,
             remove_sync_folder,
             list_nas_folders,
+            test_nas_host,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,

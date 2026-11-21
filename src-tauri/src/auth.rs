@@ -175,6 +175,87 @@ fn parse_team_folder_items(data: &serde_json::Value) -> Vec<RemoteFolderEntry> {
     folders
 }
 
+/// 解析 `SYNO.API.Info query` 回應：是否為 DSM、是否提供 Synology Drive 檔案 API
+fn parse_api_info_response(body: &str) -> Option<(bool, bool)> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let data = value.get("data")?;
+    Some((
+        data.get("SYNO.API.Auth").is_some(),
+        data.get("SYNO.SynologyDrive.Files").is_some(),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NasProbeResult {
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub drive_available: bool,
+    pub message: String,
+}
+
+/// 測試 NAS 是否存活：不需登入，向 `SYNO.API.Info` 查詢並確認回應確實來自 DSM
+pub fn probe_nas_host(host: &str) -> NasProbeResult {
+    let fail = |message: String, latency_ms: Option<u64>| NasProbeResult {
+        ok: false,
+        latency_ms,
+        drive_available: false,
+        message,
+    };
+    let origin = match normalize_dsm_origin(host) {
+        Ok(origin) => origin,
+        Err(message) => return fail(message, None),
+    };
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(8)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let url = format!(
+        "{origin}/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query&query=SYNO.API.Auth,SYNO.SynologyDrive.Files"
+    );
+
+    let started = std::time::Instant::now();
+    let response = agent.get(&url).call();
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let mut response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::Timeout(_)) => {
+            return fail("連線逾時（8 秒內沒有回應），請確認主機位址、連接埠與網路".to_string(), None)
+        }
+        Err(err) => {
+            return fail(
+                format!("無法連線到伺服器（網路錯誤、位址錯誤或憑證無效）：{err}"),
+                None,
+            )
+        }
+    };
+
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string().unwrap_or_default();
+    match parse_api_info_response(&body) {
+        Some((true, drive_available)) => NasProbeResult {
+            ok: true,
+            latency_ms: Some(latency_ms),
+            drive_available,
+            message: if drive_available {
+                "伺服器正常運作，已偵測到 Synology Drive".to_string()
+            } else {
+                "伺服器正常運作，但沒有偵測到 Synology Drive（請確認已安裝並啟用 Drive Server）"
+                    .to_string()
+            },
+        },
+        _ => fail(
+            format!("伺服器有回應（HTTP {status}），但看起來不是 Synology DSM，請確認位址與連接埠"),
+            Some(latency_ms),
+        ),
+    }
+}
+
 struct PendingLogin {
     origin: String,
     username: String,
@@ -895,6 +976,32 @@ mod tests {
     fn listing_folders_requires_login() {
         let state = AuthState::with_adapter(Box::new(FakeAdapter));
         assert!(state.list_remote_folders("/").is_err());
+    }
+
+    #[test]
+    fn api_info_parsing_detects_dsm_and_drive() {
+        assert_eq!(
+            parse_api_info_response(
+                r#"{"success":true,"data":{"SYNO.API.Auth":{},"SYNO.SynologyDrive.Files":{}}}"#
+            ),
+            Some((true, true))
+        );
+        assert_eq!(
+            parse_api_info_response(r#"{"success":true,"data":{"SYNO.API.Auth":{}}}"#),
+            Some((true, false))
+        );
+        assert_eq!(parse_api_info_response("<html>nginx</html>"), None);
+        assert_eq!(
+            parse_api_info_response(r#"{"success":false,"error":{"code":101}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_rejects_invalid_host_without_network() {
+        let result = probe_nas_host("http://nas.example.com");
+        assert!(!result.ok);
+        assert!(result.latency_ms.is_none());
     }
 
     #[test]

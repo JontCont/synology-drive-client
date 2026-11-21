@@ -32,6 +32,13 @@ type SyncMode = "bidirectional" | "upload_only" | "download_only";
 
 type NasFolderEntry = { name: string; path: string };
 
+type NasProbeResult = {
+  ok: boolean;
+  latencyMs: number | null;
+  driveAvailable: boolean;
+  message: string;
+};
+
 // 以下路徑比對規則需與後端 config.rs 的 validate_new_folder 保持一致（後端為最終把關）
 const normalizeLocalPath = (p: string) =>
   p.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -313,6 +320,10 @@ function App() {
 
   // Standard Login state
   const [serverHost, setServerHost] = useState("");
+  const [hostTest, setHostTest] = useState<{ loading: boolean; result: NasProbeResult | null }>({
+    loading: false,
+    result: null,
+  });
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -610,6 +621,24 @@ function App() {
   function chooseNasFolder() {
     setRemotePath(nasPicker.path);
     setNasPicker((prev) => ({ ...prev, open: false }));
+  }
+
+  async function testNasHost() {
+    setHostTest({ loading: true, result: null });
+    try {
+      const result = await invoke<NasProbeResult>("test_nas_host", { host: serverHost });
+      setHostTest({ loading: false, result });
+    } catch (err) {
+      setHostTest({
+        loading: false,
+        result: {
+          ok: false,
+          latencyMs: null,
+          driveAvailable: false,
+          message: String(err),
+        },
+      });
+    }
   }
 
   async function saveHostConfig(event: React.FormEvent) {
@@ -1782,14 +1811,41 @@ function App() {
                         <input
                           className="input mono"
                           value={serverHost}
-                          onChange={(event) => setServerHost(event.currentTarget.value)}
+                          onChange={(event) => {
+                            setServerHost(event.currentTarget.value);
+                            setHostTest((prev) => ({ ...prev, result: null }));
+                          }}
                           placeholder="例如 https://nas.example.com:5001"
                         />
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          disabled={hostTest.loading || !serverHost.trim()}
+                          onClick={testNasHost}
+                        >
+                          {hostTest.loading ? "測試中..." : "測試連線"}
+                        </button>
                         <button type="submit" className="btn btn-secondary" disabled={saving}>
                           儲存 Host
                         </button>
                       </div>
                     </label>
+                    {hostTest.result ? (
+                      <div
+                        className={`alert ${hostTest.result.ok ? "alert-success" : "alert-error"}`}
+                        role="status"
+                      >
+                        <div className="alert-content">
+                          <span>
+                            {hostTest.result.ok ? "✓ " : "✕ "}
+                            {hostTest.result.message}
+                            {hostTest.result.latencyMs !== null
+                              ? `（${hostTest.result.latencyMs} ms）`
+                              : ""}
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
                   </form>
                 </div>
 
