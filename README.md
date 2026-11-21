@@ -97,3 +97,9 @@ GitHub Actions workflows are configured under `.github/workflows/`:
 - [Security & Secrets Audit](docs/security-audit.md)
 - [Multi-Language (i18n) Plan](docs/i18n-plan.md)
 - [Architecture & Development Plan](docs/plan.md)
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
