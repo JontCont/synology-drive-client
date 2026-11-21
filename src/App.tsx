@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  isValidLanguagePreference,
+  LANGUAGE_OPTIONS,
+  useI18n,
+} from "./i18n";
+import type { LanguagePreference, TranslationKey } from "./i18n/types";
 import "./App.css";
 
 type SyncFolder = {
@@ -23,6 +29,7 @@ type AppConfig = {
   remoteCheckMinutes?: number;
   lanHost?: string | null;
   lanWifiNames?: string[];
+  language?: LanguagePreference;
 };
 
 type LanStatus = {
@@ -101,21 +108,6 @@ const EMPTY_SYNC_QUEUE: SyncQueueSnapshot = {
   matched: 0,
 };
 
-const QUEUE_STATUS_FILTERS: { id: string; label: string }[] = [
-  { id: "", label: "全部" },
-  { id: "waiting", label: "等待中" },
-  { id: "running", label: "進行中" },
-  { id: "failed", label: "失敗" },
-  { id: "done", label: "已完成" },
-];
-
-const QUEUE_STATUS_LABEL: Record<string, string> = {
-  waiting: "等待中",
-  running: "進行中",
-  failed: "失敗",
-  done: "已完成",
-};
-
 const QUEUE_STATUS_BADGE: Record<string, string> = {
   waiting: "badge-neutral",
   running: "badge-info",
@@ -123,18 +115,64 @@ const QUEUE_STATUS_BADGE: Record<string, string> = {
   done: "badge-success",
 };
 
-const QUEUE_ACTIONS: Record<string, { arrow: string; label: string }> = {
-  download: { arrow: "↓", label: "下載" },
-  download_overwrite: { arrow: "↓", label: "下載（取代本機舊版）" },
-  keep_both_download: { arrow: "↓", label: "下載（本機版本另存為衝突副本）" },
-  upload: { arrow: "↑", label: "上傳" },
-  upload_version: { arrow: "↑", label: "上傳新版本（NAS 保留舊版）" },
-  create_remote_dir: { arrow: "↑", label: "在 NAS 建立資料夾" },
-  create_local_dir: { arrow: "↓", label: "在本機建立資料夾" },
-  delete_remote: { arrow: "✕", label: "刪除 NAS 上的項目（移到資源回收桶）" },
-  delete_local: { arrow: "✕", label: "刪除本機項目（移到資源回收筒）" },
-  conflict: { arrow: "⚠", label: "名稱衝突（一邊是檔案、一邊是資料夾）" },
+const QUEUE_ACTION_KEYS: Record<string, { arrow: string; labelKey: TranslationKey }> = {
+  download: { arrow: "↓", labelKey: "queue.action.download" },
+  download_overwrite: { arrow: "↓", labelKey: "queue.action.download_overwrite" },
+  keep_both_download: { arrow: "↓", labelKey: "queue.action.keep_both_download" },
+  upload: { arrow: "↑", labelKey: "queue.action.upload" },
+  upload_version: { arrow: "↑", labelKey: "queue.action.upload_version" },
+  create_remote_dir: { arrow: "↑", labelKey: "queue.action.create_remote_dir" },
+  create_local_dir: { arrow: "↓", labelKey: "queue.action.create_local_dir" },
+  delete_remote: { arrow: "✕", labelKey: "queue.action.delete_remote" },
+  delete_local: { arrow: "✕", labelKey: "queue.action.delete_local" },
+  conflict: { arrow: "⚠", labelKey: "queue.action.conflict" },
 };
+
+const SYNC_MODE_META: {
+  id: SyncMode;
+  arrow: string;
+  labelKey: TranslationKey;
+  descKey: TranslationKey;
+}[] = [
+  {
+    id: "bidirectional",
+    arrow: "⇄",
+    labelKey: "syncMode.bidirectional.label",
+    descKey: "syncMode.bidirectional.desc",
+  },
+  {
+    id: "upload_only",
+    arrow: "→",
+    labelKey: "syncMode.upload_only.label",
+    descKey: "syncMode.upload_only.desc",
+  },
+  {
+    id: "download_only",
+    arrow: "←",
+    labelKey: "syncMode.download_only.label",
+    descKey: "syncMode.download_only.desc",
+  },
+];
+
+const WINDOW_PRESET_META: {
+  id: "wide" | "compact";
+  size: string;
+  labelKey: TranslationKey;
+  descKey: TranslationKey;
+}[] = [
+  {
+    id: "wide",
+    size: "1160 × 768",
+    labelKey: "window.wideLabel",
+    descKey: "window.wideDesc",
+  },
+  {
+    id: "compact",
+    size: "930 × 680",
+    labelKey: "window.compactLabel",
+    descKey: "window.compactDesc",
+  },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -192,37 +230,7 @@ function pathRelation(
   return null;
 }
 
-function describeRelation(side: string, relation: PathRelation): string {
-  return relation.kind === "covered"
-    ? `此${side}資料夾已包含在「${relation.folderName}」的同步範圍內，不需要重複加入`
-    : `此${side}資料夾包含了已同步的「${relation.folderName}」，請先移除它，或改選其他資料夾`;
-}
-
-const SYNC_MODES: { id: SyncMode; label: string; arrow: string; desc: string }[] = [
-  {
-    id: "bidirectional",
-    label: "雙向同步",
-    arrow: "⇄",
-    desc: "本機與 NAS 的新增與修改互相同步；不會刪除任何一邊的檔案，兩邊都改時保留兩份",
-  },
-  {
-    id: "upload_only",
-    label: "僅上傳（本機 → NAS）",
-    arrow: "→",
-    desc: "只把本機新增與修改的檔案上傳到 NAS（修改過的檔案，NAS 會保留舊版本），不下載、不刪除",
-  },
-  {
-    id: "download_only",
-    label: "僅下載（NAS → 本機）",
-    arrow: "←",
-    desc: "只把 NAS 的變更下載到本機，不上傳、不刪除",
-  },
-];
-
-const WINDOW_PRESETS: { id: "wide" | "compact"; label: string; size: string; desc: string }[] = [
-  { id: "wide", label: "寬版", size: "1160 × 768", desc: "圖表整行顯示，服務與監看兩欄並排" },
-  { id: "compact", label: "精簡版", size: "930 × 680", desc: "KPI 2×2 排列，卡片單欄堆疊" },
-];
+// 舊有 describeRelation / SYNC_MODES / WINDOW_PRESETS 已移至 i18n 字典與 App() 內部的 t()
 
 type AuthStatus = {
   stage: "idle" | "waitingOtp" | "authenticated" | string;
@@ -379,16 +387,61 @@ function getStageBadgeClass(stage: string | null | undefined): string {
 }
 
 function App() {
+  const { language, setLanguage, t } = useI18n();
   const hasTauriBridge = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const invoke = async <T,>(
     command: string,
     args?: Record<string, unknown>,
   ): Promise<T> => {
     if (!hasTauriBridge) {
-      throw new Error("偵測不到 Tauri runtime。請使用 `npm run tauri dev` 啟動。");
+      throw new Error(t("error.noTauriBridge"));
     }
     return tauriInvoke<T>(command, args);
   };
+
+  const syncModes = useMemo(
+    () =>
+      SYNC_MODE_META.map((m) => ({
+        ...m,
+        label: t(m.labelKey),
+        desc: t(m.descKey),
+      })),
+    [t],
+  );
+  const windowPresets = useMemo(
+    () =>
+      WINDOW_PRESET_META.map((p) => ({
+        ...p,
+        label: t(p.labelKey),
+        desc: t(p.descKey),
+      })),
+    [t],
+  );
+  const queueStatusFilters = useMemo(
+    () => [
+      { id: "", label: t("queue.statusAll") },
+      { id: "waiting", label: t("queue.statusWaiting") },
+      { id: "running", label: t("queue.statusRunning") },
+      { id: "failed", label: t("queue.statusFailed") },
+      { id: "done", label: t("queue.statusDone") },
+    ],
+    [t],
+  );
+  const queueStatusLabel = useMemo<Record<string, string>>(
+    () => ({
+      waiting: t("queue.statusWaiting"),
+      running: t("queue.statusRunning"),
+      failed: t("queue.statusFailed"),
+      done: t("queue.statusDone"),
+    }),
+    [t],
+  );
+  function describeRelation(side: "local" | "nas", relation: PathRelation): string {
+    const sideLabel = side === "local" ? t("path.sideLocal") : t("path.sideNas");
+    return relation.kind === "covered"
+      ? t("path.coveredError", { side: sideLabel, folderName: relation.folderName })
+      : t("path.containsError", { side: sideLabel, folderName: relation.folderName });
+  }
 
   const [viewMode, setViewMode] = useState<"login" | "dashboard">("login");
   const [loginTab, setLoginTab] = useState<LoginViewTab>("standard");
@@ -496,7 +549,11 @@ function App() {
       const next = await invoke<AppConfig>("apply_window_preset", { preset });
       setConfig(next);
       setWindowPreset(next.windowPreset === "compact" ? "compact" : "wide");
-      setMessage(`已套用視窗解析度：${preset === "wide" ? "寬版" : "精簡版"}`);
+      setMessage(
+        t("toast.windowPresetApplied", {
+          label: preset === "wide" ? t("window.wideLabel") : t("window.compactLabel"),
+        }),
+      );
     } catch (err) {
       setError(String(err));
     }
@@ -510,13 +567,36 @@ function App() {
     setPollIntervalSeconds(String(value.pollIntervalSeconds));
     setIngestBacklogLimit(String(value.ingestBacklogLimit));
     setWindowPreset(value.windowPreset === "compact" ? "compact" : "wide");
+    if (isValidLanguagePreference(value.language)) {
+      setLanguage(value.language);
+    }
+  }
+
+  async function changeLanguage(nextLanguage: LanguagePreference) {
+    setLanguage(nextLanguage);
+    setError(null);
+    try {
+      const next = await invoke<AppConfig>("update_app_config", {
+        update: { language: nextLanguage },
+      });
+      applyConfigToState(next);
+      await invoke("set_tray_language", { language: nextLanguage });
+      setMessage(t("auth.languageSaved"));
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   useEffect(() => {
     setInitialLoading(true);
     Promise.allSettled([
       invoke<AppConfig>("get_app_config")
-        .then((value) => applyConfigToState(value))
+        .then((value) => {
+          applyConfigToState(value);
+          if (isValidLanguagePreference(value.language)) {
+            invoke("set_tray_language", { language: value.language }).catch(() => undefined);
+          }
+        })
         .catch((err) => setError(String(err))),
 
       invoke<AuthStatus>("restore_saved_login")
@@ -640,19 +720,32 @@ function App() {
       previousDownloadPhases.current.set(item.folderId, item.phase);
       const wasRunning = prev === "listing" || prev === "syncing";
       if (!wasRunning || item.phase === "listing" || item.phase === "syncing") continue;
-      const name = configRef.current?.syncFolders.find((f) => f.id === item.folderId)?.name ?? "資料夾";
+      const name =
+        configRef.current?.syncFolders.find((f) => f.id === item.folderId)?.name ??
+        t("common.folderFallback");
       if (item.phase === "done" && item.failedFiles === 0) {
         if (item.doneFiles + item.uploadedFiles + item.deletedFiles > 0) {
           setMessage(
-            `「${name}」同步完成：下載 ${item.doneFiles} 個、上傳 ${item.uploadedFiles} 個${
-              item.deletedFiles > 0 ? `、刪除 ${item.deletedFiles} 個` : ""
-            }檔案`,
+            t("toast.syncDone", {
+              name,
+              done: item.doneFiles,
+              uploaded: item.uploadedFiles,
+              deletedPart:
+                item.deletedFiles > 0
+                  ? t("toast.syncDoneDeletedPart", { deleted: item.deletedFiles })
+                  : "",
+            }),
           );
         }
       } else if (item.phase === "done") {
-        setWarning(`「${name}」同步完成，但有 ${item.failedFiles} 個檔案同步失敗`);
+        setWarning(t("toast.syncDoneWithFailures", { name, failed: item.failedFiles }));
       } else if (item.phase === "error") {
-        setError(`「${name}」同步失敗：${item.lastError ?? "未知錯誤"}`);
+        setError(
+          t("toast.syncFailed", {
+            name,
+            error: item.lastError ?? t("common.unknownError"),
+          }),
+        );
       }
     }
   }
@@ -676,7 +769,7 @@ function App() {
     if (viewMode === "dashboard" && !isAuthenticated) {
       setViewMode("login");
       if (!initialLoading) {
-        setError("請先登入後再進入系統。");
+        setError(t("error.loginRequired"));
       }
     }
   }, [viewMode, isAuthenticated, initialLoading]);
@@ -717,14 +810,14 @@ function App() {
     if (!isAuthenticated) return;
     invoke<LocalWatcherStatus>("ensure_local_watcher")
       .then((status) => setWatcherStatus(status))
-      .catch((err) => setWarning(`本機監看未能自動啟動：${String(err)}`));
+      .catch((err) => setWarning(t("toast.watcherAutoStartFailed", { error: String(err) })));
     invoke("ensure_explorer_icons").catch((err) =>
-      setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+      setWarning(t("toast.explorerIconsFailed", { error: String(err) })),
     );
     // 已登入且有同步資料夾時自動啟動同步服務，新增或修改的檔案才會自動上傳
     invoke<SyncServiceStatus>("ensure_sync_service_running")
       .then((status) => setServiceStatus(status))
-      .catch((err) => setWarning(`同步服務未能自動啟動：${String(err)}`));
+      .catch((err) => setWarning(t("toast.syncServiceAutoStartFailed", { error: String(err) })));
   }, [isAuthenticated]);
 
   // Whether Host is currently configured in saved config
@@ -734,12 +827,12 @@ function App() {
   // 燈號：灰=未設定/檢查中、綠=可連線且有 Drive、黃=可連線但沒偵測到 Drive 或回應很慢、紅=無法連線
   const SLOW_RESPONSE_MS = 2000;
   const hostHealth: { dot: string; label: string } = (() => {
-    if (!isHostConfigured) return { dot: "status-idle", label: "尚未設定 NAS 主機" };
+    if (!isHostConfigured) return { dot: "status-idle", label: t("login.hostHealthUnset") };
     const probe = savedHostProbe.result;
     if (!probe) {
       return {
         dot: savedHostProbe.loading ? "status-checking" : "status-idle",
-        label: "檢查連線中...",
+        label: t("login.hostHealthChecking"),
       };
     }
     if (!probe.ok) return { dot: "status-error", label: probe.message };
@@ -748,7 +841,7 @@ function App() {
       return {
         dot: "status-warning",
         label: slow
-          ? `${probe.message}（回應偏慢：${probe.latencyMs} ms）`
+          ? t("login.hostHealthSlow", { message: probe.message, latencyMs: probe.latencyMs ?? 0 })
           : probe.message,
       };
     }
@@ -768,12 +861,12 @@ function App() {
   async function saveConfig() {
     const parsedPoll = Number.parseInt(pollIntervalSeconds, 10);
     if (!Number.isFinite(parsedPoll) || parsedPoll <= 0) {
-      setError("輪詢間隔必須是大於 0 的整數。");
+      setError(t("toast.invalidPollInterval"));
       return;
     }
     const parsedBacklog = Number.parseInt(ingestBacklogLimit, 10);
     if (!Number.isFinite(parsedBacklog) || parsedBacklog <= 0) {
-      setError("ingest backlog 上限必須是大於 0 的整數。");
+      setError(t("toast.invalidBacklogLimit"));
       return;
     }
 
@@ -789,7 +882,7 @@ function App() {
         },
       });
       applyConfigToState(next);
-      setMessage("設定已儲存。");
+      setMessage(t("toast.configSaved"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -805,7 +898,7 @@ function App() {
       setMessage(successMessage);
       await refreshWatcherStatus().catch(() => undefined);
       await invoke("ensure_explorer_icons").catch((err) =>
-        setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+        setWarning(t("toast.explorerIconsFailed", { error: String(err) })),
       );
       return true;
     } catch (err) {
@@ -820,7 +913,7 @@ function App() {
     setError(null);
     try {
       applyConfigToState(await invoke<AppConfig>("update_app_config", { update }));
-      setMessage("同步排程已更新。");
+      setMessage(t("toast.syncScheduleUpdated"));
     } catch (err) {
       setError(String(err));
     }
@@ -836,10 +929,12 @@ function App() {
       );
       if (enabled) {
         await invoke("ensure_explorer_icons").catch((err) =>
-          setWarning(`檔案總管同步圖示未能啟用：${String(err)}`),
+          setWarning(t("toast.explorerIconsFailed", { error: String(err) })),
         );
       }
-      setMessage(enabled ? "已啟用檔案總管同步狀態圖示。" : "已關閉檔案總管同步狀態圖示。");
+      setMessage(
+        enabled ? t("toast.explorerIconsEnabled") : t("toast.explorerIconsDisabled"),
+      );
     } catch (err) {
       setError(String(err));
     }
@@ -853,7 +948,7 @@ function App() {
           remotePath,
           mode: syncMode,
         }),
-      "已新增同步資料夾。",
+      t("toast.folderAdded"),
     );
     if (ok) {
       setLocalSyncPath("");
@@ -871,20 +966,20 @@ function App() {
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
       patch.syncDeletes !== undefined
         ? patch.syncDeletes
-          ? "已開啟「同步刪除」，下一輪同步起生效。"
-          : "已關閉「同步刪除」。"
+          ? t("toast.syncDeletesEnabled")
+          : t("toast.syncDeletesDisabled")
         : patch.paused === undefined
-          ? "已更新同步模式。"
+          ? t("toast.syncModeUpdated")
           : patch.paused
-            ? "已暫停此資料夾的同步。"
-            : "已繼續同步此資料夾。",
+            ? t("toast.folderPaused")
+            : t("toast.folderResumed"),
     );
   }
 
   async function removeSyncFolder(id: string) {
     const removed = await runFolderAction(
       () => invoke<AppConfig>("remove_sync_folder", { id }),
-      "已移除同步資料夾（本機與 NAS 上的檔案不會被刪除）。",
+      t("toast.folderRemoved"),
     );
     if (removed) setConfirmRemoveId(null);
   }
@@ -943,7 +1038,7 @@ function App() {
       setLanStatus(await invoke<LanStatus>("get_lan_status"));
     } catch (err) {
       setLanStatus(null);
-      setWarning(`區網狀態偵測失敗：${String(err)}`);
+      setWarning(t("toast.lanStatusFailed", { error: String(err) }));
     }
   }
 
@@ -964,7 +1059,7 @@ function App() {
     event.preventDefault();
     const trimmedHost = serverHost.trim();
     if (!trimmedHost) {
-      setError("請輸入 NAS 伺服器 Host 位址（例如 https://nas.example.com:5001）。");
+      setError(t("toast.hostRequired"));
       return;
     }
     setSaving(true);
@@ -984,7 +1079,9 @@ function App() {
         },
       });
       applyConfigToState(next);
-      setMessage(includeLan ? "連線設定已儲存，登入狀態保持不變。" : `已儲存 NAS 連線主機：${trimmedHost}`);
+      setMessage(
+        includeLan ? t("toast.connectionSaved") : t("toast.hostSaved", { host: trimmedHost }),
+      );
       if (includeLan) await refreshLanStatus();
     } catch (err) {
       setError(String(err));
@@ -997,7 +1094,7 @@ function App() {
     return (
       <>
         <label className="form-field">
-          <span>NAS Host / 伺服器網址</span>
+          <span>{t("login.nasHostLabel")}</span>
           <div className="inline-input-row">
             <input
               className="input mono"
@@ -1007,7 +1104,7 @@ function App() {
                 setServerHost(event.currentTarget.value);
                 setHostTest((prev) => ({ ...prev, result: null }));
               }}
-              placeholder="例如 https://nas.example.com:5001"
+              placeholder={t("login.nasHostPlaceholder")}
             />
             <button
               type="button"
@@ -1015,7 +1112,7 @@ function App() {
               disabled={saving || hostTest.loading || !serverHost.trim()}
               onClick={testNasHost}
             >
-              {hostTest.loading ? "測試中..." : "測試連線"}
+              {hostTest.loading ? t("login.testing") : t("login.testConnection")}
             </button>
           </div>
         </label>
@@ -1028,7 +1125,7 @@ function App() {
     return (
       <>
         <label className="form-field">
-          <span>區網位址（選填）</span>
+          <span>{t("login.lanHostLabel")}</span>
           <div className="inline-input-row">
             <input
               className="input mono"
@@ -1038,7 +1135,7 @@ function App() {
                 setLanHost(event.currentTarget.value);
                 setLanTest((prev) => ({ ...prev, result: null }));
               }}
-              placeholder="例如 http://192.168.0.18:5000/drive/"
+              placeholder={t("login.lanHostPlaceholder")}
             />
             <button
               type="button"
@@ -1046,25 +1143,25 @@ function App() {
               disabled={saving || lanTest.loading || !lanHost.trim()}
               onClick={testLanHost}
             >
-              {lanTest.loading ? "測試中..." : "測試連線"}
+              {lanTest.loading ? t("login.testing") : t("login.testConnection")}
             </button>
           </div>
         </label>
         <label className="form-field">
-          <span>限定 Wi-Fi 名稱（選填）</span>
+          <span>{t("login.lanWifiLabel")}</span>
           <input
             className="input"
             value={lanWifiNames}
             disabled={saving}
             onChange={(event) => setLanWifiNames(event.currentTarget.value)}
-            placeholder="例如 TP-Network（多個以逗號分隔；留空＝只要連得到區網位址就使用）"
+            placeholder={t("login.lanWifiPlaceholder")}
           />
         </label>
         <ConnectionTestResult result={lanTest.result} />
         {lanStatus?.configured ? (
           <div className="cell-secondary">
             {lanStatus.message}
-            {lanStatus.ssid ? `（目前 Wi-Fi：${lanStatus.ssid}）` : ""}
+            {lanStatus.ssid ? t("login.currentWifi", { ssid: lanStatus.ssid }) : ""}
           </div>
         ) : null}
       </>
@@ -1074,7 +1171,7 @@ function App() {
   async function loginByPassword(event: React.FormEvent) {
     event.preventDefault();
     if (!isHostConfigured) {
-      setError("請先到「配置」設定 NAS 主機位址（必填）。");
+      setError(t("toast.hostConfigRequired"));
       setLoginTab("config");
       return;
     }
@@ -1094,8 +1191,8 @@ function App() {
       setAuthResult(
         status,
         status.stage === "authenticated"
-          ? "登入成功！"
-          : "伺服器要求第二因素驗證 (MFA Challenge)，請輸入 6 位數 OTP 驗證碼。"
+          ? t("toast.loginSuccess")
+          : t("toast.mfaRequired"),
       );
     } catch (err) {
       setError(String(err));
@@ -1116,7 +1213,7 @@ function App() {
           challengeId: authStatus?.challengeId ?? null,
         },
       });
-      setAuthResult(status, "OTP 驗證完成，已成功登入。");
+      setAuthResult(status, t("toast.otpSuccess"));
       setOtpCode("");
     } catch (err) {
       setError(String(err));
@@ -1149,7 +1246,7 @@ function App() {
       setAuthStatus(status);
       setPassword("");
       setOtpCode("");
-      setMessage("已登出帳號。");
+      setMessage(t("toast.loggedOut"));
       setViewMode("login");
     } catch (err) {
       setError(String(err));
@@ -1165,7 +1262,7 @@ function App() {
     try {
       const info = await invoke<SyncStorageInfo>("init_sync_storage");
       setStorageInfo(info);
-      setMessage("同步資料庫已初始化。");
+      setMessage(t("toast.storageInitialized"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1187,7 +1284,7 @@ function App() {
       const status = await invoke<SyncServiceStatus>("start_sync_service");
       setServiceStatus(status);
       await refreshWatcherStatus().catch(() => undefined);
-      setMessage("同步服務已重新啟動。");
+      setMessage(t("toast.serviceRestarted"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1203,7 +1300,7 @@ function App() {
       const status = await invoke<SyncServiceStatus>("stop_sync_service");
       setServiceStatus(status);
       await refreshWatcherStatus().catch(() => undefined);
-      setMessage("同步服務已停止（本機監看已一併停止）。");
+      setMessage(t("toast.serviceStopped"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1223,7 +1320,7 @@ function App() {
     try {
       const status = await invoke<LocalWatcherStatus>("start_local_watcher");
       setWatcherStatus(status);
-      setMessage("本機監看已啟動。");
+      setMessage(t("toast.watcherStarted"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1238,7 +1335,7 @@ function App() {
     try {
       const status = await invoke<LocalWatcherStatus>("stop_local_watcher");
       setWatcherStatus(status);
-      setMessage("本機監看已停止。");
+      setMessage(t("toast.watcherStopped"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1255,7 +1352,7 @@ function App() {
         limit: 50,
       });
       await refreshOperations();
-      setMessage(`補掃描已轉入 ${result.queuedCount} 筆 operation。`);
+      setMessage(t("toast.scanQueued", { count: result.queuedCount }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1287,7 +1384,7 @@ function App() {
       });
       await refreshOperations();
       await refreshWatcherStatus();
-      setMessage(`已轉入 ${result.queuedCount} 筆 watcher 事件。`);
+      setMessage(t("toast.watcherDrained", { count: result.queuedCount }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1352,7 +1449,7 @@ function App() {
         },
       });
       await refreshOperations();
-      setMessage("已新增範例 operation。");
+      setMessage(t("toast.sampleOpAdded"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1378,7 +1475,7 @@ function App() {
         },
       });
       await refreshOperations();
-      setMessage("已新增可重試範例 operation。");
+      setMessage(t("toast.retryOpAdded"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1404,7 +1501,7 @@ function App() {
         },
       });
       await refreshOperations();
-      setMessage("已新增 hard retry 測試 operation。");
+      setMessage(t("toast.hardRetryOpAdded"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1419,7 +1516,7 @@ function App() {
     try {
       const rows = await invoke<OperationRow[]>("seed_demo_operations", { count: 5 });
       await refreshOperations();
-      setMessage(`已新增 ${rows.length} 筆 demo operations。`);
+      setMessage(t("toast.demoOpsSeeded", { count: rows.length }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1434,7 +1531,7 @@ function App() {
     try {
       const rows = await invoke<OperationRow[]>("seed_fault_matrix_operations");
       await refreshOperations();
-      setMessage(`已新增 ${rows.length} 筆 fault matrix operations。`);
+      setMessage(t("toast.faultMatrixSeeded", { count: rows.length }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1486,7 +1583,7 @@ function App() {
     try {
       const released = await invoke<number>("force_due_retryable_operations", { limit: 100 });
       await refreshOperations();
-      setMessage(`已強制釋放 ${released} 筆 retryable operation 進入到期待執行狀態。`);
+      setMessage(t("toast.retryableReleased", { count: released }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1543,7 +1640,7 @@ function App() {
         },
       });
       await refreshConflicts();
-      setMessage("已新增示範 conflict。");
+      setMessage(t("toast.demoConflictAdded"));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1558,7 +1655,7 @@ function App() {
     try {
       await invoke<ConflictRow>("resolve_sync_conflict", { id });
       await refreshConflicts();
-      setMessage(`conflict ${id} 已標記 resolved。`);
+      setMessage(t("toast.conflictResolved", { id }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1576,7 +1673,7 @@ function App() {
         limit: 200,
       });
       await refreshConflicts();
-      setMessage(`已清理 ${deleted} 筆 ${status} conflict。`);
+      setMessage(t("toast.conflictsPurged", { count: deleted, status }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1586,7 +1683,7 @@ function App() {
 
   async function retryOperationById(id: string) {
     if (!id.trim()) {
-      setError("請輸入 operation id。");
+      setError(t("toast.opIdRequired"));
       return;
     }
     setOpsLoading(true);
@@ -1595,7 +1692,7 @@ function App() {
     try {
       await invoke<OperationRow>("retry_sync_operation", { id: id.trim() });
       await refreshOperations();
-      setMessage(`operation ${id.trim()} 已重設為 planned。`);
+      setMessage(t("toast.opResetPlanned", { id: id.trim() }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1618,7 +1715,7 @@ function App() {
         limit: 200,
       });
       await refreshOperations();
-      setMessage(`已清理 ${deleted} 筆 ${stage} operation。`);
+      setMessage(t("toast.opsPurged", { count: deleted, stage }));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -1631,7 +1728,7 @@ function App() {
     try {
       const s = await invoke<SystemSnapshot>("get_system_snapshot");
       setSnapshot(s);
-      setMessage("系統快照已更新。");
+      setMessage(t("toast.snapshotRefreshed"));
     } catch {
       setSnapshot(null);
     } finally {
@@ -1669,7 +1766,7 @@ function App() {
     const prev = prevOpenConflictCount.current;
     prevOpenConflictCount.current = openConflictCount;
     if (prev !== null && openConflictCount > prev) {
-      setWarning(`偵測到新的同步衝突，目前共 ${openConflictCount} 筆待處理`);
+      setWarning(t("toast.newConflictsDetected", { count: openConflictCount }));
     }
   }, [openConflictCount, initialLoading]);
 
@@ -1680,7 +1777,11 @@ function App() {
     const prev = prevFailedCount.current;
     prevFailedCount.current = currentFailedCount;
     if (prev !== null && currentFailedCount > prev) {
-      setError(`同步失敗：${serviceStatus?.lastError ?? serviceStatus?.lastMessage ?? "未知錯誤"}`);
+      setError(
+        t("toast.serviceSyncFailed", {
+          error: serviceStatus?.lastError ?? serviceStatus?.lastMessage ?? t("common.unknownError"),
+        }),
+      );
     }
   }, [currentFailedCount, initialLoading]);
 
@@ -1689,7 +1790,7 @@ function App() {
       ? operations
       : operations.filter((op) => op.stage === stageFilter);
   const overviewChartData = (["waiting", "running", "done", "failed"] as const).map((status) => ({
-    label: QUEUE_STATUS_LABEL[status],
+    label: queueStatusLabel[status],
     value: overviewQueue?.[status] ?? 0,
   }));
   const overviewChartMax = Math.max(1, ...overviewChartData.map((it) => it.value));
@@ -1699,8 +1800,8 @@ function App() {
     y: 160 - (item.value / overviewChartMax) * 140,
   }));
   const syncFolders = config?.syncFolders ?? [];
-  const syncModeArrow = SYNC_MODES.find((m) => m.id === syncMode)?.arrow ?? "⇄";
-  const modeArrow = (mode: SyncMode) => SYNC_MODES.find((m) => m.id === mode)?.arrow ?? "⇄";
+  const syncModeArrow = syncModes.find((m) => m.id === syncMode)?.arrow ?? "⇄";
+  const modeArrow = (mode: SyncMode) => syncModes.find((m) => m.id === mode)?.arrow ?? "⇄";
   const draftLocalRelation = localSyncPath
     ? pathRelation(syncFolders, localSyncPath, normalizeLocalPath, (f) => f.localPath)
     : null;
@@ -1708,9 +1809,9 @@ function App() {
     ? pathRelation(syncFolders, remotePath, normalizeRemotePath, (f) => f.remotePath)
     : null;
   const draftOverlapError = draftLocalRelation
-    ? describeRelation("本機", draftLocalRelation)
+    ? describeRelation("local", draftLocalRelation)
     : draftRemoteRelation
-      ? describeRelation("NAS", draftRemoteRelation)
+      ? describeRelation("nas", draftRemoteRelation)
       : null;
   const nasPickerRelation = nasPicker.path
     ? pathRelation(syncFolders, nasPicker.path, normalizeRemotePath, (f) => f.remotePath)
@@ -1722,14 +1823,14 @@ function App() {
         {warning ? (
           <div className="alert alert-warning" role="status">
             <div className="alert-content">
-              <strong>注意：</strong>
+              <strong>{t("toast.warningPrefix")}</strong>
               <span>{warning}</span>
             </div>
             <button
               type="button"
               className="alert-close"
               onClick={() => setWarning(null)}
-              aria-label="關閉警告訊息"
+              aria-label={t("toast.closeWarning")}
             >
               ✕
             </button>
@@ -1738,14 +1839,14 @@ function App() {
         {error ? (
           <div className="alert alert-error" role="alert">
             <div className="alert-content">
-              <strong>發生錯誤：</strong>
+              <strong>{t("toast.errorPrefix")}</strong>
               <span>{error}</span>
             </div>
             <button
               type="button"
               className="alert-close"
               onClick={() => setError(null)}
-              aria-label="關閉錯誤訊息"
+              aria-label={t("toast.closeError")}
             >
               ✕
             </button>
@@ -1754,14 +1855,14 @@ function App() {
         {message ? (
           <div className="alert alert-success" role="status">
             <div className="alert-content">
-              <strong>操作成功：</strong>
+              <strong>{t("toast.successPrefix")}</strong>
               <span>{message}</span>
             </div>
             <button
               type="button"
               className="alert-close"
               onClick={() => setMessage(null)}
-              aria-label="關閉通知訊息"
+              aria-label={t("toast.closeSuccess")}
             >
               ✕
             </button>
@@ -1799,14 +1900,14 @@ function App() {
                   </svg>
                 </div>
               </div>
-              <h1 className="login-title">連線至 Synology Drive</h1>
+              <h1 className="login-title">{t("login.title")}</h1>
               <p className="login-subtitle">
-                使用 DSM 帳號密碼登入，NAS 伺服器位址可在「配置」中設定
+                {t("login.subtitle")}
               </p>
             </div>
 
             {/* Segmented Mode Switcher: 一般登入 vs 配置 */}
-            <div className="login-tabs" role="tablist" aria-label="登入與配置選項">
+            <div className="login-tabs" role="tablist" aria-label={t("login.tabsAria")}>
               <button
                 type="button"
                 role="tab"
@@ -1814,7 +1915,7 @@ function App() {
                 className={`login-tab-btn ${loginTab === "standard" ? "active" : ""}`}
                 onClick={() => switchLoginTab("standard")}
               >
-                <span>一般登入</span>
+                <span>{t("login.tabStandard")}</span>
               </button>
               <button
                 type="button"
@@ -1823,14 +1924,14 @@ function App() {
                 className={`login-tab-btn ${loginTab === "config" ? "active" : ""}`}
                 onClick={() => switchLoginTab("config")}
               >
-                <span>配置</span>
+                <span>{t("login.tabConfig")}</span>
                 <span className={`tab-dot ${hostHealth.dot}`} title={hostHealth.label} />
               </button>
             </div>
 
             {/* Facebook-style Shimmer Skeleton when loading / switching login views */}
             {initialLoading || loginTabSwitching || authLoading || saving ? (
-              <div className="fb-skeleton-container" aria-busy="true" aria-label="載入中">
+              <div className="fb-skeleton-container" aria-busy="true" aria-label={t("login.loadingAria")}>
                 <div className="fb-skeleton-row">
                   <div className="fb-skeleton fb-skeleton-circle-sm" />
                   <div className="fb-skeleton fb-skeleton-line w-45" />
@@ -1859,9 +1960,9 @@ function App() {
                 <div className={`host-status-bar ${isHostConfigured ? "" : "host-status-required"}`}>
                   <div className="host-status-info" title={hostHealth.label}>
                     <span className={`status-dot ${hostHealth.dot}`} />
-                    <span className="host-status-label">NAS 主機：</span>
+                    <span className="host-status-label">{t("login.hostLabel")}</span>
                     <code className="mono host-status-value">
-                      {isHostConfigured ? savedHost : "尚未設定（必填，請先至「配置」填寫）"}
+                      {isHostConfigured ? savedHost : t("login.hostUnset")}
                     </code>
                   </div>
                   <button
@@ -1869,31 +1970,31 @@ function App() {
                     className="link-btn"
                     onClick={() => switchLoginTab("config")}
                   >
-                    配置 →
+                    {t("login.goConfig")}
                   </button>
                 </div>
 
                 <>
                     <form className="form-stack" onSubmit={loginByPassword}>
                       <label className="form-field">
-                        <span>DSM 帳號</span>
+                        <span>{t("login.username")}</span>
                         <input
                           className="input"
                           value={username}
                           onChange={(event) => setUsername(event.currentTarget.value)}
-                          placeholder="輸入 DSM 使用者帳號"
+                          placeholder={t("login.usernamePlaceholder")}
                           autoComplete="username"
                         />
                       </label>
 
                       <label className="form-field">
-                        <span>密碼</span>
+                        <span>{t("login.password")}</span>
                         <input
                           className="input"
                           type="password"
                           value={password}
                           onChange={(event) => setPassword(event.currentTarget.value)}
-                          placeholder="輸入登入密碼"
+                          placeholder={t("login.passwordPlaceholder")}
                           autoComplete="current-password"
                         />
                       </label>
@@ -1904,16 +2005,16 @@ function App() {
                           checked={rememberLogin}
                           onChange={(event) => setRememberLogin(event.currentTarget.checked)}
                         />
-                        <span>記住登入（安全保存 session，不保存密碼或 OTP）</span>
+                        <span>{t("login.remember")}</span>
                       </label>
 
                       <button
                         type="submit"
                         className="btn btn-primary btn-block btn-lg btn-animated"
                         disabled={authLoading || !isHostConfigured}
-                        title={isHostConfigured ? undefined : "請先到「配置」設定 NAS 主機"}
+                        title={isHostConfigured ? undefined : t("login.submitNeedHost")}
                       >
-                        <span>{authLoading ? "登入驗證中..." : "登入"}</span>
+                        <span>{authLoading ? t("login.submitting") : t("login.submit")}</span>
                       </button>
                     </form>
                 </>
@@ -1937,9 +2038,9 @@ function App() {
                         </svg>
                       </div>
                       <div>
-                        <h2 className="config-block-title">NAS 伺服器位址 (Host)</h2>
+                        <h2 className="config-block-title">{t("login.hostBlockTitle")}</h2>
                         <p className="config-block-desc">
-                          指定您要同步的 Synology NAS 網域或 IP:Port，供一般帳密登入連線使用
+                          {t("login.hostBlockDesc")}
                         </p>
                       </div>
                     </div>
@@ -1948,14 +2049,14 @@ function App() {
                         isHostConfigured ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {isHostConfigured ? "已設定 Host" : "未設定"}
+                      {isHostConfigured ? t("login.hostConfigured") : t("login.hostNotConfigured")}
                     </span>
                   </div>
 
                   <form className="config-block-body" onSubmit={saveHostConfig}>
                     {renderNasHostFields()}
                     <button type="submit" className="btn btn-secondary" disabled={saving}>
-                      儲存 Host
+                      {t("login.saveHost")}
                     </button>
                   </form>
                 </div>
@@ -1978,11 +2079,12 @@ function App() {
               }}
             >
               <h2 id="otp-dialog-title" className="modal-title">
-                二階段驗證
+                {t("otp.title")}
               </h2>
               <p className="modal-desc">
-                帳號 <strong>{authStatus.username}</strong> 已啟用兩步驟驗證，請輸入驗證器上的 6
-                位數驗證碼。
+                {t("otp.descPrefix")}
+                <strong>{authStatus.username}</strong>
+                {t("otp.descSuffix")}
               </p>
               <input
                 className="input otp-input mono"
@@ -1994,7 +2096,7 @@ function App() {
                 inputMode="numeric"
                 autoComplete="one-time-code"
                 maxLength={6}
-                aria-label="6 位數 OTP 驗證碼"
+                aria-label={t("otp.ariaLabel")}
                 autoFocus
               />
               <div className="button-row">
@@ -2004,7 +2106,7 @@ function App() {
                   style={{ flex: 1 }}
                   disabled={authLoading || otpCode.length !== 6}
                 >
-                  {authLoading ? "驗證中..." : "驗證"}
+                  {authLoading ? t("otp.verifying") : t("otp.verify")}
                 </button>
                 <button
                   type="button"
@@ -2012,7 +2114,7 @@ function App() {
                   onClick={cancelOtp}
                   disabled={authLoading}
                 >
-                  取消
+                  {t("common.cancel")}
                 </button>
               </div>
             </form>
@@ -2034,8 +2136,8 @@ function App() {
             <img src="/app-logo.png" alt="" className="brand-logo-img" />
           </div>
           <div className="brand-text">
-            <span className="brand-title">Synology Drive</span>
-            <span className="brand-subtitle">Desktop Sync Client</span>
+            <span className="brand-title">{t("brand.title")}</span>
+            <span className="brand-subtitle">{t("brand.subtitle")}</span>
           </div>
         </div>
 
@@ -2045,7 +2147,9 @@ function App() {
               className={`status-dot ${serviceStatus?.running ? "status-online" : "status-idle"}`}
             />
             <span className="service-pill-label">
-              同步服務：{serviceStatus?.running ? "運行中" : "已停止"}
+              {t("sidebar.syncService", {
+                state: serviceStatus?.running ? t("sidebar.running") : t("sidebar.stopped"),
+              })}
             </span>
           </div>
           <div className="service-pill-row">
@@ -2053,12 +2157,14 @@ function App() {
               className={`status-dot ${watcherStatus?.running ? "status-online" : "status-idle"}`}
             />
             <span className="service-pill-label">
-              本機監看：{watcherStatus?.running ? "監看中" : "已停止"}
+              {t("sidebar.localWatcher", {
+                state: watcherStatus?.running ? t("sidebar.watching") : t("sidebar.stopped"),
+              })}
             </span>
           </div>
         </div>
 
-        <nav className="nav-menu" aria-label="主導覽">
+        <nav className="nav-menu" aria-label={t("sidebar.navAria")}>
           <button
             type="button"
             className={`nav-item ${activeTab === "overview" ? "active" : ""}`}
@@ -2070,7 +2176,7 @@ function App() {
               <rect x="14" y="14" width="7" height="7" rx="1.5" />
               <rect x="3" y="14" width="7" height="7" rx="1.5" />
             </svg>
-            <span>總覽儀表板</span>
+            <span>{t("nav.overview")}</span>
           </button>
 
           <button
@@ -2086,7 +2192,7 @@ function App() {
               />
               <circle cx="12" cy="12" r="3" />
             </svg>
-            <span>同步檔案</span>
+            <span>{t("nav.settings")}</span>
           </button>
 
           <button
@@ -2101,7 +2207,7 @@ function App() {
                 d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
               />
             </svg>
-            <span>衝突管理</span>
+            <span>{t("nav.conflicts")}</span>
             {openConflictCount > 0 ? (
               <span className="nav-badge nav-badge-danger">{openConflictCount}</span>
             ) : null}
@@ -2119,7 +2225,7 @@ function App() {
                 d="M4 6h16M4 12h16M4 18h16"
               />
             </svg>
-            <span>操作佇列與監看</span>
+            <span>{t("nav.operations")}</span>
             {totalSyncQueueItems > 0 ? (
               <span className="nav-badge">{totalSyncQueueItems}</span>
             ) : null}
@@ -2133,7 +2239,7 @@ function App() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 3h9l4 4v14H6a2 2 0 01-2-2V5a2 2 0 012-2zM14 3v5h5M8 12h7M8 16h7" />
             </svg>
-            <span>文件說明</span>
+            <span>{t("nav.docs")}</span>
           </button>
 
           <button
@@ -2148,7 +2254,7 @@ function App() {
                 d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
               />
             </svg>
-            <span>環境設定</span>
+            <span>{t("nav.auth")}</span>
             <span
               className={`status-dot-sm ${
                 authStatus?.stage === "authenticated" ? "status-online" : "status-idle"
@@ -2168,39 +2274,39 @@ function App() {
                   d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"
                 />
               </svg>
-              <span>開發工具</span>
+              <span>{t("nav.devtools")}</span>
             </button>
           )}
         </nav>
 
         <div className="sidebar-footer">
-          <div className="theme-switcher" role="group" aria-label="佈景主題切換">
+          <div className="theme-switcher" role="group" aria-label={t("sidebar.themeAria")}>
             <button
               type="button"
               className={theme === "system" ? "active" : ""}
               onClick={() => setTheme("system")}
-              title="跟隨系統"
+              title={t("sidebar.themeAutoTitle")}
             >
-              自動
+              {t("sidebar.themeAuto")}
             </button>
             <button
               type="button"
               className={theme === "light" ? "active" : ""}
               onClick={() => setTheme("light")}
-              title="淺色模式"
+              title={t("sidebar.themeLightTitle")}
             >
-              淺色
+              {t("sidebar.themeLight")}
             </button>
             <button
               type="button"
               className={theme === "dark" ? "active" : ""}
               onClick={() => setTheme("dark")}
-              title="深色模式"
+              title={t("sidebar.themeDarkTitle")}
             >
-              深色
+              {t("sidebar.themeDark")}
             </button>
           </div>
-          <p className="tray-hint">關閉視窗將自動縮至系統匣常駐</p>
+          <p className="tray-hint">{t("sidebar.trayHint")}</p>
         </div>
       </aside>
 
@@ -2210,26 +2316,31 @@ function App() {
         <header className="topbar">
           <div>
             <h1 className="page-title">
-              {activeTab === "overview" && "總覽儀表板"}
-              {activeTab === "operations" && "操作佇列與本機監看"}
-              {activeTab === "conflicts" && "同步衝突管理"}
-              {activeTab === "auth" && "環境設定"}
-              {activeTab === "settings" && "同步檔案"}
-              {activeTab === "docs" && "文件說明"}
-              {activeTab === "devtools" && "開發工具"}
+              {activeTab === "overview" && t("topbar.overview")}
+              {activeTab === "operations" && t("topbar.operations")}
+              {activeTab === "conflicts" && t("topbar.conflicts")}
+              {activeTab === "auth" && t("topbar.auth")}
+              {activeTab === "settings" && t("topbar.settings")}
+              {activeTab === "docs" && t("topbar.docs")}
+              {activeTab === "devtools" && t("topbar.devtools")}
             </h1>
             <p className="page-subtitle">
               {syncFolders.length > 0
-                ? `${syncFolders.length} 個同步資料夾（${syncFolders.filter((f) => !f.paused).length} 個啟用中）`
-                : "尚未新增同步資料夾"}
+                ? t("topbar.folderSummary", {
+                    total: syncFolders.length,
+                    active: syncFolders.filter((f) => !f.paused).length,
+                  })
+                : t("topbar.noFolders")}
             </p>
           </div>
 
           <div className="topbar-actions">
             <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
               {authStatus?.stage === "authenticated"
-                ? `已登入 (${authStatus.username ?? "User"})`
-                : `認證：${authStatus?.stage ?? "idle"}`}
+                ? t("topbar.loggedIn", {
+                    username: authStatus.username ?? t("topbar.userFallback"),
+                  })
+                : t("topbar.authStage", { stage: authStatus?.stage ?? "idle" })}
             </span>
             {authStatus?.stage === "authenticated" ? (
               <button
@@ -2238,7 +2349,7 @@ function App() {
                 onClick={logout}
                 disabled={authLoading}
               >
-                登出
+                {t("topbar.logout")}
               </button>
             ) : (
               <button
@@ -2246,7 +2357,7 @@ function App() {
                 className="btn btn-secondary btn-sm"
                 onClick={() => setViewMode("login")}
               >
-                前往登入頁
+                {t("topbar.goLogin")}
               </button>
             )}
           </div>
@@ -2266,9 +2377,9 @@ function App() {
                 if (event.key === "Escape" && !folderBusy) setConfirmRemoveId(null);
               }}
             >
-              <h2 id="remove-folder-title" className="modal-title">移除同步資料夾</h2>
+              <h2 id="remove-folder-title" className="modal-title">{t("modal.removeTitle")}</h2>
               <p id="remove-folder-description" className="modal-desc">
-                確定移除「{folderToRemove.name}」的同步配對？本機與 NAS 上的檔案不會被刪除。
+                {t("modal.removeDesc", { name: folderToRemove.name })}
               </p>
               {error ? <div className="alert alert-error" role="alert">{error}</div> : null}
               <div className="button-row button-row-end">
@@ -2279,7 +2390,7 @@ function App() {
                   disabled={folderBusy}
                   onClick={() => setConfirmRemoveId(null)}
                 >
-                  取消
+                  {t("common.cancel")}
                 </button>
                 <button
                   type="button"
@@ -2287,7 +2398,7 @@ function App() {
                   disabled={folderBusy}
                   onClick={() => removeSyncFolder(folderToRemove.id)}
                 >
-                  {folderBusy ? "移除中..." : "確定移除"}
+                  {folderBusy ? t("modal.removing") : t("modal.confirmRemove")}
                 </button>
               </div>
             </div>
@@ -2306,9 +2417,9 @@ function App() {
               }}
             >
               <h2 id="nas-picker-title" className="modal-title">
-                選擇 NAS 資料夾
+                {t("modal.nasPickerTitle")}
               </h2>
-              <nav className="nas-breadcrumb" aria-label="NAS 路徑">
+              <nav className="nas-breadcrumb" aria-label={t("modal.nasBreadcrumbAria")}>
                 <button type="button" className="link-btn" onClick={() => loadNasFolders("")}>
                   NAS
                 </button>
@@ -2319,9 +2430,9 @@ function App() {
                     const target = "/" + all.slice(0, index + 1).join("/");
                     const label =
                       segment === "mydrive"
-                        ? "我的 Drive"
+                        ? t("modal.nasMyDrive")
                         : segment === "team-folders"
-                          ? "團隊資料夾"
+                          ? t("modal.nasTeamFolders")
                           : segment;
                     return (
                       <span key={target}>
@@ -2339,7 +2450,7 @@ function App() {
               </nav>
               <div className="nas-folder-list" aria-busy={nasPicker.loading}>
                 {nasPicker.loading ? (
-                  <div className="empty-state">載入中...</div>
+                  <div className="empty-state">{t("common.loading")}</div>
                 ) : nasPicker.error ? (
                   <div className="alert alert-error">{nasPicker.error}</div>
                 ) : nasPicker.entries.length > 0 ? (
@@ -2364,24 +2475,24 @@ function App() {
                         {relation ? (
                           <span className="badge badge-neutral nas-folder-tag">
                             {covered
-                              ? `已包含於「${relation.folderName}」`
-                              : `內含已同步的「${relation.folderName}」`}
+                              ? t("modal.nasCoveredTag", { name: relation.folderName })
+                              : t("modal.nasContainsTag", { name: relation.folderName })}
                           </span>
                         ) : null}
                       </button>
                     );
                   })
                 ) : (
-                  <div className="empty-state">此資料夾底下沒有子資料夾</div>
+                  <div className="empty-state">{t("modal.nasEmpty")}</div>
                 )}
               </div>
               <div className="cell-secondary">
-                已選：
-                <code className="mono">{nasPicker.path || "（請先進入一個資料夾）"}</code>
+                {t("modal.nasSelected")}
+                <code className="mono">{nasPicker.path || t("modal.nasSelectPrompt")}</code>
               </div>
               {nasPickerRelation ? (
                 <div className="alert alert-warning" role="status">
-                  {describeRelation("NAS", nasPickerRelation)}
+                  {describeRelation("nas", nasPickerRelation)}
                 </div>
               ) : null}
               <div className="button-row">
@@ -2392,14 +2503,14 @@ function App() {
                   disabled={!nasPicker.path || nasPicker.loading || Boolean(nasPickerRelation)}
                   onClick={chooseNasFolder}
                 >
-                  選擇此資料夾
+                  {t("modal.nasChoose")}
                 </button>
                 <button
                   type="button"
                   className="btn btn-secondary"
                   onClick={() => setNasPicker((prev) => ({ ...prev, open: false }))}
                 >
-                  取消
+                  {t("common.cancel")}
                 </button>
               </div>
             </div>
@@ -2409,7 +2520,7 @@ function App() {
         <main className="content-scroll">
           {/* Global Facebook-style Page Skeleton when switching tabs or initial hydration */}
           {(initialLoading || tabSwitching) && (
-            <div className="section-stack" aria-busy="true" aria-label="功能載入中">
+            <div className="section-stack" aria-busy="true" aria-label={t("loading.featureAria")}>
               <div className="kpi-grid">
                 {[1, 2, 3, 4].map((idx) => (
                   <div key={idx} className="kpi-card">
@@ -2451,72 +2562,92 @@ function App() {
               <div className="kpi-grid">
                 <div className="kpi-card">
                   <div className="kpi-header">
-                    <span className="kpi-label">背景同步服務</span>
+                    <span className="kpi-label">{t("overview.kpiService")}</span>
                     <span
                       className={`badge ${
                         serviceStatus?.running ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {serviceStatus?.running ? "Running" : "Stopped"}
+                      {serviceStatus?.running
+                        ? t("overview.serviceRunning")
+                        : t("overview.serviceStopped")}
                     </span>
                   </div>
-                  <div className="kpi-value">{serviceStatus?.tickCount ?? 0} Ticks</div>
+                  <div className="kpi-value">
+                    {t("overview.ticks", { count: serviceStatus?.tickCount ?? 0 })}
+                  </div>
                   <div className="kpi-meta">
-                    已處理 {serviceStatus?.processedCount ?? 0} 筆 · 失敗{" "}
-                    {serviceStatus?.failedCount ?? 0} 筆
+                    {t("overview.serviceMeta", {
+                      processed: serviceStatus?.processedCount ?? 0,
+                      failed: serviceStatus?.failedCount ?? 0,
+                    })}
                   </div>
                 </div>
 
                 <div className="kpi-card">
                   <div className="kpi-header">
-                    <span className="kpi-label">本機檔案監看</span>
+                    <span className="kpi-label">{t("overview.kpiWatcher")}</span>
                     <span
                       className={`badge ${
                         watcherStatus?.running ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {watcherStatus?.running ? "Watching" : "Stopped"}
+                      {watcherStatus?.running
+                        ? t("overview.watcherWatching")
+                        : t("overview.watcherStopped")}
                     </span>
                   </div>
-                  <div className="kpi-value">{watcherStatus?.eventCount ?? 0} 事件</div>
+                  <div className="kpi-value">
+                    {t("overview.events", { count: watcherStatus?.eventCount ?? 0 })}
+                  </div>
                   <div className="kpi-meta">
-                    待轉入佇列：{watcherStatus?.pendingCount ?? 0} 筆
+                    {t("overview.watcherMeta", { count: watcherStatus?.pendingCount ?? 0 })}
                   </div>
                 </div>
 
                 <div className="kpi-card">
                   <div className="kpi-header">
-                    <span className="kpi-label">同步佇列總計</span>
-                    <span className="badge badge-info">Queue</span>
+                    <span className="kpi-label">{t("overview.kpiQueue")}</span>
+                    <span className="badge badge-info">{t("overview.queueBadge")}</span>
                   </div>
                   <div className="kpi-value">
-                    {overviewQueue ? `${totalSyncQueueItems} 筆` : syncQueueError ? "讀取失敗" : "讀取中..."}
+                    {overviewQueue
+                      ? t("overview.queueCount", { count: totalSyncQueueItems })
+                      : syncQueueError
+                        ? t("overview.readFailed")
+                        : t("overview.reading")}
                   </div>
                   <div className="kpi-meta">
                     {overviewQueue
                       ? totalSyncQueueItems > 0
                         ? overviewChartData.map((item) => `${item.label}: ${item.value}`).join(" · ")
-                        : "目前無同步項目"
-                      : syncQueueError ? "同步佇列暫時無法讀取" : "讀取同步佇列中..."}
+                        : t("overview.queueEmpty")
+                      : syncQueueError
+                        ? t("overview.queueReadFailedDesc")
+                        : t("overview.queueReadingDesc")}
                   </div>
                 </div>
 
                 <div className="kpi-card">
                   <div className="kpi-header">
-                    <span className="kpi-label">同步衝突狀態</span>
+                    <span className="kpi-label">{t("overview.kpiConflicts")}</span>
                     <span
                       className={`badge ${
                         openConflictCount > 0 ? "badge-danger" : "badge-success"
                       }`}
                     >
-                      {openConflictCount > 0 ? `${openConflictCount} 待處理` : "正常"}
+                      {openConflictCount > 0
+                        ? t("overview.conflictsPending", { count: openConflictCount })
+                        : t("overview.conflictsNormal")}
                     </span>
                   </div>
-                  <div className="kpi-value">{conflicts.length} 筆記錄</div>
+                  <div className="kpi-value">
+                    {t("overview.conflictRecords", { count: conflicts.length })}
+                  </div>
                   <div className="kpi-meta">
                     {conflictStatusCounts.length > 0
                       ? conflictStatusCounts.map((it) => `${it.status}: ${it.count}`).join(" · ")
-                      : "無任何衝突"}
+                      : t("overview.noConflicts")}
                   </div>
                 </div>
               </div>
@@ -2524,20 +2655,19 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">同步狀態圖表</h2>
+                    <h2 className="card-title">{t("overview.chartTitle")}</h2>
                     <p className="card-desc">
-                      全部資料夾的實際同步佇列，每 2 秒更新，不受清單筆數與篩選限制。
-                      包含檔案與資料夾操作，不包含沒有變動的檔案，因此筆數可能與檔案進度不同。
+                      {t("overview.chartDesc")}
                     </p>
                   </div>
-                  <div className="button-row" role="group" aria-label="圖表類型">
+                  <div className="button-row" role="group" aria-label={t("overview.chartTypeAria")}>
                     <button
                       type="button"
                       className={`filter-pill ${chartType === "bar" ? "active" : ""}`}
                       aria-pressed={chartType === "bar"}
                       onClick={() => setChartType("bar")}
                     >
-                      Bar 長條圖
+                      {t("overview.chartBar")}
                     </button>
                     <button
                       type="button"
@@ -2545,16 +2675,16 @@ function App() {
                       aria-pressed={chartType === "line"}
                       onClick={() => setChartType("line")}
                     >
-                      Line 折線圖
+                      {t("overview.chartLine")}
                     </button>
                   </div>
                 </div>
                 {syncQueueError ? (
                   <div className="alert alert-error" role="alert">
-                    同步佇列讀取失敗：{syncQueueError}
+                    {t("overview.queueLoadError", { error: syncQueueError })}
                   </div>
                 ) : !overviewQueue ? (
-                  <p className="card-desc" role="status">讀取同步佇列中...</p>
+                  <p className="card-desc" role="status">{t("overview.queueReadingDesc")}</p>
                 ) : chartType === "bar" ? (
                   <div className="status-chart">
                     {overviewChartData.map((item) => (
@@ -2573,8 +2703,8 @@ function App() {
                     ))}
                   </div>
                 ) : (
-                  <svg className="status-line-chart" viewBox="0 0 600 210" role="img" aria-label="同步狀態折線圖">
-                    <title>同步狀態折線圖</title>
+                  <svg className="status-line-chart" viewBox="0 0 600 210" role="img" aria-label={t("overview.chartLineAria")}>
+                    <title>{t("overview.chartLineAria")}</title>
                     <desc>{overviewChartData.map((item) => `${item.label}: ${item.value}`).join("；")}</desc>
                     {[20, 90, 160].map((y) => (
                       <line key={y} className="status-line-chart-grid" x1="48" x2="552" y1={y} y2={y} />
@@ -2603,42 +2733,42 @@ function App() {
                 <section className="card">
                   <div className="card-header">
                     <div>
-                      <h2 className="card-title">背景同步服務控制</h2>
-                      <p className="card-desc">定期輪詢、轉入變更並驅動 Executor 同步作業</p>
+                      <h2 className="card-title">{t("overview.serviceCardTitle")}</h2>
+                      <p className="card-desc">{t("overview.serviceCardDesc")}</p>
                     </div>
                     <span
                       className={`badge ${
                         serviceStatus?.running ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {serviceStatus?.running ? "運行中" : "已停止"}
+                      {serviceStatus?.running ? t("sidebar.running") : t("sidebar.stopped")}
                     </span>
                   </div>
 
                   <div className="stats-list">
                     <div className="stat-item">
-                      <span className="stat-key">Queued / Processed</span>
+                      <span className="stat-key">{t("overview.serviceQueuedProcessed")}</span>
                       <span className="stat-val">
                         {serviceStatus?.queuedCount ?? 0} / {serviceStatus?.processedCount ?? 0}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">Retry / Failed</span>
+                      <span className="stat-key">{t("overview.serviceRetryFailed")}</span>
                       <span className="stat-val">
                         {serviceStatus?.retryScheduledCount ?? 0} /{" "}
                         {serviceStatus?.failedCount ?? 0}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">Ingest Skipped (Backlog Guard)</span>
+                      <span className="stat-key">{t("overview.serviceBacklogGuard")}</span>
                       <span className="stat-val">{serviceStatus?.ingestSkippedCount ?? 0}</span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">最後執行時間</span>
+                      <span className="stat-key">{t("overview.serviceLastRun")}</span>
                       <span className="stat-val">
                         {serviceStatus?.lastTickEpochMs
                           ? new Date(serviceStatus.lastTickEpochMs).toLocaleTimeString()
-                          : "尚未執行"}
+                          : t("overview.serviceNeverRun")}
                       </span>
                     </div>
                   </div>
@@ -2654,14 +2784,14 @@ function App() {
                       onClick={refreshServiceStatus}
                       disabled={serviceLoading}
                     >
-                      重新整理
+                      {t("common.refresh")}
                     </button>
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => setActiveTab("operations")}
                     >
-                      前往操作頁控制 →
+                      {t("overview.goOperations")}
                     </button>
                   </div>
                 </section>
@@ -2669,9 +2799,9 @@ function App() {
                 <section className="card">
                   <div className="card-header">
                     <div>
-                      <h2 className="card-title">本機檔案監看 (Watcher)</h2>
+                      <h2 className="card-title">{t("overview.watcherCardTitle")}</h2>
                       <p className="card-desc">
-                        即時偵測本機同步資料夾異動並排入佇列；登入後會自動啟動
+                        {t("overview.watcherCardDesc")}
                       </p>
                     </div>
                     <span
@@ -2679,27 +2809,27 @@ function App() {
                         watcherStatus?.running ? "badge-success" : "badge-neutral"
                       }`}
                     >
-                      {watcherStatus?.running ? "監看中" : "已停止"}
+                      {watcherStatus?.running ? t("sidebar.watching") : t("sidebar.stopped")}
                     </span>
                   </div>
 
                   <div className="stats-list">
                     <div className="stat-item">
-                      <span className="stat-key">監看根目錄</span>
+                      <span className="stat-key">{t("overview.watcherRoot")}</span>
                       <span className="stat-val mono">
-                        {watcherStatus?.rootPath || "未啟動"}
+                        {watcherStatus?.rootPath || t("overview.watcherNotStarted")}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">累計事件 / 待轉入</span>
+                      <span className="stat-key">{t("overview.watcherEventsPending")}</span>
                       <span className="stat-val">
                         {watcherStatus?.eventCount ?? 0} / {watcherStatus?.pendingCount ?? 0}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">最後異動路徑</span>
+                      <span className="stat-key">{t("overview.watcherLastPath")}</span>
                       <span className="stat-val mono">
-                        {watcherStatus?.lastEventPath ?? "尚無事件"}
+                        {watcherStatus?.lastEventPath ?? t("overview.watcherNoEvents")}
                       </span>
                     </div>
                   </div>
@@ -2711,14 +2841,14 @@ function App() {
                       onClick={refreshWatcherStatus}
                       disabled={watcherLoading}
                     >
-                      重新整理
+                      {t("common.refresh")}
                     </button>
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => setActiveTab("operations")}
                     >
-                      前往操作頁控制 →
+                      {t("overview.goOperations")}
                     </button>
                   </div>
                 </section>
@@ -2729,15 +2859,15 @@ function App() {
                 <section className="card">
                   <div className="card-header">
                     <div>
-                      <h2 className="card-title">近期同步操作</h2>
-                      <p className="card-desc">最新 5 筆佇列記錄</p>
+                      <h2 className="card-title">{t("overview.recentOpsTitle")}</h2>
+                      <p className="card-desc">{t("overview.recentOpsDesc")}</p>
                     </div>
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
                       onClick={() => setActiveTab("operations")}
                     >
-                      查看全部 →
+                      {t("overview.viewAll")}
                     </button>
                   </div>
                   {operations.length > 0 ? (
@@ -2758,36 +2888,36 @@ function App() {
                       ))}
                     </div>
                   ) : (
-                    <div className="empty-state">目前佇列中沒有同步操作</div>
+                    <div className="empty-state">{t("overview.noOps")}</div>
                   )}
                 </section>
 
                 <section className="card">
                   <div className="card-header">
                     <div>
-                      <h2 className="card-title">待處理衝突與資料庫狀態</h2>
-                      <p className="card-desc">三方比對衝突保護與 SQLite 儲存引擎</p>
+                      <h2 className="card-title">{t("overview.conflictDbTitle")}</h2>
+                      <p className="card-desc">{t("overview.conflictDbDesc")}</p>
                     </div>
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
                       onClick={() => setActiveTab("conflicts")}
                     >
-                      管理衝突 →
+                      {t("overview.manageConflicts")}
                     </button>
                   </div>
                   <div className="stats-list">
                     <div className="stat-item">
-                      <span className="stat-key">SQLite 資料庫</span>
+                      <span className="stat-key">{t("overview.sqliteDb")}</span>
                       <span className="stat-val mono">
                         {storageInfo
                           ? `v${storageInfo.schemaVersion} (${storageInfo.dbPath})`
-                          : "尚未初始化"}
+                          : t("overview.notInitialized")}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">未解決衝突數</span>
-                      <span className="stat-val">{openConflictCount} 筆</span>
+                      <span className="stat-key">{t("overview.openConflictsCount")}</span>
+                      <span className="stat-val">{openConflictCount}</span>
                     </div>
                   </div>
                   <div className="button-row button-row-end">
@@ -2796,7 +2926,7 @@ function App() {
                       className="btn btn-secondary btn-sm"
                       onClick={() => setActiveTab("settings")}
                     >
-                      前往設定與診斷 →
+                      {t("overview.goSettings")}
                     </button>
                   </div>
                 </section>
@@ -2811,24 +2941,24 @@ function App() {
                 <div className="card-header">
                   <div>
                     <h2 className="card-title">
-                      同步佇列（NAS ⇄ 本機）
+                      {t("queue.title")}
                       {syncQueue.waiting + syncQueue.running > 0 ? (
                         <span className="badge badge-info" style={{ marginLeft: 8 }}>
-                          待處理 {syncQueue.waiting + syncQueue.running}
+                          {t("queue.pendingBadge", { count: syncQueue.waiting + syncQueue.running })}
                         </span>
                       ) : null}
                     </h2>
                     <p className="card-desc">
-                      每次同步比對後，需要上傳、下載或建立資料夾的項目會列在這裡；沒有變動的檔案不會出現
+                      {t("queue.desc")}
                     </p>
                   </div>
                   <select
                     className="input folder-mode-select"
                     value={queueFolderId}
-                    aria-label="依同步資料夾篩選"
+                    aria-label={t("queue.filterFolderAria")}
                     onChange={(event) => setQueueFolderId(event.currentTarget.value)}
                   >
-                    <option value="">全部資料夾</option>
+                    <option value="">{t("queue.allFolders")}</option>
                     {syncFolders.map((f) => (
                       <option key={f.id} value={f.id}>
                         {f.name}
@@ -2838,7 +2968,7 @@ function App() {
                 </div>
 
                 <div className="filter-bar">
-                  {QUEUE_STATUS_FILTERS.map((f) => {
+                  {queueStatusFilters.map((f) => {
                     const count =
                       f.id === ""
                         ? syncQueue.waiting + syncQueue.running + syncQueue.failed + syncQueue.done
@@ -2864,7 +2994,7 @@ function App() {
 
                 {syncQueueError ? (
                   <div className="alert alert-error" role="alert">
-                    同步佇列讀取失敗：{syncQueueError}
+                    {t("overview.queueLoadError", { error: syncQueueError })}
                   </div>
                 ) : null}
 
@@ -2873,27 +3003,27 @@ function App() {
                     <table className="modern-table">
                       <thead>
                         <tr>
-                          <th>狀態</th>
-                          <th>動作</th>
-                          <th>NAS 路徑</th>
-                          <th>大小</th>
+                          <th>{t("queue.colStatus")}</th>
+                          <th>{t("queue.colAction")}</th>
+                          <th>{t("queue.colNasPath")}</th>
+                          <th>{t("queue.colSize")}</th>
                         </tr>
                       </thead>
                       <tbody>
                         {syncQueue.items.map((item, idx) => {
                           const folderName =
                             syncFolders.find((f) => f.id === item.folderId)?.name ?? "";
-                          const meta = QUEUE_ACTIONS[item.action];
+                          const meta = QUEUE_ACTION_KEYS[item.action];
                           return (
                             <tr key={`${item.folderId}-${item.path}-${idx}`}>
                               <td>
                                 <span className={`badge ${QUEUE_STATUS_BADGE[item.status] ?? "badge-neutral"}`}>
-                                  {QUEUE_STATUS_LABEL[item.status] ?? item.status}
+                                  {queueStatusLabel[item.status] ?? item.status}
                                 </span>
                               </td>
                               <td>
                                 <div className="cell-primary">
-                                  {meta ? `${meta.arrow} ${meta.label}` : item.action}
+                                  {meta ? `${meta.arrow} ${t(meta.labelKey)}` : item.action}
                                 </div>
                                 {queueFolderId === "" && folderName ? (
                                   <div className="cell-secondary">{folderName}</div>
@@ -2902,7 +3032,7 @@ function App() {
                               <td>
                                 <div className="cell-primary mono">{item.path}</div>
                                 {item.error ? (
-                                  <div className="cell-error">錯誤：{item.error}</div>
+                                  <div className="cell-error">{t("queue.errorPrefix", { error: item.error })}</div>
                                 ) : null}
                               </td>
                               <td className="cell-secondary">
@@ -2917,13 +3047,16 @@ function App() {
                 ) : (
                   <div className="empty-state">
                     {syncQueue.waiting + syncQueue.running + syncQueue.failed + syncQueue.done === 0
-                      ? "目前沒有待同步的項目。新增資料夾、按「立即同步」或等同步服務自動執行後，比對出的項目會顯示在這裡"
-                      : "沒有符合篩選條件的項目"}
+                      ? t("queue.emptyAll")
+                      : t("queue.emptyFiltered")}
                   </div>
                 )}
                 {syncQueue.matched > syncQueue.items.length ? (
                   <div className="cell-secondary">
-                    僅顯示前 {syncQueue.items.length} 筆，共 {syncQueue.matched} 筆
+                    {t("queue.truncatedNotice", {
+                      shown: syncQueue.items.length,
+                      total: syncQueue.matched,
+                    })}
                   </div>
                 ) : null}
               </section>
@@ -2931,14 +3064,14 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">操作佇列清單 ({operations.length})</h2>
+                    <h2 className="card-title">{t("ops.title", { count: operations.length })}</h2>
                     <p className="card-desc">
-                      Stage 統計：
+                      {t("ops.stageStats")}
                       {operationStageCounts.length > 0
                         ? ` ${operationStageCounts
                             .map((it) => `${it.stage}: ${it.count}`)
                             .join(" / ")}`
-                        : " 尚無統計資料"}
+                        : ` ${t("ops.noStats")}`}
                     </p>
                   </div>
                   <div className="button-row">
@@ -2948,7 +3081,7 @@ function App() {
                       onClick={() => purgeOperations("done")}
                       disabled={opsLoading}
                     >
-                      清理 Done
+                      {t("ops.purgeDone")}
                     </button>
                     <button
                       type="button"
@@ -2956,7 +3089,7 @@ function App() {
                       onClick={() => purgeOperations("failed")}
                       disabled={opsLoading}
                     >
-                      清理 Failed
+                      {t("ops.purgeFailed")}
                     </button>
                   </div>
                 </div>
@@ -2970,13 +3103,13 @@ function App() {
                       className={`filter-pill ${stageFilter === stage ? "active" : ""}`}
                       onClick={() => setStageFilter(stage)}
                     >
-                      {stage === "all" ? "全部" : stage}
+                      {stage === "all" ? t("ops.filterAll") : stage}
                     </button>
                   ))}
                 </div>
 
                 {opsLoading ? (
-                  <div className="fb-skeleton-table" aria-busy="true" aria-label="佇列載入中">
+                  <div className="fb-skeleton-table" aria-busy="true" aria-label={t("ops.loadingAria")}>
                     {[1, 2, 3, 4, 5].map((row) => (
                       <div key={row} className="fb-skeleton-table-row">
                         <div className="fb-skeleton fb-skeleton-pill" />
@@ -2993,18 +3126,18 @@ function App() {
                   <div
                     className="table-wrapper operation-table-scroll"
                     role="region"
-                    aria-label="操作佇列清單"
+                    aria-label={t("ops.tableAria")}
                     tabIndex={0}
                   >
                     <table className="modern-table">
                       <thead>
                         <tr>
-                          <th>狀態</th>
-                          <th>類型 / ID</th>
-                          <th>路徑與錯誤資訊</th>
-                          <th>重試次數</th>
-                          <th>更新時間</th>
-                          <th>動作</th>
+                          <th>{t("ops.colStatus")}</th>
+                          <th>{t("ops.colTypeId")}</th>
+                          <th>{t("ops.colPathError")}</th>
+                          <th>{t("ops.colAttempts")}</th>
+                          <th>{t("ops.colUpdatedAt")}</th>
+                          <th>{t("ops.colAction")}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3025,11 +3158,11 @@ function App() {
                                 {op.toPath ? ` → ${op.toPath}` : ""}
                               </div>
                               {op.lastError ? (
-                                <div className="cell-error">錯誤：{op.lastError}</div>
+                                <div className="cell-error">{t("queue.errorPrefix", { error: op.lastError })}</div>
                               ) : null}
                               {op.nextRetryAt ? (
                                 <div className="cell-secondary">
-                                  下次重試：{op.nextRetryAt}
+                                  {t("ops.nextRetry", { time: op.nextRetryAt })}
                                 </div>
                               ) : null}
                             </td>
@@ -3043,7 +3176,7 @@ function App() {
                                   onClick={() => retryOperationById(op.id)}
                                   disabled={opsLoading}
                                 >
-                                  重設為 planned
+                                  {t("ops.resetPlanned")}
                                 </button>
                               ) : null}
                             </td>
@@ -3053,7 +3186,7 @@ function App() {
                     </table>
                   </div>
                 ) : (
-                  <div className="empty-state">目前沒有符合篩選條件的 Operation 記錄。</div>
+                  <div className="empty-state">{t("ops.emptyFiltered")}</div>
                 )}
 
                 <div className="divider" />
@@ -3063,10 +3196,10 @@ function App() {
                     className="input"
                     value={retryOpId}
                     onChange={(event) => setRetryOpId(event.currentTarget.value)}
-                    placeholder="輸入指定 Operation ID（例如 op-1730000000000）手動重設為 planned"
+                    placeholder={t("ops.retryPlaceholder")}
                   />
                   <button type="submit" className="btn btn-secondary" disabled={opsLoading}>
-                    {opsLoading ? "處理中..." : "重設指定 ID"}
+                    {opsLoading ? t("common.processing") : t("ops.resetById")}
                   </button>
                 </form>
               </section>
@@ -3079,9 +3212,9 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">同步衝突管理 ({conflicts.length})</h2>
+                    <h2 className="card-title">{t("conflicts.title", { count: conflicts.length })}</h2>
                     <p className="card-desc">
-                      當本機與遠端同時修改同一檔案時，系統將保留雙邊版本並列出衝突供您確認
+                      {t("conflicts.desc")}
                     </p>
                   </div>
                   <div className="button-row">
@@ -3091,7 +3224,7 @@ function App() {
                       onClick={addDemoConflict}
                       disabled={opsLoading}
                     >
-                      + 新增示範衝突
+                      {t("conflicts.addDemo")}
                     </button>
                     <button
                       type="button"
@@ -3099,7 +3232,7 @@ function App() {
                       onClick={refreshConflicts}
                       disabled={opsLoading}
                     >
-                      重新整理
+                      {t("common.refresh")}
                     </button>
                     <button
                       type="button"
@@ -3107,24 +3240,24 @@ function App() {
                       onClick={() => purgeConflicts("resolved")}
                       disabled={opsLoading}
                     >
-                      清理已解決 (Resolved)
+                      {t("conflicts.purgeResolved")}
                     </button>
                   </div>
                 </div>
 
                 <div className="filter-bar">
                   <span className="badge badge-neutral">
-                    統計：
+                    {t("conflicts.statsPrefix")}
                     {conflictStatusCounts.length > 0
                       ? ` ${conflictStatusCounts
                           .map((it) => `${it.status}: ${it.count}`)
                           .join(" / ")}`
-                      : " 無資料"}
+                      : ` ${t("conflicts.noData")}`}
                   </span>
                 </div>
 
                 {conflictsLoading ? (
-                  <div className="fb-skeleton-table" aria-busy="true" aria-label="衝突清單載入中">
+                  <div className="fb-skeleton-table" aria-busy="true" aria-label={t("conflicts.loadingAria")}>
                     {[1, 2, 3].map((row) => (
                       <div key={row} className="fb-skeleton-table-row">
                         <div className="fb-skeleton fb-skeleton-pill" />
@@ -3147,15 +3280,15 @@ function App() {
                             </span>
                             <strong className="mono">{conflict.id}</strong>
                             <span className="badge badge-warning">{conflict.reason}</span>
-                            <span className="cell-secondary">建立於 {conflict.createdAt}</span>
+                            <span className="cell-secondary">{t("conflicts.createdAt", { time: conflict.createdAt })}</span>
                           </div>
                           <div className="conflict-paths">
                             <div>
-                              <span className="path-label">本機版本 ({conflict.localVersion ?? "-"})：</span>
+                              <span className="path-label">{t("conflicts.localVersion", { version: conflict.localVersion ?? "-" })}</span>
                               <span className="mono">{conflict.localCopyPath ?? "-"}</span>
                             </div>
                             <div>
-                              <span className="path-label">遠端版本 ({conflict.remoteVersion ?? "-"})：</span>
+                              <span className="path-label">{t("conflicts.remoteVersion", { version: conflict.remoteVersion ?? "-" })}</span>
                               <span className="mono">{conflict.remoteCopyPath ?? "-"}</span>
                             </div>
                           </div>
@@ -3168,17 +3301,17 @@ function App() {
                               onClick={() => resolveConflict(conflict.id)}
                               disabled={opsLoading}
                             >
-                              標記為已解決 (Resolved)
+                              {t("conflicts.markResolved")}
                             </button>
                           ) : (
-                            <span className="cell-secondary">已解決</span>
+                            <span className="cell-secondary">{t("conflicts.resolved")}</span>
                           )}
                         </div>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="empty-state">太棒了！目前沒有任何同步衝突。</div>
+                  <div className="empty-state">{t("conflicts.empty")}</div>
                 )}
               </section>
             </div>
@@ -3190,36 +3323,58 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">環境設定</h2>
-                    <p className="card-desc">目前登入帳號資訊（唯讀）</p>
+                    <h2 className="card-title">{t("auth.title")}</h2>
+                    <p className="card-desc">{t("auth.desc")}</p>
                   </div>
                   <div className="button-row">
                     <span className={`badge ${getStageBadgeClass(authStatus?.stage)}`}>
-                      Stage: {authStatus?.stage ?? "loading"}
+                      {t("auth.stagePrefix", { stage: authStatus?.stage ?? "loading" })}
                     </span>
                   </div>
                 </div>
 
                 <div className="stats-list">
                   <div className="stat-item">
-                    <span className="stat-key">登入使用者</span>
-                    <span className="stat-val">{authStatus?.username ?? "尚未登入"}</span>
+                    <span className="stat-key">{t("auth.username")}</span>
+                    <span className="stat-val">{authStatus?.username ?? t("auth.notLoggedIn")}</span>
                   </div>
                   <div className="stat-item">
-                    <span className="stat-key">驗證方式</span>
+                    <span className="stat-key">{t("auth.method")}</span>
                     <span className="stat-val">{authStatus?.method ?? "-"}</span>
                   </div>
                 </div>
               </section>
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">{t("auth.languageTitle")}</h2>
+                    <p className="card-desc">{t("auth.languageDesc")}</p>
+                  </div>
+                </div>
+                <label className="form-field">
+                  <span>{t("auth.languageLabel")}</span>
+                  <select
+                    className="input"
+                    value={language}
+                    onChange={(event) => changeLanguage(event.currentTarget.value as LanguagePreference)}
+                  >
+                    {LANGUAGE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.nativeLabel ?? t("lang.system")}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </section>
               <section className="config-block" aria-labelledby="profile-connection-title">
                 <div className="config-block-header">
                   <div>
-                    <h2 id="profile-connection-title" className="config-block-title">NAS 連線設定</h2>
-                    <p className="config-block-desc">直接編輯與儲存，不會變更密碼或登出帳號</p>
+                    <h2 id="profile-connection-title" className="config-block-title">{t("auth.connectionTitle")}</h2>
+                    <p className="config-block-desc">{t("auth.connectionDesc")}</p>
                   </div>
                   {lanStatus?.configured ? (
                     <span className={`badge ${lanStatus.active ? "badge-success" : "badge-neutral"}`}>
-                      {lanStatus.active ? "使用區網中" : "使用一般位址"}
+                      {lanStatus.active ? t("auth.lanActive") : t("auth.lanInactive")}
                     </span>
                   ) : null}
                 </div>
@@ -3231,14 +3386,14 @@ function App() {
                   {renderNasHostFields()}
                   {renderLanFields()}
                   <p className="cell-secondary">
-                    區網直連不經過外部代理；Wi-Fi 名稱可用逗號分隔，留空時只要連得到區網位址就使用。
+                    {t("auth.lanNote")}
                   </p>
                   <div className="button-row">
                     <button type="submit" className="btn btn-primary" disabled={saving}>
-                      {saving ? "儲存中..." : "儲存連線設定"}
+                      {saving ? t("common.saving") : t("auth.saveConnection")}
                     </button>
                     <button type="button" className="btn btn-ghost" disabled={saving} onClick={refreshLanStatus}>
-                      重新偵測區網
+                      {t("auth.refreshLan")}
                     </button>
                   </div>
                 </form>
@@ -3246,15 +3401,14 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">視窗解析度</h2>
+                    <h2 className="card-title">{t("auth.windowTitle")}</h2>
                     <p className="card-desc">
-                      選擇桌面視窗版面，立即套用並於下次啟動時沿用；目前視窗大小：
-                      {windowSize.width} × {windowSize.height}
+                      {t("auth.windowDesc", { width: windowSize.width, height: windowSize.height })}
                     </p>
                   </div>
                 </div>
-                <div className="preset-grid" role="radiogroup" aria-label="視窗解析度">
-                  {WINDOW_PRESETS.map((preset) => (
+                <div className="preset-grid" role="radiogroup" aria-label={t("auth.windowAria")}>
+                  {windowPresets.map((preset) => (
                     <button
                       key={preset.id}
                       type="button"
@@ -3283,9 +3437,9 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">同步資料夾</h2>
+                    <h2 className="card-title">{t("folders.title")}</h2>
                     <p className="card-desc">
-                      每個資料夾可各自設定同步模式；已包含在某個資料夾底下的子資料夾不需要重複加入
+                      {t("folders.desc")}
                     </p>
                   </div>
                   {!addFolderOpen ? (
@@ -3295,7 +3449,7 @@ function App() {
                       onClick={() => setAddFolderOpen(true)}
                       disabled={!config}
                     >
-                      ＋ 新增同步資料夾
+                      {t("folders.addBtn")}
                     </button>
                   ) : null}
                 </div>
@@ -3321,7 +3475,7 @@ function App() {
                                   folder.paused ? "badge-neutral" : "badge-success"
                                 }`}
                               >
-                                {folder.paused ? "已暫停" : "啟用中"}
+                                {folder.paused ? t("folders.paused") : t("folders.active")}
                               </span>
                             </div>
                             <div className="folder-row-paths mono">
@@ -3333,12 +3487,12 @@ function App() {
                             </div>
                             {folder.mode === "upload_only" ? (
                               <div className="cell-secondary">
-                                僅上傳模式：NAS 上新增的檔案不會下載到本機；要下載請改成「雙向同步」
+                                {t("folders.uploadOnlyHint")}
                               </div>
                             ) : null}
                             {folder.mode === "download_only" ? (
                               <div className="cell-secondary">
-                                僅下載模式：本機新增或修改的檔案不會上傳到 NAS
+                                {t("folders.downloadOnlyHint")}
                               </div>
                             ) : null}
                             {folder.mode !== "download_only" ? (
@@ -3355,11 +3509,11 @@ function App() {
                                     }
                                   />
                                   <span>
-                                    <strong>同步刪除</strong>
+                                    <strong>{t("folders.syncDeletes")}</strong>
                                     <span className="cell-secondary">
                                       {folder.mode === "upload_only"
-                                        ? "在本機刪除已同步過的檔案時，NAS 上的檔案會移到資源回收桶（可還原）"
-                                        : "任刪除已同步過的檔案時，另邊會移到回收筒"}
+                                        ? t("folders.syncDeletesUploadDesc")
+                                        : t("folders.syncDeletesBiDesc")}
                                     </span>
                                   </span>
                                 </label>
@@ -3395,26 +3549,60 @@ function App() {
                                   ) : null}
                                   <div className="download-text">
                                     {dl.phase === "listing"
-                                      ? `正在比對 NAS 與本機檔案…（NAS 已發現 ${dl.totalFiles} 個檔案）`
+                                      ? t("folders.listingProgress", { total: dl.totalFiles })
                                       : dl.phase === "syncing"
-                                        ? `同步中 ${handled}/${dl.totalFiles} 個檔案 · ${formatBytes(dl.doneBytes)} / ${formatBytes(dl.totalBytes)}（下載 ${dl.doneFiles}、上傳 ${dl.uploadedFiles}${dl.deletedFiles > 0 ? `、刪除 ${dl.deletedFiles}` : ""}）`
+                                        ? t("folders.syncingProgress", {
+                                            handled,
+                                            total: dl.totalFiles,
+                                            doneBytes: formatBytes(dl.doneBytes),
+                                            totalBytes: formatBytes(dl.totalBytes),
+                                            done: dl.doneFiles,
+                                            uploaded: dl.uploadedFiles,
+                                            deletedPart:
+                                              dl.deletedFiles > 0
+                                                ? t("folders.syncingDeletedPart", {
+                                                    deleted: dl.deletedFiles,
+                                                  })
+                                                : "",
+                                          })
                                         : dl.phase === "cancelled"
-                                          ? `已取消（已下載 ${dl.doneFiles}、已上傳 ${dl.uploadedFiles} 個檔案）`
+                                          ? t("folders.cancelledProgress", {
+                                              done: dl.doneFiles,
+                                              uploaded: dl.uploadedFiles,
+                                            })
                                           : dl.phase === "error"
-                                            ? `同步失敗：${dl.lastError ?? "未知錯誤"}`
-                                            : `已同步：下載 ${dl.doneFiles} 個、上傳 ${dl.uploadedFiles} 個${
-                                                dl.deletedFiles > 0 ? `、刪除 ${dl.deletedFiles} 個` : ""
-                                              }、無變動 ${dl.skippedFiles} 個${
-                                                dl.conflictCopies > 0
-                                                  ? `、衝突副本 ${dl.conflictCopies} 個`
-                                                  : ""
-                                              }${dl.failedFiles > 0 ? `、失敗 ${dl.failedFiles} 個` : ""}`}
+                                            ? t("folders.errorProgress", {
+                                                error: dl.lastError ?? t("common.unknownError"),
+                                              })
+                                            : t("folders.doneProgress", {
+                                                done: dl.doneFiles,
+                                                uploaded: dl.uploadedFiles,
+                                                deletedPart:
+                                                  dl.deletedFiles > 0
+                                                    ? t("folders.doneDeletedPart", {
+                                                        deleted: dl.deletedFiles,
+                                                      })
+                                                    : "",
+                                                skipped: dl.skippedFiles,
+                                                conflictPart:
+                                                  dl.conflictCopies > 0
+                                                    ? t("folders.doneConflictPart", {
+                                                        conflicts: dl.conflictCopies,
+                                                      })
+                                                    : "",
+                                                failedPart:
+                                                  dl.failedFiles > 0
+                                                    ? t("folders.doneFailedPart", {
+                                                        failed: dl.failedFiles,
+                                                      })
+                                                    : "",
+                                              })}
                                   </div>
                                   {running && dl.currentFile ? (
                                     <div className="download-current mono">{dl.currentFile}</div>
                                   ) : null}
                                   {!running && dl.failedFiles > 0 && dl.lastError ? (
-                                    <div className="download-current">最近錯誤：{dl.lastError}</div>
+                                    <div className="download-current">{t("folders.lastError", { error: dl.lastError })}</div>
                                   ) : null}
                                 </div>
                               );
@@ -3431,7 +3619,7 @@ function App() {
                                     className="btn btn-outline-danger btn-sm"
                                     onClick={() => cancelFolderSync(folder.id)}
                                   >
-                                    取消同步
+                                    {t("folders.cancelSync")}
                                   </button>
                                 );
                               }
@@ -3442,7 +3630,7 @@ function App() {
                                   disabled={folderBusy}
                                   onClick={() => startFolderSync(folder.id)}
                                 >
-                                  立即同步
+                                  {t("folders.syncNow")}
                                 </button>
                               ) : null;
                             })()}
@@ -3450,14 +3638,14 @@ function App() {
                               className="input folder-mode-select"
                               value={folder.mode}
                               disabled={folderBusy}
-                              aria-label={`${folder.name} 的同步模式`}
+                              aria-label={t("folders.modeAria", { name: folder.name })}
                               onChange={(event) =>
                                 updateSyncFolder(folder.id, {
                                   mode: event.currentTarget.value as SyncMode,
                                 })
                               }
                             >
-                              {SYNC_MODES.map((mode) => (
+                              {syncModes.map((mode) => (
                                 <option key={mode.id} value={mode.id}>
                                   {mode.label}
                                 </option>
@@ -3471,7 +3659,7 @@ function App() {
                                 updateSyncFolder(folder.id, { paused: !folder.paused })
                               }
                             >
-                              {folder.paused ? "繼續" : "暫停"}
+                              {folder.paused ? t("folders.resume") : t("folders.pause")}
                             </button>
                             <button
                               type="button"
@@ -3482,7 +3670,7 @@ function App() {
                                 setConfirmRemoveId(folder.id);
                               }}
                             >
-                              移除
+                              {t("folders.remove")}
                             </button>
                           </div>
                         </div>
@@ -3490,7 +3678,7 @@ function App() {
                     </div>
                   ) : !addFolderOpen ? (
                     <div className="empty-state">
-                      尚未新增同步資料夾，按右上角「＋ 新增同步資料夾」開始
+                      {t("folders.emptyState")}
                     </div>
                   ) : null
                 ) : (
@@ -3502,16 +3690,16 @@ function App() {
 
                 {serviceStatus?.running ? (
                   <span className="cell-secondary">
-                    資料夾變更會即時套用到本機監看；同步模式與暫停狀態會在下一輪同步生效
+                    {t("folders.liveApplyHint")}
                   </span>
                 ) : null}
 
                 {addFolderOpen ? (
                   <div className="folder-add-panel">
                     <div className="sync-section">
-                      <span className="sync-section-title">1. 同步模式</span>
-                      <div className="preset-grid" role="radiogroup" aria-label="同步模式">
-                        {SYNC_MODES.map((mode) => (
+                      <span className="sync-section-title">{t("folders.step1Title")}</span>
+                      <div className="preset-grid" role="radiogroup" aria-label={t("folders.modeGroupAria")}>
+                        {syncModes.map((mode) => (
                           <button
                             key={mode.id}
                             type="button"
@@ -3531,34 +3719,34 @@ function App() {
                       {syncMode !== "bidirectional" ? (
                         <div className="info-box">
                           <div className="info-box-text">
-                            單向同步只搬運資料，不會執行刪除或改名；
+                            {t("folders.oneWayHintPrefix")}
                             {syncMode === "upload_only"
-                              ? "NAS 上的變更不會下載到本機。"
-                              : "本機的變更不會上傳到 NAS。"}
+                              ? t("folders.oneWayUploadHint")
+                              : t("folders.oneWayDownloadHint")}
                           </div>
                         </div>
                       ) : null}
                     </div>
 
                     <div className="sync-section">
-                      <span className="sync-section-title">2. 資料夾</span>
+                      <span className="sync-section-title">{t("folders.step2Title")}</span>
                       <div className="sync-folder-row">
                         <label className="form-field" style={{ flex: 1 }}>
-                          <span>本機資料夾</span>
+                          <span>{t("folders.localFolder")}</span>
                           <div className="inline-input-row">
                             <input
                               className="input mono"
                               value={localSyncPath}
                               readOnly
                               onClick={browseLocalFolder}
-                              placeholder="尚未選擇，請按「瀏覽…」"
+                              placeholder={t("folders.localPlaceholder")}
                             />
                             <button
                               type="button"
                               className="btn btn-secondary"
                               onClick={browseLocalFolder}
                             >
-                              瀏覽…
+                              {t("folders.browse")}
                             </button>
                           </div>
                         </label>
@@ -3566,21 +3754,21 @@ function App() {
                           {syncModeArrow}
                         </span>
                         <label className="form-field" style={{ flex: 1 }}>
-                          <span>NAS 遠端資料夾</span>
+                          <span>{t("folders.remoteFolder")}</span>
                           <div className="inline-input-row">
                             <input
                               className="input mono"
                               value={remotePath}
                               readOnly
                               onClick={openNasPicker}
-                              placeholder="尚未選擇，請按「瀏覽 NAS…」"
+                              placeholder={t("folders.remotePlaceholder")}
                             />
                             <button
                               type="button"
                               className="btn btn-secondary"
                               onClick={openNasPicker}
                             >
-                              瀏覽 NAS…
+                              {t("folders.browseNas")}
                             </button>
                           </div>
                         </label>
@@ -3604,7 +3792,7 @@ function App() {
                         }
                         onClick={addSyncFolder}
                       >
-                        {folderBusy ? "加入中..." : "加入同步資料夾"}
+                        {folderBusy ? t("folders.adding") : t("folders.addConfirm")}
                       </button>
                       <button
                         type="button"
@@ -3615,7 +3803,7 @@ function App() {
                           setRemotePath("");
                         }}
                       >
-                        取消
+                        {t("common.cancel")}
                       </button>
                     </div>
                   </div>
@@ -3623,8 +3811,8 @@ function App() {
               </section>
 
               <section className="card">
-                <h2 className="card-title">進階設定</h2>
-                <p className="card-desc">同步排程、輪詢間隔、佇列保護上限與檔案總管整合</p>
+                <h2 className="card-title">{t("advanced.title")}</h2>
+                <p className="card-desc">{t("advanced.desc")}</p>
                 <label className="checkbox-row">
                   <input
                     type="checkbox"
@@ -3635,14 +3823,14 @@ function App() {
                     }
                   />
                   <span>
-                    <strong>自動同步</strong>
+                    <strong>{t("advanced.autoSync")}</strong>
                     <span className="cell-secondary">
-                      本機有變動時自動上傳，並定期檢查 NAS 下載新檔案；關閉後只有按「立即同步」才會同步。
+                      {t("advanced.autoSyncDesc")}
                     </span>
                   </span>
                 </label>
                 <label className="form-field" style={{ margin: "12px 0" }}>
-                  <span>檢查 NAS 新檔案的間隔</span>
+                  <span>{t("advanced.remoteCheckLabel")}</span>
                   <select
                     className="input"
                     disabled={!config || config.autoSync === false}
@@ -3651,17 +3839,17 @@ function App() {
                       updateSyncSchedule({ remoteCheckMinutes: Number(event.currentTarget.value) })
                     }
                   >
-                    {[
-                      [1, "每 1 分鐘"],
-                      [5, "每 5 分鐘（預設）"],
-                      [15, "每 15 分鐘"],
-                      [30, "每 30 分鐘"],
-                      [60, "每 1 小時"],
-                      [360, "每 6 小時"],
-                      [1440, "每天"],
-                    ].map(([value, label]) => (
+                    {([
+                      [1, "advanced.interval1m"],
+                      [5, "advanced.interval5m"],
+                      [15, "advanced.interval15m"],
+                      [30, "advanced.interval30m"],
+                      [60, "advanced.interval1h"],
+                      [360, "advanced.interval6h"],
+                      [1440, "advanced.interval24h"],
+                    ] as const).map(([value, labelKey]) => (
                       <option key={value} value={value}>
-                        {label}
+                        {t(labelKey)}
                       </option>
                     ))}
                   </select>
@@ -3674,9 +3862,9 @@ function App() {
                     onChange={(event) => toggleExplorerIcons(event.currentTarget.checked)}
                   />
                   <span>
-                    <strong>在檔案總管顯示同步狀態圖示</strong>
+                    <strong>{t("advanced.explorerIcons")}</strong>
                     <span className="cell-secondary">
-                      綠色勾＝已同步、同步箭頭＝同步中。會把同步資料夾註冊為 Windows 同步根；關閉後會解除註冊。
+                      {t("advanced.explorerIconsDesc")}
                     </span>
                   </span>
                 </label>
@@ -3689,10 +3877,10 @@ function App() {
                     }}
                   >
                     <details className="sync-advanced" open>
-                      <summary>輪詢與佇列保護</summary>
+                      <summary>{t("advanced.pollingSummary")}</summary>
                       <div className="two-col-grid" style={{ marginTop: 12 }}>
                         <label className="form-field">
-                          <span>輪詢間隔（秒）</span>
+                          <span>{t("advanced.pollInterval")}</span>
                           <input
                             className="input"
                             value={pollIntervalSeconds}
@@ -3703,7 +3891,7 @@ function App() {
                           />
                         </label>
                         <label className="form-field">
-                          <span>Ingest Backlog 上限</span>
+                          <span>{t("advanced.backlogLimit")}</span>
                           <input
                             className="input"
                             value={ingestBacklogLimit}
@@ -3718,11 +3906,11 @@ function App() {
 
                     <div className="button-row">
                       <button type="submit" className="btn btn-primary" disabled={saving}>
-                        {saving ? "儲存中..." : "儲存進階設定"}
+                        {saving ? t("common.saving") : t("advanced.saveAdvanced")}
                       </button>
                       {serviceStatus?.running ? (
                         <span className="cell-secondary">
-                          輪詢間隔變更後，請使用此頁的控制台重新啟動同步服務才會生效
+                          {t("advanced.restartHint")}
                         </span>
                       ) : null}
                     </div>
@@ -3739,9 +3927,9 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">同步服務與本機監看控制</h2>
+                    <h2 className="card-title">{t("controls.title")}</h2>
                     <p className="card-desc">
-                      手動啟停背景同步服務、本機監看 (Watcher) 或補掃描本機資料夾
+                      {t("controls.desc")}
                     </p>
                   </div>
                   <div className="button-row">
@@ -3751,7 +3939,7 @@ function App() {
                       onClick={refreshOperations}
                       disabled={opsLoading}
                     >
-                      重新整理佇列
+                      {t("controls.refreshQueue")}
                     </button>
                   </div>
                 </div>
@@ -3759,7 +3947,7 @@ function App() {
                 <div className="action-groups service-action-groups">
                   <div className="action-group">
                     <span className="action-group-label">
-                      同步服務：登入後自動啟動，通常不需要手動操作
+                      {t("controls.serviceLabel")}
                     </span>
                     <div className="button-row">
                       <button
@@ -3768,7 +3956,7 @@ function App() {
                         onClick={restartService}
                         disabled={serviceLoading}
                       >
-                        重新啟動同步服務
+                        {t("controls.restartService")}
                       </button>
                       <button
                         type="button"
@@ -3776,14 +3964,14 @@ function App() {
                         onClick={stopService}
                         disabled={serviceLoading || !serviceStatus?.running}
                       >
-                        停止同步服務
+                        {t("controls.stopService")}
                       </button>
                     </div>
                   </div>
 
                   <div className="action-group">
                     <span className="action-group-label">
-                      本機監看 (Watcher)：登入後自動啟動，通常不需要手動操作
+                      {t("controls.watcherLabel")}
                     </span>
                     <div className="button-row">
                       <button
@@ -3792,7 +3980,7 @@ function App() {
                         onClick={startWatcher}
                         disabled={watcherLoading || watcherStatus?.running}
                       >
-                        啟動本機監看
+                        {t("controls.startWatcher")}
                       </button>
                       <button
                         type="button"
@@ -3800,7 +3988,7 @@ function App() {
                         onClick={stopWatcher}
                         disabled={watcherLoading || !watcherStatus?.running}
                       >
-                        停止監看
+                        {t("controls.stopWatcher")}
                       </button>
                       <button
                         type="button"
@@ -3808,7 +3996,7 @@ function App() {
                         onClick={scanLocalOnce}
                         disabled={opsLoading}
                       >
-                        補掃描本機資料夾
+                        {t("controls.scanLocal")}
                       </button>
                     </div>
                   </div>
@@ -3817,19 +4005,19 @@ function App() {
 
               <div>
                 <section className="card">
-                  <h2 className="card-title">SQLite 儲存引擎</h2>
-                  <p className="card-desc">管理本機同步狀態資料庫 Schema 與路徑</p>
+                  <h2 className="card-title">{t("storage.title")}</h2>
+                  <p className="card-desc">{t("storage.desc")}</p>
                   <div className="stats-list">
                     <div className="stat-item">
-                      <span className="stat-key">Schema 版本</span>
+                      <span className="stat-key">{t("storage.schemaVersion")}</span>
                       <span className="stat-val">
-                        {storageInfo ? `v${storageInfo.schemaVersion}` : "尚未初始化"}
+                        {storageInfo ? `v${storageInfo.schemaVersion}` : t("overview.notInitialized")}
                       </span>
                     </div>
                     <div className="stat-item">
-                      <span className="stat-key">資料庫檔案位置</span>
+                      <span className="stat-key">{t("storage.dbPath")}</span>
                       <span className="stat-val mono">
-                        {storageInfo?.dbPath ?? "尚未建立"}
+                        {storageInfo?.dbPath ?? t("storage.notCreated")}
                       </span>
                     </div>
                   </div>
@@ -3840,7 +4028,7 @@ function App() {
                       onClick={initStorage}
                       disabled={authLoading}
                     >
-                      {authLoading ? "處理中..." : "初始化同步資料庫"}
+                      {authLoading ? t("common.processing") : t("storage.initBtn")}
                     </button>
                   </div>
                 </section>
@@ -3849,17 +4037,17 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">系統診斷快照 (System Snapshot)</h2>
+                    <h2 className="card-title">{t("snapshot.title")}</h2>
                     <p className="card-desc">
-                      集中檢視設定、認證、背景服務、監看器與資料庫佇列聚合統計
+                      {t("snapshot.desc")}
                     </p>
                   </div>
                   <button type="button" className="btn btn-secondary btn-sm" onClick={refreshSnapshot}>
-                    重新整理快照
+                    {t("snapshot.refreshBtn")}
                   </button>
                 </div>
                 {snapshotLoading ? (
-                  <div className="fb-skeleton-container" aria-busy="true" aria-label="快照載入中">
+                  <div className="fb-skeleton-container" aria-busy="true" aria-label={t("snapshot.loadingAria")}>
                     <div className="fb-skeleton fb-skeleton-line w-60" />
                     <div className="fb-skeleton fb-skeleton-line w-80" />
                     <div className="fb-skeleton fb-skeleton-line w-45" />
@@ -3869,7 +4057,7 @@ function App() {
                 ) : snapshot ? (
                   <pre className="code-block">{JSON.stringify(snapshot, null, 2)}</pre>
                 ) : (
-                  <div className="empty-state">尚未載入系統快照。</div>
+                  <div className="empty-state">{t("snapshot.empty")}</div>
                 )}
               </section>
             </div>
@@ -3878,50 +4066,44 @@ function App() {
             <article className="docs-article">
               {/* Blog Hero */}
               <header className="docs-hero card">
-                <div className="docs-hero-eyebrow">使用手冊 · Synology Drive Client</div>
-                <h2 className="docs-hero-title">從連線設定到日常同步，一篇看懂所有操作</h2>
+                <div className="docs-hero-eyebrow">{t("docs.eyebrow")}</div>
+                <h2 className="docs-hero-title">{t("docs.heroTitle")}</h2>
                 <p className="docs-hero-lead">
-                  這份說明把常用設定分成四個主題。初次使用只要照著「快速開始」走完三步，之後就能讓程式在系統匣背景自動同步。
+                  {t("docs.heroLead")}
                 </p>
-                <nav className="docs-toc" aria-label="文件章節目錄">
-                  <a href="#docs-group-start" className="docs-toc-chip">1. 快速開始</a>
-                  <a href="#docs-group-auth" className="docs-toc-chip">2. 連線與帳號安全</a>
-                  <a href="#docs-group-sync" className="docs-toc-chip">3. 同步模式與衝突</a>
-                  <a href="#docs-group-ops" className="docs-toc-chip">4. 佇列、系統匣與進階</a>
+                <nav className="docs-toc" aria-label={t("docs.tocAria")}>
+                  <a href="#docs-group-start" className="docs-toc-chip">{t("docs.toc1")}</a>
+                  <a href="#docs-group-auth" className="docs-toc-chip">{t("docs.toc2")}</a>
+                  <a href="#docs-group-sync" className="docs-toc-chip">{t("docs.toc3")}</a>
+                  <a href="#docs-group-ops" className="docs-toc-chip">{t("docs.toc4")}</a>
                 </nav>
               </header>
 
               {/* Group 1: 快速開始 */}
               <section id="docs-group-start" className="docs-group card">
                 <div className="docs-group-header">
-                  <span className="docs-group-tag">Group 1 · 新手入門</span>
-                  <h3 className="docs-group-title">三步驟開始同步</h3>
+                  <span className="docs-group-tag">{t("docs.g1.tag")}</span>
+                  <h3 className="docs-group-title">{t("docs.g1.title")}</h3>
                   <p className="docs-group-subtitle">
-                    第一次打開程式時，只要完成連線、配對資料夾兩件事，同步就會自動接手。
+                    {t("docs.g1.subtitle")}
                   </p>
                 </div>
 
                 <div className="docs-step-grid">
                   <div className="docs-step-card">
                     <span className="docs-step-num">01</span>
-                    <h4>設定 NAS 主機並登入</h4>
-                    <p>
-                      前往「環境設定」填寫 NAS 的 <strong>HTTPS</strong> 位址並登入帳號（支援 2FA OTP 兩步驟驗證）。若有勾選「記住登入」，下次開啟會自動恢復連線。
-                    </p>
+                    <h4>{t("docs.g1.s1Title")}</h4>
+                    <p>{t("docs.g1.s1Body")}</p>
                   </div>
                   <div className="docs-step-card">
                     <span className="docs-step-num">02</span>
-                    <h4>新增同步資料夾</h4>
-                    <p>
-                      前往「同步檔案」選擇本機資料夾與 NAS 遠端目錄，並決定同步方向（雙向、僅上傳或僅下載）。
-                    </p>
+                    <h4>{t("docs.g1.s2Title")}</h4>
+                    <p>{t("docs.g1.s2Body")}</p>
                   </div>
                   <div className="docs-step-card">
                     <span className="docs-step-num">03</span>
-                    <h4>觀察同步與佇列狀態</h4>
-                    <p>
-                      登入後本機監看與背景同步會自動啟動。隨時可到「操作佇列與監看」查看等待中、進行中或失敗的項目。
-                    </p>
+                    <h4>{t("docs.g1.s3Title")}</h4>
+                    <p>{t("docs.g1.s3Body")}</p>
                   </div>
                 </div>
               </section>
@@ -3929,34 +4111,27 @@ function App() {
               {/* Group 2: 連線與帳號安全 */}
               <section id="docs-group-auth" className="docs-group card">
                 <div className="docs-group-header">
-                  <span className="docs-group-tag">Group 2 · 連線與帳號</span>
-                  <h3 className="docs-group-title">主機位址、區網加速與登入保存</h3>
+                  <span className="docs-group-tag">{t("docs.g2.tag")}</span>
+                  <h3 className="docs-group-title">{t("docs.g2.title")}</h3>
                   <p className="docs-group-subtitle">
-                    兼顧外網安全連線與回家後的區網高速傳輸。
+                    {t("docs.g2.subtitle")}
                   </p>
                 </div>
 
                 <div className="docs-prose">
                   <div className="docs-item">
-                    <h4>主機位址（HTTPS）</h4>
-                    <p>
-                      NAS 主機位址必須使用 <code>https://</code> 與有效憑證。在「環境設定」儲存主機或區網設定時，登入身分欄位為唯讀顯示；儲存設定不會重設密碼，也不會中斷目前登入。
-                    </p>
+                    <h4>{t("docs.g2.hostTitle")}</h4>
+                    <p>{t("docs.g2.hostBody")}</p>
                   </div>
 
                   <div className="docs-item">
-                    <h4>區網直連與 Wi-Fi 條件</h4>
-                    <p>
-                      如果外網連線有經過反向代理（例如 Cloudflare 有單檔 100 MB 上傳限制），可在「環境設定」選填區網位址來加速大檔傳輸。
-                      Wi-Fi 名稱可用逗號分隔多個 SSID；留空時，只要區網位址可連通就會自動切換為區網直連。
-                    </p>
+                    <h4>{t("docs.g2.lanTitle")}</h4>
+                    <p>{t("docs.g2.lanBody")}</p>
                   </div>
 
                   <div className="docs-callout docs-callout-info">
-                    <strong>記住登入怎麼保存憑證？</strong>
-                    <p>
-                      勾選「記住登入」後，程式只會將驗證後的 Session Token 安全存放在 <strong>Windows 認證管理員</strong>，不會將密碼或 OTP 寫入設定檔或資料庫。若 NAS 端 Session 過期或被手動撤銷，重新登入一次即可。
-                    </p>
+                    <strong>{t("docs.g2.rememberTitle")}</strong>
+                    <p>{t("docs.g2.rememberBody")}</p>
                   </div>
                 </div>
               </section>
@@ -3964,50 +4139,46 @@ function App() {
               {/* Group 3: 同步模式與衝突 */}
               <section id="docs-group-sync" className="docs-group card">
                 <div className="docs-group-header">
-                  <span className="docs-group-tag">Group 3 · 同步核心</span>
-                  <h3 className="docs-group-title">同步方向、刪除規則與衝突處理</h3>
+                  <span className="docs-group-tag">{t("docs.g3.tag")}</span>
+                  <h3 className="docs-group-title">{t("docs.g3.title")}</h3>
                   <p className="docs-group-subtitle">
-                    不同資料夾可以各自設定適合的同步策略，避免誤刪重要檔案。
+                    {t("docs.g3.subtitle")}
                   </p>
                 </div>
 
                 <div className="docs-mode-grid">
                   <div className="docs-mode-card">
-                    <span className="docs-mode-badge docs-badge-both">雙向同步</span>
-                    <p>本機與 NAS 的新增、修改會互相保持一致，適合日常工作資料夾。</p>
+                    <span className="docs-mode-badge docs-badge-both">{t("docs.g3.bothTitle")}</span>
+                    <p>{t("docs.g3.bothBody")}</p>
                   </div>
                   <div className="docs-mode-card">
-                    <span className="docs-mode-badge docs-badge-up">僅上傳</span>
-                    <p>只把本機的新增與修改送到 NAS，不會把 NAS 的內容下載回來。</p>
+                    <span className="docs-mode-badge docs-badge-up">{t("docs.g3.upTitle")}</span>
+                    <p>{t("docs.g3.upBody")}</p>
                   </div>
                   <div className="docs-mode-card">
-                    <span className="docs-mode-badge docs-badge-down">僅下載</span>
-                    <p>只把 NAS 的變更下載到本機，本機的修改不會回傳到 NAS。</p>
+                    <span className="docs-mode-badge docs-badge-down">{t("docs.g3.downTitle")}</span>
+                    <p>{t("docs.g3.downBody")}</p>
                   </div>
                 </div>
 
                 <div className="docs-callout docs-callout-warn">
-                  <strong>關於「同步刪除」</strong>
-                  <p>
-                    「同步刪除」預設為<strong>關閉</strong>（支援雙向同步與僅上傳模式，刪除時會移至 NAS 資源回收桶）。開啟前請先確認同步方向與資料夾範圍是否正確。
-                  </p>
+                  <strong>{t("docs.g3.deletesTitle")}</strong>
+                  <p>{t("docs.g3.deletesBody")}</p>
                 </div>
 
                 <div className="docs-prose">
                   <div className="docs-item">
-                    <h4>自動同步、路徑顯示與暫存檔</h4>
+                    <h4>{t("docs.g3.detailsTitle")}</h4>
                     <ul className="docs-list">
-                      <li><strong>自動同步與檢查間隔：</strong> 可在「同步檔案」開關自動同步與調整檢查 NAS 的頻率；關閉後仍可手動按「立即同步」。</li>
-                      <li><strong>路徑精簡顯示：</strong> 資料夾路徑以單行顯示並保留最後兩層，將滑鼠移上去即可看到完整路徑。</li>
-                      <li><strong>下載暫存檔：</strong> 檔案下載過程中會先寫入 <code>.synodl-part</code> 暫存檔，完成後再原子置換，避免產生損壞的半成品。</li>
+                      <li><strong>{t("docs.g3.detail1Title")}</strong>{t("docs.g3.detail1Body")}</li>
+                      <li><strong>{t("docs.g3.detail2Title")}</strong>{t("docs.g3.detail2Body")}</li>
+                      <li><strong>{t("docs.g3.detail3Title")}</strong>{t("docs.g3.detail3Body")}</li>
                     </ul>
                   </div>
 
                   <div className="docs-item">
-                    <h4>遇到同步衝突怎麼辦？</h4>
-                    <p>
-                      當本機與 NAS 同一份檔案在兩端都被修改時，系統會標記為衝突，不會擅自覆蓋任何一方。請到「衝突管理」檢視兩邊版本與時間再決定保留方式。
-                    </p>
+                    <h4>{t("docs.g3.conflictTitle")}</h4>
+                    <p>{t("docs.g3.conflictBody")}</p>
                   </div>
                 </div>
               </section>
@@ -4015,43 +4186,33 @@ function App() {
               {/* Group 4: 佇列、系統匣與進階 */}
               <section id="docs-group-ops" className="docs-group card">
                 <div className="docs-group-header">
-                  <span className="docs-group-tag">Group 4 · 日常運作</span>
-                  <h3 className="docs-group-title">操作佇列、系統匣常駐與診斷工具</h3>
+                  <span className="docs-group-tag">{t("docs.g4.tag")}</span>
+                  <h3 className="docs-group-title">{t("docs.g4.title")}</h3>
                   <p className="docs-group-subtitle">
-                    了解程式在背景如何持續運作，以及關閉視窗後的行為。
+                    {t("docs.g4.subtitle")}
                   </p>
                 </div>
 
                 <div className="docs-prose">
                   <div className="docs-item">
-                    <h4>操作佇列與本機監看（Watcher）</h4>
-                    <p>
-                      登入且至少有一個啟用中的同步資料夾時，本機監看與同步服務會自動啟動。你可以在「操作佇列」看到每筆檔案的狀態（等待中、執行中、失敗、完成）以及大檔傳輸進度；若同步服務異常停止，也可在該頁手動重啟。
-                    </p>
+                    <h4>{t("docs.g4.opsTitle")}</h4>
+                    <p>{t("docs.g4.opsBody")}</p>
                   </div>
 
                   <div className="docs-item">
-                    <h4>關閉視窗與系統匣常駐</h4>
-                    <p>
-                      點擊視窗右上角關閉時，程式會<strong>縮小到右下角系統匣常駐</strong>，並繼續執行背景同步（不等於登出）。若要完全關閉程式，請右鍵點擊系統匣圖示選擇「結束」。
-                    </p>
+                    <h4>{t("docs.g4.trayTitle")}</h4>
+                    <p>{t("docs.g4.trayBody")}</p>
                   </div>
 
                   <div className="docs-item">
-                    <h4>SQLite 儲存引擎與 Sync Root 是什麼？（不只是 Log）</h4>
-                    <p>
-                      總覽頁顯示的 <strong>SQLite 資料庫</strong> 不是單純的文字紀錄檔，而是同步引擎的狀態資料庫：它會保存上次同步基準線（<code>baseline</code>，用來做本機／NAS／基準線三方比對）、待處理佇列、重試狀態與衝突紀錄，讓程式重開後也不會忘記同步進度。
-                    </p>
-                    <p style={{ marginTop: 6 }}>
-                      <strong>Sync Root</strong> 則是「本機資料夾 ⇄ NAS 遠端資料夾」的配對起點與邊界，同步引擎只會掃描與監看落在 Sync Root 範圍內的檔案。
-                    </p>
+                    <h4>{t("docs.g4.sqliteTitle")}</h4>
+                    <p>{t("docs.g4.sqliteBody1")}</p>
+                    <p style={{ marginTop: 6 }}>{t("docs.g4.sqliteBody2")}</p>
                   </div>
 
                   <div className="docs-item">
-                    <h4>視窗大小與開發診斷面板</h4>
-                    <p>
-                      視窗解析度可在「環境設定」調整並立即套用，且不會遺失尚未儲存的表單內容。非正式環境（開發模式）側邊欄會顯示「開發工具」分頁供測試 Pipeline 與模擬佇列，一般日常使用不需要操作。
-                    </p>
+                    <h4>{t("docs.g4.windowTitle")}</h4>
+                    <p>{t("docs.g4.windowBody")}</p>
                   </div>
                 </div>
               </section>
@@ -4062,9 +4223,9 @@ function App() {
               <section className="card">
                 <div className="card-header">
                   <div>
-                    <h2 className="card-title">Pipeline 與執行器控制台（開發用模擬佇列）</h2>
+                    <h2 className="card-title">{t("devtools.title")}</h2>
                     <p className="card-desc">
-                      僅於非 PROD 環境顯示；手動觸發 Watcher 事件轉入、單步/批次執行同步佇列與 Fault Matrix 演練
+                      {t("devtools.desc")}
                     </p>
                   </div>
                   <div className="button-row">
@@ -4074,14 +4235,14 @@ function App() {
                       onClick={refreshOperations}
                       disabled={opsLoading}
                     >
-                      重新整理佇列
+                      {t("controls.refreshQueue")}
                     </button>
                   </div>
                 </div>
 
                 <div className="action-groups">
                   <div className="action-group">
-                    <span className="action-group-label">事件入列與執行</span>
+                    <span className="action-group-label">{t("devtools.groupPipeline")}</span>
                     <div className="button-row">
                       <button
                         type="button"
@@ -4089,7 +4250,7 @@ function App() {
                         onClick={runPipelineBatch}
                         disabled={opsLoading}
                       >
-                        執行 Pipeline Batch
+                        {t("devtools.runBatch")}
                       </button>
                       <button
                         type="button"
@@ -4097,7 +4258,7 @@ function App() {
                         onClick={runPipelineOnce}
                         disabled={opsLoading}
                       >
-                        執行單次 Pipeline
+                        {t("devtools.runOnce")}
                       </button>
                       <button
                         type="button"
@@ -4105,7 +4266,7 @@ function App() {
                         onClick={runExecutorOnce}
                         disabled={opsLoading}
                       >
-                        單步 Executor
+                        {t("devtools.runExecutor")}
                       </button>
                       <button
                         type="button"
@@ -4113,7 +4274,7 @@ function App() {
                         onClick={runSyncCycleOnce}
                         disabled={opsLoading}
                       >
-                        單次 Sync Cycle
+                        {t("devtools.runCycle")}
                       </button>
                       <button
                         type="button"
@@ -4121,13 +4282,13 @@ function App() {
                         onClick={drainWatcherEvents}
                         disabled={opsLoading}
                       >
-                        轉入 Watcher 事件
+                        {t("devtools.drainWatcher")}
                       </button>
                     </div>
                   </div>
 
                   <div className="action-group">
-                    <span className="action-group-label">開發壓測與故障矩陣演練 (Fault Matrix)</span>
+                    <span className="action-group-label">{t("devtools.groupFault")}</span>
                     <div className="button-row">
                       <button
                         type="button"
@@ -4135,7 +4296,7 @@ function App() {
                         onClick={addSampleOperation}
                         disabled={opsLoading}
                       >
-                        + 範例 Operation
+                        {t("devtools.addSample")}
                       </button>
                       <button
                         type="button"
@@ -4143,7 +4304,7 @@ function App() {
                         onClick={addRetryableOperation}
                         disabled={opsLoading}
                       >
-                        + Retryable
+                        {t("devtools.addRetryable")}
                       </button>
                       <button
                         type="button"
@@ -4151,7 +4312,7 @@ function App() {
                         onClick={addHardRetryableOperation}
                         disabled={opsLoading}
                       >
-                        + Hard Retry
+                        {t("devtools.addHardRetry")}
                       </button>
                       <button
                         type="button"
@@ -4159,7 +4320,7 @@ function App() {
                         onClick={seedDemoOperations}
                         disabled={opsLoading}
                       >
-                        批次新增 5 筆 Demo
+                        {t("devtools.seedDemo")}
                       </button>
                       <button
                         type="button"
@@ -4167,7 +4328,7 @@ function App() {
                         onClick={seedFaultMatrixOperations}
                         disabled={opsLoading}
                       >
-                        灌入 Fault Matrix
+                        {t("devtools.seedFaultMatrix")}
                       </button>
                       <button
                         type="button"
@@ -4175,7 +4336,7 @@ function App() {
                         onClick={runFaultMatrixOnce}
                         disabled={opsLoading}
                       >
-                        執行 Fault Matrix
+                        {t("devtools.runFaultMatrix")}
                       </button>
                       <button
                         type="button"
@@ -4183,7 +4344,7 @@ function App() {
                         onClick={runFaultMatrixFast}
                         disabled={opsLoading}
                       >
-                        快速演練 Fault Matrix Fast
+                        {t("devtools.runFaultMatrixFast")}
                       </button>
                       <button
                         type="button"
@@ -4191,7 +4352,7 @@ function App() {
                         onClick={forceDueRetryable}
                         disabled={opsLoading}
                       >
-                        強制釋放 Retryable 到期
+                        {t("devtools.forceDueRetryable")}
                       </button>
                     </div>
                   </div>
