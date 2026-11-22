@@ -231,12 +231,89 @@ mod imp {
             }
         }
 
-        /// 中斷連線並解除註冊。注意：仍是雲端狀態（未下載）的 placeholder 解除註冊後無法再開啟，
-        /// 需要先在檔案總管將它們設為「永遠保留在此裝置」或重新同步。
+        /// 中斷連線並解除註冊，同時清理檔案總管左側導覽列可能殘留的 Namespace CLSID，避免移除資料夾後圖示殘留。
+        /// 注意：仍是雲端狀態（未下載）的 placeholder 解除註冊後無法再開啟。
         pub fn unregister(&self, folder_id: &str) -> Result<(), String> {
             self.disconnect(folder_id);
             let id = sync_root_id(folder_id)?;
-            id.unregister().map_err(|e| format!("解除同步根註冊失敗：{e}"))
+            let res = id.unregister().map_err(|e| format!("解除同步根註冊失敗：{e}"));
+            cleanup_explorer_namespace_for_folder(folder_id);
+            res
+        }
+
+        /// 清理所有不在 `active_folder_ids` 清單內的殘留同步根與檔案總管左側導覽項目
+        pub fn prune_orphans(&self, active_folder_ids: &[String]) {
+            prune_orphan_sync_roots(self, active_folder_ids);
+        }
+    }
+
+    /// 移除指定 `folder_id` 在 `HKCU\...\Explorer\Desktop\NameSpace` 與 `HKCU\Software\Classes\CLSID` 的殘留導覽列項目
+    fn cleanup_explorer_namespace_for_folder(folder_id: &str) {
+        let suffix = format!("!{folder_id}");
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace",
+                "/s",
+            ])
+            .output();
+        let Ok(output) = output else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut current_key = String::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{") {
+                current_key = trimmed.to_string();
+            } else if !current_key.is_empty()
+                && trimmed.contains(PROVIDER_NAME)
+                && trimmed.ends_with(&suffix)
+            {
+                if let Some(clsid) = current_key.rsplit('\\').next() {
+                    let _ = std::process::Command::new("reg")
+                        .args(["delete", &current_key, "/f"])
+                        .output();
+                    let clsid_key = format!(r"HKCU\Software\Classes\CLSID\{clsid}");
+                    let _ = std::process::Command::new("reg")
+                        .args(["delete", &clsid_key, "/f"])
+                        .output();
+                    let wow_key = format!(r"HKCU\Software\Classes\Wow6432Node\CLSID\{clsid}");
+                    let _ = std::process::Command::new("reg")
+                        .args(["delete", &wow_key, "/f"])
+                        .output();
+                }
+            }
+        }
+    }
+
+    /// 掃描目前使用者在檔案總管註冊的所有 `SynologyDriveClient!*!<folder_id>`，
+    /// 若 `folder_id` 已不在設定檔的 `active_folder_ids` 中，主動解除註冊並清理導覽列殘留
+    fn prune_orphan_sync_roots(state: &CloudStatusState, active_folder_ids: &[String]) {
+        let output = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace",
+                "/s",
+            ])
+            .output();
+        let Ok(output) = output else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(pos) = trimmed.find(PROVIDER_NAME) {
+                let token = &trimmed[pos..];
+                if let Some(folder_id) = token.rsplit('!').next() {
+                    let folder_id = folder_id.trim();
+                    if !folder_id.is_empty()
+                        && !active_folder_ids.iter().any(|id| id == folder_id)
+                    {
+                        let _ = state.unregister(folder_id);
+                    }
+                }
+            }
         }
     }
 
@@ -448,7 +525,6 @@ mod imp {
     /// 在本機建立「僅雲端」的 placeholder：有檔名與大小、顯示雲朵圖示，但不佔磁碟空間。
     /// `remote_path` 存在 placeholder 的 blob，之後打開檔案時用來向 NAS 下載。
     pub fn create_placeholder(local_path: &Path, remote_path: &str, size: u64) -> Result<(), String> {
-        use std::os::windows::fs::MetadataExt as _;
         if remote_path.len() > MAX_BLOB_LEN {
             return Err("NAS 路徑過長，無法建立雲端檔案".to_string());
         }
@@ -456,24 +532,32 @@ mod imp {
         let name = local_path
             .file_name()
             .ok_or_else(|| "無法取得檔名".to_string())?;
-        // 建立 placeholder 的上層資料夾本身必須是 placeholder（或同步根）
-        mark_path(parent, None, false)?;
-        // 時間沿用上層資料夾的資訊（NAS 列表沒有修改時間），屬性必須是單純的 FILE_ATTRIBUTE_NORMAL（不可帶入目錄的 DIRECTORY / REPARSE_POINT 旗標）
-        let parent_meta = std::fs::metadata(parent).map_err(|e| format!("讀取上層資料夾失敗：{e}"))?;
-        let write_time = parent_meta.last_write_time() as i64;
+        // 使用目前系統時間轉換為 Windows FILETIME（100ns intervals since 1601-01-01），
+        // 避免每建立一個檔案都要對 parent 執行 std::fs::metadata 與 open_win32，大幅提升數千個檔案時的建立速度
+        let now_filetime = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_nanos() / 100) as i64 + 116_444_736_000_000_000)
+            .unwrap_or(133_000_000_000_000_000);
         let metadata = Metadata::file()
             .size(size)
-            .creation_time(parent_meta.creation_time() as i64)
-            .last_access_time(parent_meta.last_access_time() as i64)
-            .last_write_time(write_time)
-            .change_time(write_time)
+            .creation_time(now_filetime)
+            .last_access_time(now_filetime)
+            .last_write_time(now_filetime)
+            .change_time(now_filetime)
             .attributes(FILE_ATTRIBUTE_NORMAL);
-        PlaceholderCreateInfo::new(name)
-            .metadata(metadata)
-            .blob(remote_path.as_bytes().to_vec())
-            .mark_in_sync()
-            .create(parent)
-            .map_err(|e| format!("建立雲端檔案失敗：{e}"))?;
+        let build_info = || {
+            PlaceholderCreateInfo::new(name)
+                .metadata(metadata)
+                .blob(remote_path.as_bytes().to_vec())
+                .mark_in_sync()
+        };
+        // 先直接建立；若上層資料夾尚未轉為 placeholder 才補標記一次並重試
+        if build_info().create(parent).is_err() {
+            mark_path(parent, None, false)?;
+            build_info()
+                .create(parent)
+                .map_err(|e| format!("建立雲端檔案失敗：{e}"))?;
+        }
         Ok(())
     }
 
@@ -534,6 +618,7 @@ mod imp {
         pub fn unregister(&self, _folder_id: &str) -> Result<(), String> {
             Ok(())
         }
+        pub fn prune_orphans(&self, _active_folder_ids: &[String]) {}
     }
 
     pub fn mark_path(_path: &Path, _remote_path: Option<&str>, _in_sync: bool) -> Result<(), String> {

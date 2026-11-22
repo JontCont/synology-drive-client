@@ -25,6 +25,9 @@ const PHASE_ERROR: &str = "error";
 const TEMP_SUFFIX: &str = ".synodl-part";
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASELINE_SAVE_EVERY: u64 = 25;
+const PLACEHOLDER_SAVE_EVERY: u64 = 500;
+/// 列出 NAS 目錄樹時每一波平行請求的子資料夾數量上限
+const LIST_REMOTE_CONCURRENCY: usize = 8;
 /// 一次同步要刪除的檔案數達到這個數量（且過半）才會觸發大量刪除保護
 const MASS_DELETE_MIN: usize = 10;
 /// NTFS 與 NAS 的時間精度不同，差距在此範圍內視為沒有改動
@@ -965,21 +968,42 @@ fn list_remote_tree(
 ) -> Result<Vec<RemoteNode>, String> {
     let mut nodes = Vec::new();
     let mut pending = vec![remote_root.to_string()];
-    while let Some(dir) = pending.pop() {
+    let mut file_count = 0u64;
+    while !pending.is_empty() {
         if cancel.load(Ordering::SeqCst) {
             return Ok(nodes);
         }
-        for entry in auth.list_remote_entries(&dir)? {
-            if entry.is_dir {
-                pending.push(entry.path.clone());
+        let take = pending.len().min(LIST_REMOTE_CONCURRENCY);
+        let batch: Vec<String> = pending.drain(pending.len() - take..).collect();
+        let results: Vec<Result<Vec<auth::RemoteEntry>, String>> = if batch.len() == 1 {
+            vec![auth.list_remote_entries(&batch[0])]
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|dir| s.spawn(move || auth.list_remote_entries(dir)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err("列出遠端目錄執行緒中斷".to_string())))
+                    .collect()
+            })
+        };
+        for entries in results {
+            for entry in entries? {
+                if entry.is_dir {
+                    pending.push(entry.path.clone());
+                } else {
+                    file_count += 1;
+                }
+                nodes.push(RemoteNode {
+                    path: entry.path,
+                    is_dir: entry.is_dir,
+                    size: entry.size,
+                });
             }
-            nodes.push(RemoteNode {
-                path: entry.path,
-                is_dir: entry.is_dir,
-                size: entry.size,
-            });
         }
-        on_progress(nodes.iter().filter(|n| !n.is_dir).count() as u64);
+        on_progress(file_count);
     }
     Ok(nodes)
 }
@@ -1143,7 +1167,7 @@ fn execute_plan(
                     consecutive_failures = 0;
                     baseline.files.remove(&item.key);
                     baseline.dirs.remove(&item.key);
-                    since_save += 1;
+                    since_save += PLACEHOLDER_SAVE_EVERY / BASELINE_SAVE_EVERY;
                     if let Some(pos) = queue_pos {
                         state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
                     }
@@ -1287,7 +1311,11 @@ fn execute_plan(
                         },
                     );
                 }
-                since_save += 1;
+                since_save += if transfer.placeholder {
+                    1
+                } else {
+                    PLACEHOLDER_SAVE_EVERY / BASELINE_SAVE_EVERY
+                };
                 state.update(&folder.id, |p| {
                     p.done_bytes += transfer.bytes;
                     if transfer.uploaded {
@@ -1321,7 +1349,7 @@ fn execute_plan(
                 }
             }
         }
-        if since_save >= BASELINE_SAVE_EVERY {
+        if since_save >= PLACEHOLDER_SAVE_EVERY {
             let _ = sync_state::save(app, &folder.id, baseline);
             since_save = 0;
         }
