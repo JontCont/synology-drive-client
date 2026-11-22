@@ -16,16 +16,6 @@ type SyncFolder = {
   mode: SyncMode;
   paused: boolean;
   syncDeletes?: boolean;
-  autoDehydrate?: boolean;
-};
-
-type DehydrateFolderResult = {
-  folderId: string;
-  dehydratedFiles: number;
-  alreadyDehydratedFiles: number;
-  freedBytes: number;
-  skippedUnsynced: number;
-  skippedPinnedOrOpen: number;
 };
 
 type AppConfig = {
@@ -506,7 +496,6 @@ function App() {
   const [remotePath, setRemotePath] = useState("");
   const [syncMode, setSyncMode] = useState<SyncMode>("bidirectional");
   const [folderBusy, setFolderBusy] = useState(false);
-  const [dehydratingFolderId, setDehydratingFolderId] = useState<string | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const folderToRemove = config?.syncFolders.find((folder) => folder.id === confirmRemoveId) ?? null;
   const [downloads, setDownloads] = useState<SyncProgress[]>([]);
@@ -991,66 +980,20 @@ function App() {
 
   function updateSyncFolder(
     id: string,
-    patch: {
-      mode?: SyncMode;
-      paused?: boolean;
-      syncDeletes?: boolean;
-      autoDehydrate?: boolean;
-    },
+    patch: { mode?: SyncMode; paused?: boolean; syncDeletes?: boolean },
   ) {
     return runFolderAction(
       () => invoke<AppConfig>("update_sync_folder", { id, ...patch }),
-      patch.autoDehydrate !== undefined
-        ? patch.autoDehydrate
-          ? t("toast.autoDehydrateEnabled")
-          : t("toast.autoDehydrateDisabled")
-        : patch.syncDeletes !== undefined
-          ? patch.syncDeletes
-            ? t("toast.syncDeletesEnabled")
-            : t("toast.syncDeletesDisabled")
-          : patch.paused === undefined
-            ? t("toast.syncModeUpdated")
-            : patch.paused
-              ? t("toast.folderPaused")
-              : t("toast.folderResumed"),
+      patch.syncDeletes !== undefined
+        ? patch.syncDeletes
+          ? t("toast.syncDeletesEnabled")
+          : t("toast.syncDeletesDisabled")
+        : patch.paused === undefined
+          ? t("toast.syncModeUpdated")
+          : patch.paused
+            ? t("toast.folderPaused")
+            : t("toast.folderResumed"),
     );
-  }
-
-  async function dehydrateSyncFolder(folder: SyncFolder) {
-    setDehydratingFolderId(folder.id);
-    setError(null);
-    setMessage(null);
-    try {
-      const res = await invoke<DehydrateFolderResult>("dehydrate_sync_folder", {
-        id: folder.id,
-      });
-      const unsyncedPart =
-        res.skippedUnsynced > 0
-          ? t("toast.dehydrateUnsyncedPart", { unsynced: res.skippedUnsynced })
-          : "";
-      if (res.dehydratedFiles > 0) {
-        setMessage(
-          t("toast.dehydrateDone", {
-            name: folder.name,
-            count: res.dehydratedFiles,
-            bytes: formatBytes(res.freedBytes),
-            unsyncedPart,
-          }),
-        );
-      } else {
-        setMessage(
-          t("toast.dehydrateNothingToFree", {
-            name: folder.name,
-            already: res.alreadyDehydratedFiles,
-            unsyncedPart,
-          }),
-        );
-      }
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setDehydratingFolderId(null);
-    }
   }
 
   async function removeSyncFolder(id: string) {
@@ -3606,26 +3549,6 @@ function App() {
                                 </label>
                               </div>
                             ) : null}
-                            <div className="form-field">
-                              <label className="checkbox-row">
-                                <input
-                                  type="checkbox"
-                                  checked={folder.autoDehydrate === true}
-                                  disabled={folderBusy || config.explorerStatusIcons === false}
-                                  onChange={(event) =>
-                                    updateSyncFolder(folder.id, {
-                                      autoDehydrate: event.currentTarget.checked,
-                                    })
-                                  }
-                                />
-                                <span>
-                                  <strong>{t("folders.autoDehydrate")}</strong>
-                                  <span className="cell-secondary">
-                                    {t("folders.autoDehydrateDesc")}
-                                  </span>
-                                </span>
-                              </label>
-                            </div>
                             {(() => {
                               const dl = downloads.find((d) => d.folderId === folder.id);
                               if (!dl) return null;
@@ -3730,33 +3653,55 @@ function App() {
                                   </button>
                                 );
                               }
-                              return (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="btn btn-primary btn-sm"
-                                    disabled={folderBusy || dehydratingFolderId === folder.id}
-                                    onClick={() => startFolderSync(folder.id)}
-                                  >
-                                    {t("folders.syncNow")}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary btn-sm"
-                                    disabled={
-                                      folderBusy ||
-                                      dehydratingFolderId === folder.id ||
-                                      config.explorerStatusIcons === false
-                                    }
-                                    onClick={() => dehydrateSyncFolder(folder)}
-                                  >
-                                    {dehydratingFolderId === folder.id
-                                      ? t("folders.freeingSpace")
-                                      : t("folders.freeSpace")}
-                                  </button>
-                                </>
-                              );
+                              return !folder.paused ? (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  disabled={folderBusy}
+                                  onClick={() => startFolderSync(folder.id)}
+                                >
+                                  {t("folders.syncNow")}
+                                </button>
+                              ) : null;
                             })()}
+                            <select
+                              className="input folder-mode-select"
+                              value={folder.mode}
+                              disabled={folderBusy}
+                              aria-label={t("folders.modeAria", { name: folder.name })}
+                              onChange={(event) =>
+                                updateSyncFolder(folder.id, {
+                                  mode: event.currentTarget.value as SyncMode,
+                                })
+                              }
+                            >
+                              {syncModes.map((mode) => (
+                                <option key={mode.id} value={mode.id}>
+                                  {mode.label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={folderBusy}
+                              onClick={() =>
+                                updateSyncFolder(folder.id, { paused: !folder.paused })
+                              }
+                            >
+                              {folder.paused ? t("folders.resume") : t("folders.pause")}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled={folderBusy}
+                              onClick={() => {
+                                setError(null);
+                                setConfirmRemoveId(folder.id);
+                              }}
+                            >
+                              {t("folders.remove")}
+                            </button>
                           </div>
                         </div>
                       ))}
