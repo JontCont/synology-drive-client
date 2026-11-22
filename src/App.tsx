@@ -3730,7 +3730,7 @@ function App() {
                                   </button>
                                 );
                               }
-                              return !folder.paused ? (
+                              return (
                                 <>
                                   <button
                                     type="button"
@@ -3755,46 +3755,8 @@ function App() {
                                       : t("folders.freeSpace")}
                                   </button>
                                 </>
-                              ) : null;
+                              );
                             })()}
-                            <select
-                              className="input folder-mode-select"
-                              value={folder.mode}
-                              disabled={folderBusy}
-                              aria-label={t("folders.modeAria", { name: folder.name })}
-                              onChange={(event) =>
-                                updateSyncFolder(folder.id, {
-                                  mode: event.currentTarget.value as SyncMode,
-                                })
-                              }
-                            >
-                              {syncModes.map((mode) => (
-                                <option key={mode.id} value={mode.id}>
-                                  {mode.label}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              className="btn btn-secondary btn-sm"
-                              disabled={folderBusy}
-                              onClick={() =>
-                                updateSyncFolder(folder.id, { paused: !folder.paused })
-                              }
-                            >
-                              {folder.paused ? t("folders.resume") : t("folders.pause")}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              disabled={folderBusy}
-                              onClick={() => {
-                                setError(null);
-                                setConfirmRemoveId(folder.id);
-                              }}
-                            >
-                              {t("folders.remove")}
-                            </button>
                           </div>
                         </div>
                       ))}
