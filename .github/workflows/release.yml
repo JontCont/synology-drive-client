@@ -85,7 +85,21 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Synology Drive Client v__VERSION__"
-          releaseBody: "請依作業系統下載對應安裝檔（Windows / macOS Apple Silicon & Intel / Linux）。"
+          releaseBody: |
+            ### 📦 安裝檔下載 (v__VERSION__)
+
+            🪟 **Windows (x64)**
+            - `Synology.Drive.Client___VERSION___x64-setup.exe` — NSIS 安裝程式
+            - `Synology.Drive.Client___VERSION___x64_en-US.msi` — MSI 安裝套件
+
+            🍎 **macOS**
+            - `Synology.Drive.Client___VERSION___aarch64.dmg` — Apple Silicon (M1 / M2 / M3 / M4)
+            - `Synology.Drive.Client___VERSION___x64.dmg` — Intel Mac
+
+            🐧 **Linux (x86_64)**
+            - `Synology.Drive.Client___VERSION___amd64.deb` — 適用於 Debian / Ubuntu 及其衍生發行版
+            - `Synology.Drive.Client-__VERSION__-1.x86_64.rpm` — 適用於 Fedora / RHEL / openSUSE
+            - `Synology.Drive.Client___VERSION___amd64.AppImage` — 免安裝可執行檔（下載後賦予執行權限 `chmod +x` 即可啟動）
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
