@@ -83,6 +83,8 @@ fn ensure_cloud_status(
             app.state::<auth::AuthState>().download_remote_file(remote_path, dest)
         })
     };
+    let active_ids: Vec<String> = cfg.sync_folders.iter().map(|f| f.id.clone()).collect();
+    cloud.prune_orphans(&active_ids);
     let mut errors = Vec::new();
     for folder in &cfg.sync_folders {
         if folder.paused {
@@ -708,11 +710,13 @@ async fn remove_sync_folder(
 ) -> Result<config::AppConfig, String> {
     sync_run_state.cancel(&id);
     sync_run_state.forget(&id);
-    // 先解除同步根註冊，資料夾才不會留下雲端檔案篩選的殘餘狀態
-    let _ = cloud_state.unregister(&id);
     let cfg = config::remove_folder(&app, &id)?;
     sync_state::delete(&app, &id);
+    // 先更新並釋放 watcher 對該資料夾的監看控制代碼，再解除同步根註冊與清理檔案總管導覽列位置
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
+    let _ = cloud_state.unregister(&id);
+    let active_ids: Vec<String> = cfg.sync_folders.iter().map(|f| f.id.clone()).collect();
+    cloud_state.prune_orphans(&active_ids);
     Ok(cfg)
 }
 
