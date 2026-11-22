@@ -33,7 +33,7 @@
 - [ ] P3-3 打包安裝檔（Windows installer）、開機自動啟動選項、更新 README
 
 ## 不在範圍內（已移出，不再追蹤）
-- Files On-Demand（placeholder、hydration、dehydration、釘選、釋放空間）：檔案一律完整存在本機，只做狀態圖示
+- ~~Files On-Demand 不做~~ 已改為實作（Windows）：NAS 檔案在本機只建立雲端 placeholder，打開時才下載（hydration），支援右鍵「釋放空間」與「永遠保留在此裝置」；本機新檔上傳後標為已同步，可再釋放空間。設計見 `cloud_status.rs`；需在 Windows 實機執行 `cargo test cloud_status -- --ignored --nocapture` 驗證
 - OIDC / SSO 登入與回呼（已移除，僅保留一般帳密 + OTP）
 - 分塊上傳（Drive 網頁 API 沒有；改用區網直連）
 - WebDAV Provider、`RemoteProvider` 抽象、Provider Spike
@@ -73,8 +73,10 @@
 - [x] 實測 NAS 位址經 Cloudflare，請求內容超過約 100 MB 會被 413 拒絕；上傳改用獨立 agent（等待回應 10 分鐘）；被代理拒絕時顯示說明、記住該大小之後不再重傳、不計入連續失敗
 - [x] 區網直連：區網位址（僅私有網路位址）+ 可選的限定 Wi-Fi 名稱（`netsh`）；每次同步開始偵測並測試，連得到就改走區網；用區網列出失敗自動退回一般位址。已實機驗證：區網位址可連、Wi-Fi 名稱可讀取、148 MB mp4 經區網上傳成功
 
-### 檔案總管同步圖示（P1-20）
-- [x] `cloud_status.rs`：以 Windows Cloud Files（`cloud-filter`）把同步資料夾註冊為同步根（AlwaysFull，檔案完整存在本機），下載 / 上傳時標示「同步中」，完成後標為「已同步」；登入後 / 新增 / 繼續時註冊並連線，暫停 / 登出時中斷，移除時解除註冊；設定頁可關閉
+### 檔案總管同步圖示與 Files On-Demand 釋放空間（P1-20）
+- [x] `cloud_status.rs`：以 Windows Cloud Files（`cloud-filter`）把同步資料夾註冊為同步根（`HydrationType::Full`、`AutoDehydrationAllowed`、`PopulationType::AlwaysFull`）；NAS 檔案只建立雲端 placeholder，打開時才按需下載（hydration）
+- [x] 本機新增 / 上傳或既有已同步的檔案：轉換或更新 Placeholder 時寫入 NAS 遠端路徑 blob，支援在 Windows 檔案總管右鍵「釋放空間」（dehydration，含 `PinState::Unpinned` 狀態監聽自動釋放）與「永遠保留在此裝置」
+- [x] App 內每個同步資料夾提供手動「釋放空間」按鈕（`dehydrate_sync_folder`，僅釋放已同步且本機未修改的檔案，保護未同步檔案與釘選檔案）與「同步後自動釋放空間」（`autoDehydrate`）開關
 - [x] Windows 實機整合測試（`cargo test cloud_status -- --ignored --nocapture`）；已知 `SyncRootId::is_registered` 對本程式的註冊會誤報 false，註冊 / 解除一律直接呼叫
 
 ### 早期骨架（已完成，待 P2-1 清理）

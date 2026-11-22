@@ -19,6 +19,9 @@ pub struct SyncFolder {
     /// 刪除也同步（僅「雙向」與「僅上傳」模式有效）：同步過的檔案在一邊被刪除時，另一邊會移到資源回收桶
     #[serde(default)]
     pub sync_deletes: bool,
+    /// 同步後自動釋放空間：本機檔案上傳或同步完成後，自動轉為僅雲端 placeholder 以釋放磁碟空間
+    #[serde(default)]
+    pub auto_dehydrate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +253,7 @@ fn migrate_legacy(config: &mut AppConfig) {
                 mode,
                 paused: false,
                 sync_deletes: false,
+                auto_dehydrate: false,
             });
         }
     }
@@ -316,6 +320,7 @@ pub fn add_folder<R: Runtime>(
         mode: mode.to_string(),
         paused: false,
         sync_deletes: false,
+        auto_dehydrate: false,
     });
     write_config(app, &config)?;
     Ok(config)
@@ -327,6 +332,7 @@ pub fn update_folder<R: Runtime>(
     mode: Option<String>,
     paused: Option<bool>,
     sync_deletes: Option<bool>,
+    auto_dehydrate: Option<bool>,
 ) -> Result<AppConfig, String> {
     let mut config = load(app)?;
     let folder = config
@@ -345,6 +351,9 @@ pub fn update_folder<R: Runtime>(
     }
     if let Some(sync_deletes) = sync_deletes {
         folder.sync_deletes = sync_deletes;
+    }
+    if let Some(auto_dehydrate) = auto_dehydrate {
+        folder.auto_dehydrate = auto_dehydrate;
     }
     write_config(app, &config)?;
     Ok(config)
@@ -453,6 +462,7 @@ mod tests {
             mode: SYNC_MODE_BIDIRECTIONAL.to_string(),
             paused: false,
             sync_deletes: false,
+            auto_dehydrate: false,
         }
     }
 
