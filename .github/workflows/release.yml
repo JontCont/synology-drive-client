@@ -55,6 +55,26 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      - name: Sync version from Git tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: node {0}
+        run: |
+          const fs = require("fs");
+          const tag = process.env.GITHUB_REF_NAME || "";
+          const ver = tag.replace(/^v/, "");
+          if (!/^\d+\.\d+\.\d+/.test(ver)) process.exit(0);
+          for (const file of ["package.json", "src-tauri/tauri.conf.json"]) {
+            const data = JSON.parse(fs.readFileSync(file, "utf8"));
+            data.version = ver;
+            fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n");
+          }
+          const cargoPath = "src-tauri/Cargo.toml";
+          const cargo = fs.readFileSync(cargoPath, "utf8").replace(
+            /^version\s*=\s*"[^"]+"/m,
+            `version = "${ver}"`
+          );
+          fs.writeFileSync(cargoPath, cargo);
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -65,7 +85,82 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Synology Drive Client v__VERSION__"
-          releaseBody: "請依作業系統下載對應安裝檔（Windows / macOS Apple Silicon & Intel / Linux）。"
-          releaseDraft: true
+          releaseBody: |
+            ### 📦 安裝檔下載 (v__VERSION__)
+
+            🪟 **Windows (x64)**
+            - `Synology.Drive.Client___VERSION___windows_x64-setup.exe` — NSIS 安裝程式
+            - `Synology.Drive.Client___VERSION___windows_x64_en-US.msi` — MSI 安裝套件
+
+            🍎 **macOS**
+            - `Synology.Drive.Client___VERSION___macos_aarch64.dmg` — Apple Silicon (M1 / M2 / M3 / M4)
+            - `Synology.Drive.Client___VERSION___macos_x64.dmg` — Intel Mac
+
+            🐧 **Linux (x86_64)**
+            - `Synology.Drive.Client___VERSION___linux_amd64.deb` — 適用於 Debian / Ubuntu 及其衍生發行版
+            - `Synology.Drive.Client___VERSION___linux_x86_64.rpm` — 適用於 Fedora / RHEL / openSUSE
+            - `Synology.Drive.Client___VERSION___linux_amd64.AppImage` — 免安裝可執行檔（下載後賦予執行權限 `chmod +x` 即可啟動）
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Rename release assets with OS and version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        shell: node {0}
+        run: |
+          const fs = require("fs");
+          const ver = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const tag = `v${ver}`;
+          const headers = {
+            Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "synology-drive-client-release",
+            "Content-Type": "application/json",
+          };
+
+          function targetAssetName(name) {
+            if (/_(windows|macos|linux)_/i.test(name)) return null;
+            if (name.endsWith("-setup.exe") || name.endsWith(".msi")) {
+              return name.replace(`_${ver}_`, `_${ver}_windows_`);
+            }
+            if (name.endsWith(".dmg")) {
+              return name.replace(`_${ver}_`, `_${ver}_macos_`);
+            }
+            if (name.endsWith(".app.tar.gz")) {
+              return name.replace(
+                /^Synology\.Drive\.Client_/,
+                `Synology.Drive.Client_${ver}_macos_`
+              );
+            }
+            if (name.endsWith(".deb") || name.endsWith(".AppImage")) {
+              return name.replace(`_${ver}_`, `_${ver}_linux_`);
+            }
+            if (name.endsWith(".rpm")) {
+              return `Synology.Drive.Client_${ver}_linux_x86_64.rpm`;
+            }
+            return null;
+          }
+
+          (async () => {
+            const relRes = await fetch(
+              `https://api.github.com/repos/${process.env.REPO}/releases/tags/${tag}`,
+              { headers }
+            );
+            if (!relRes.ok) return;
+            const release = await relRes.json();
+            for (const asset of release.assets || []) {
+              const newName = targetAssetName(asset.name);
+              if (!newName || newName === asset.name) continue;
+              await fetch(
+                `https://api.github.com/repos/${process.env.REPO}/releases/assets/${asset.id}`,
+                {
+                  method: "PATCH",
+                  headers,
+                  body: JSON.stringify({ name: newName }),
+                }
+              );
+              console.log(`Renamed ${asset.name} -> ${newName}`);
+            }
+          })();

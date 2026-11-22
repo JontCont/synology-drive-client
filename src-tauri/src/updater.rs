@@ -231,16 +231,29 @@ pub fn check_for_update() -> Result<AppUpdateInfo, String> {
     parse_github_release(&body, cur, std::env::consts::OS)
 }
 
+/// 確保下載到本機的安裝檔檔名一定帶有版本號（例如 `Synology.Drive.Client_0.1.3_x64-setup.exe`）
+fn versioned_installer_name(asset_name: &str, version: &str) -> String {
+    let clean_ver = version.trim().trim_start_matches(['v', 'V']);
+    if clean_ver.is_empty() || asset_name.contains(clean_ver) {
+        return asset_name.to_string();
+    }
+    match asset_name.rfind('.') {
+        Some(dot) if dot > 0 => format!("{}_{clean_ver}{}", &asset_name[..dot], &asset_name[dot..]),
+        _ => format!("{asset_name}_{clean_ver}"),
+    }
+}
+
 /// 重新向 GitHub 查詢最新 Release，下載對應安裝檔至系統暫存目錄並啟動安裝程式
 pub fn download_and_install_update() -> Result<String, String> {
     let info = check_for_update()?;
     if !info.has_update {
         return Err("目前已經是最新版本".to_string());
     }
-    let asset_name = info
+    let raw_asset_name = info
         .asset_name
         .and_then(|n| sanitize_installer_name(&n))
         .ok_or_else(|| "此版本尚未提供目前作業系統的安裝檔".to_string())?;
+    let asset_name = versioned_installer_name(&raw_asset_name, &info.latest_version);
     let asset_url = info
         .asset_url
         .filter(|u| is_allowed_asset_url(u))
@@ -387,6 +400,14 @@ mod tests {
         assert_eq!(
             sanitize_installer_name("SynologyDrive_0.2.0.msi").as_deref(),
             Some("SynologyDrive_0.2.0.msi")
+        );
+        assert_eq!(
+            versioned_installer_name("Synology.Drive.Client_0.1.3_x64-setup.exe", "0.1.3"),
+            "Synology.Drive.Client_0.1.3_x64-setup.exe"
+        );
+        assert_eq!(
+            versioned_installer_name("Synology.Drive.Client_x64-setup.exe", "v0.1.3"),
+            "Synology.Drive.Client_x64-setup_0.1.3.exe"
         );
     }
 }
