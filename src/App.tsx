@@ -39,6 +39,18 @@ type LanStatus = {
   message: string;
 };
 
+type AppUpdateInfo = {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseName: string;
+  releaseNotes: string;
+  releaseUrl: string;
+  assetName: string | null;
+  assetUrl: string | null;
+  assetSize: number | null;
+};
+
 type SyncMode = "bidirectional" | "upload_only" | "download_only";
 
 type NasFolderEntry = { name: string; path: string };
@@ -523,6 +535,9 @@ function App() {
     result: null,
   });
   const [lanStatus, setLanStatus] = useState<LanStatus | null>(null);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
   const [password, setPassword] = useState("");
   const [rememberLogin, setRememberLogin] = useState(true);
   const [otpCode, setOtpCode] = useState("");
@@ -838,6 +853,14 @@ function App() {
     invoke<SyncServiceStatus>("ensure_sync_service_running")
       .then((status) => setServiceStatus(status))
       .catch((err) => setWarning(t("toast.syncServiceAutoStartFailed", { error: String(err) })));
+    invoke<AppUpdateInfo>("check_app_update")
+      .then((info) => {
+        setAppUpdate(info);
+        if (info.hasUpdate) {
+          setMessage(t("auth.updateAvailableToast", { version: info.latestVersion }));
+        }
+      })
+      .catch(() => undefined);
   }, [isAuthenticated]);
 
   // Whether Host is currently configured in saved config
@@ -1060,6 +1083,43 @@ function App() {
     } catch (err) {
       setLanStatus(null);
       setWarning(t("toast.lanStatusFailed", { error: String(err) }));
+    }
+  }
+
+  async function checkAppUpdate(manual = true) {
+    setUpdateChecking(true);
+    if (manual) {
+      setError(null);
+      setMessage(null);
+    }
+    try {
+      const info = await invoke<AppUpdateInfo>("check_app_update");
+      setAppUpdate(info);
+      if (manual) {
+        setMessage(
+          info.hasUpdate
+            ? t("auth.updateAvailableToast", { version: info.latestVersion })
+            : t("auth.upToDate", { version: info.currentVersion }),
+        );
+      }
+    } catch (err) {
+      if (manual) setError(String(err));
+    } finally {
+      setUpdateChecking(false);
+    }
+  }
+
+  async function installAppUpdate() {
+    setUpdateInstalling(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const installerPath = await invoke<string>("install_app_update");
+      setMessage(t("auth.updateLaunchedToast", { path: installerPath }));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setUpdateInstalling(false);
     }
   }
 
@@ -3372,6 +3432,57 @@ function App() {
                     <span className="stat-key">{t("auth.method")}</span>
                     <span className="stat-val">{authStatus?.method ?? "-"}</span>
                   </div>
+                </div>
+              </section>
+              <section className="card">
+                <div className="card-header">
+                  <div>
+                    <h2 className="card-title">{t("auth.updateTitle")}</h2>
+                    <p className="card-desc">{t("auth.updateDesc")}</p>
+                  </div>
+                  {appUpdate ? (
+                    <span className={`badge ${appUpdate.hasUpdate ? "badge-info" : "badge-success"}`}>
+                      {appUpdate.hasUpdate
+                        ? `v${appUpdate.currentVersion} → v${appUpdate.latestVersion}`
+                        : `v${appUpdate.currentVersion}`}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="stats-list">
+                  <div className="stat-item">
+                    <span className="stat-key">{t("auth.currentVersion")}</span>
+                    <span className="stat-val mono">
+                      v{appUpdate?.currentVersion ?? "0.1.0"}
+                    </span>
+                  </div>
+                  <div className="stat-item">
+                    <span className="stat-key">{t("auth.latestVersion")}</span>
+                    <span className="stat-val mono">
+                      v{appUpdate?.latestVersion ?? appUpdate?.currentVersion ?? "0.1.0"}
+                    </span>
+                  </div>
+                </div>
+                <div className="button-row" style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={updateChecking || updateInstalling}
+                    onClick={() => checkAppUpdate(true)}
+                  >
+                    {updateChecking ? t("auth.checkingUpdate") : t("auth.checkUpdate")}
+                  </button>
+                  {appUpdate?.hasUpdate && appUpdate.assetUrl ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={updateInstalling || updateChecking}
+                      onClick={installAppUpdate}
+                    >
+                      {updateInstalling
+                        ? t("auth.installingUpdate")
+                        : t("auth.installUpdate", { version: appUpdate.latestVersion })}
+                    </button>
+                  ) : null}
                 </div>
               </section>
               <section className="card">

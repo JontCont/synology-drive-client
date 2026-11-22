@@ -11,6 +11,7 @@ mod storage;
 mod sync_model;
 mod sync_state;
 mod sync_service;
+mod updater;
 mod watcher;
 
 #[cfg(debug_assertions)]
@@ -816,6 +817,20 @@ async fn get_lan_status(app: tauri::AppHandle) -> Result<lan::LanStatus, String>
 }
 
 #[tauri::command]
+async fn check_app_update() -> Result<updater::AppUpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(updater::check_for_update)
+        .await
+        .map_err(|e| format!("檢查更新失敗：{e}"))?
+}
+
+#[tauri::command]
+async fn install_app_update() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(updater::download_and_install_update)
+        .await
+        .map_err(|e| format!("安裝更新失敗：{e}"))?
+}
+
+#[tauri::command]
 async fn list_nas_folders(
     auth_state: State<'_, auth::AuthState>,
     path: String,
@@ -1434,6 +1449,8 @@ pub fn run() {
             test_nas_host,
             test_lan_host,
             get_lan_status,
+            check_app_update,
+            install_app_update,
             init_sync_storage,
             get_sync_storage_info,
             enqueue_sync_operation,
