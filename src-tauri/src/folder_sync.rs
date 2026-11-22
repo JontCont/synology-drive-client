@@ -5,7 +5,7 @@
 //! 同步過的檔案在一邊被刪除時，另一邊會移到資源回收桶/回收筒（不是永久刪除）。
 //! 內容衝突時兩邊都保留；NAS 端被覆蓋前一律保留歷史版本。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -960,21 +960,23 @@ fn is_session_error(err: &str) -> bool {
 // 同步流程
 // ---------------------------------------------------------------------------
 
+/// 由淺到深（Breadth-First）平行列出 NAS 目錄樹；每列出一個批次就透過 `on_batch` 即時回報，
+/// 讓呼叫端能在掃描第一層時就立刻在本機建立資料夾與雲端 Placeholder，不用等數千個子資料夾全部掃完
 fn list_remote_tree(
     auth: &auth::AuthState,
     remote_root: &str,
     cancel: &AtomicBool,
-    mut on_progress: impl FnMut(u64),
+    mut on_batch: impl FnMut(&[RemoteNode], u64),
 ) -> Result<Vec<RemoteNode>, String> {
     let mut nodes = Vec::new();
-    let mut pending = vec![remote_root.to_string()];
+    let mut pending: VecDeque<String> = VecDeque::from([remote_root.to_string()]);
     let mut file_count = 0u64;
     while !pending.is_empty() {
         if cancel.load(Ordering::SeqCst) {
             return Ok(nodes);
         }
         let take = pending.len().min(LIST_REMOTE_CONCURRENCY);
-        let batch: Vec<String> = pending.drain(pending.len() - take..).collect();
+        let batch: Vec<String> = pending.drain(..take).collect();
         let results: Vec<Result<Vec<auth::RemoteEntry>, String>> = if batch.len() == 1 {
             vec![auth.list_remote_entries(&batch[0])]
         } else {
@@ -989,10 +991,11 @@ fn list_remote_tree(
                     .collect()
             })
         };
+        let batch_start = nodes.len();
         for entries in results {
             for entry in entries? {
                 if entry.is_dir {
-                    pending.push(entry.path.clone());
+                    pending.push_back(entry.path.clone());
                 } else {
                     file_count += 1;
                 }
@@ -1003,9 +1006,70 @@ fn list_remote_tree(
                 });
             }
         }
-        on_progress(file_count);
+        on_batch(&nodes[batch_start..], file_count);
     }
     Ok(nodes)
+}
+
+/// 在列出 NAS 目錄的同時，由淺到深即時在本機建立尚不存在的資料夾與 0-byte 雲端 Placeholder。
+/// 如此一來，即使 NAS 有數千個檔案，第一層的資料夾與雲端檔案也能在 1 秒內出現在檔案總管中。
+fn materialize_batch_placeholders(
+    local_root: &Path,
+    remote_root: &str,
+    batch: &[RemoteNode],
+    sync_deletes: bool,
+    baseline: &mut Baseline,
+    since_save: &mut u64,
+) -> u64 {
+    let root = remote_root.trim_end_matches('/');
+    let mut created_files = 0u64;
+    for node in batch {
+        let Some(relative) = node.path.strip_prefix(root).map(|r| r.trim_start_matches('/')) else {
+            continue;
+        };
+        let segments: Vec<String> = relative
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(sanitize_segment)
+            .collect();
+        if segments.is_empty() || segments.iter().any(|s| is_reserved_windows_name(s)) {
+            continue;
+        }
+        let key = key_of(&segments);
+        // 若開啟「刪除也同步」且此項目曾同步過，需留給 build_plan 判斷是否為本機刪除，不可直接補回
+        if sync_deletes && (baseline.files.contains_key(&key) || baseline.dirs.contains(&key)) {
+            continue;
+        }
+        let local_path = rel_to_path(local_root, &segments);
+        if local_path.exists() {
+            continue;
+        }
+        if node.is_dir {
+            if std::fs::create_dir_all(&local_path).is_ok() {
+                baseline.dirs.insert(key);
+            }
+        } else {
+            if let Some(parent) = local_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let size = node.size.unwrap_or(0);
+            if cloud_status::create_placeholder(&local_path, &node.path, size).is_ok() {
+                if let Ok(meta) = std::fs::metadata(&local_path) {
+                    baseline.files.insert(
+                        key,
+                        FileBase {
+                            local_size: meta.len(),
+                            local_mtime_ms: mtime_ms(&meta),
+                            remote_size: size,
+                        },
+                    );
+                    created_files += 1;
+                    *since_save += 1;
+                }
+            }
+        }
+    }
+    created_files
 }
 
 fn run_sync(
@@ -1034,18 +1098,47 @@ fn run_sync(
     }
     let remote_root = folder.remote_path.trim_end_matches('/').to_string();
 
-    // 1) 列出兩邊。人在區網時先用區網位址；用區網位址列出失敗（例如換了網路）就退回一般位址再試一次
+    // 1) 列出兩邊（由淺到深 Breadth-First）。啟用雲端檔案且允許下載時，每掃完一層就立即在本機建立資料夾與 0-byte 雲端 Placeholder，
+    // 讓檔案總管在第一秒就能看到第一層檔案，不必等數千個子資料夾全部掃完才開始建立。
     crate::lan::refresh(app);
-    let on_progress = |files: u64| {
-        state.update(&folder.id, |p| p.total_files = files);
+    let mut baseline = sync_state::load(app, &folder.id);
+    let use_placeholders = app
+        .state::<cloud_status::CloudStatusState>()
+        .is_enabled(&folder.id);
+    let can_download = folder.mode != config::SYNC_MODE_UPLOAD_ONLY;
+    let mut pre_created_files = 0u64;
+    let mut pre_since_save = 0u64;
+    let mut on_batch = |batch: &[RemoteNode], files: u64| {
+        if use_placeholders && can_download {
+            let added = materialize_batch_placeholders(
+                &local_root,
+                &remote_root,
+                batch,
+                folder.sync_deletes,
+                &mut baseline,
+                &mut pre_since_save,
+            );
+            pre_created_files += added;
+            if pre_since_save >= PLACEHOLDER_SAVE_EVERY {
+                let _ = sync_state::save(app, &folder.id, &baseline);
+                pre_since_save = 0;
+            }
+        }
+        state.update(&folder.id, |p| {
+            p.total_files = files;
+            p.done_files = pre_created_files;
+        });
     };
-    let remote = match list_remote_tree(&auth, &remote_root, cancel, on_progress) {
+    let remote = match list_remote_tree(&auth, &remote_root, cancel, &mut on_batch) {
         Err(_) if auth.lan_active() => {
             auth.set_lan_origin(None);
-            list_remote_tree(&auth, &remote_root, cancel, on_progress)?
+            list_remote_tree(&auth, &remote_root, cancel, &mut on_batch)?
         }
         other => other?,
     };
+    if pre_since_save > 0 {
+        let _ = sync_state::save(app, &folder.id, &baseline);
+    }
     if cancel.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -1055,7 +1148,6 @@ fn run_sync(
     }
 
     // 2) 比對產生計畫
-    let mut baseline = sync_state::load(app, &folder.id);
     let plan = build_plan(&folder.mode, folder.sync_deletes, &remote_root, &remote, &local, &baseline)?;
 
     // 保護：一次要刪除的檔案佔同步紀錄的一半以上時，多半是列表異常或資料夾被整個搬走/中斷連線，
@@ -1070,9 +1162,6 @@ fn run_sync(
     }
     let file_items = plan.iter().filter(|i| !i.is_dir).count() as u64;
     // 啟用雲端檔案時，NAS 的檔案只建立 placeholder，不下載內容，所以不計入傳輸量
-    let use_placeholders = app
-        .state::<cloud_status::CloudStatusState>()
-        .is_enabled(&folder.id);
     let transfer_bytes: u64 = plan
         .iter()
         .filter(|i| i.action.is_transfer())
@@ -1089,6 +1178,7 @@ fn run_sync(
         p.phase = PHASE_SYNCING.to_string();
         p.total_files = file_items;
         p.total_bytes = transfer_bytes;
+        p.done_files = 0;
     });
 
     // 檔案總管的狀態圖示：有檔案要傳輸時資料夾顯示「同步中」，每個檔案完成後立即顯示「已同步」
@@ -1103,6 +1193,12 @@ fn run_sync(
     let result = execute_plan(
         app, state, folder, &auth, &local_root, &plan, &positions, &mut baseline, cancel, show_icons,
     );
+    if pre_created_files > 0 {
+        state.update(&folder.id, |p| {
+            p.done_files += pre_created_files;
+            p.skipped_files = p.skipped_files.saturating_sub(pre_created_files);
+        });
+    }
     let completed = result.is_ok() && !cancel.load(Ordering::SeqCst);
     if completed {
         // 兩邊都已不存在的項目不再保留紀錄
