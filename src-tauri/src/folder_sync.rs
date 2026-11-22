@@ -994,6 +994,20 @@ fn run_sync(
     let _ = storage::init(app);
     let local_root = PathBuf::from(&folder.local_path);
     std::fs::create_dir_all(&local_root).map_err(|e| format!("無法建立本機資料夾：{e}"))?;
+    if config::load(app).map(|c| c.explorer_status_icons).unwrap_or(true) {
+        let downloader: cloud_status::Downloader = {
+            let app = app.clone();
+            std::sync::Arc::new(move |remote_path: &str, dest: &std::path::Path| {
+                app.state::<auth::AuthState>().download_remote_file(remote_path, dest)
+            })
+        };
+        let _ = app.state::<cloud_status::CloudStatusState>().enable(
+            &folder.id,
+            &folder.name,
+            &folder.local_path,
+            downloader,
+        );
+    }
     let remote_root = folder.remote_path.trim_end_matches('/').to_string();
 
     // 1) 列出兩邊。人在區網時先用區網位址；用區網位址列出失敗（例如換了網路）就退回一般位址再試一次
@@ -1439,28 +1453,25 @@ fn download_one(
         conflict_copy = true;
     }
 
-    // 先寫入暫存檔，完成並確認大小後才改名，避免中斷後留下不完整的檔案
-    // 啟用雲端檔案：只在本機建立 placeholder（雲朵圖示、不佔空間），打開檔案時才從 NAS 下載。
-    // 建立失敗（例如路徑過長、非 NTFS）時退回完整下載
-    if let Some(size) = expected {
-        if app
-            .state::<cloud_status::CloudStatusState>()
-            .is_enabled(&folder.id)
-        {
-            // 走到這裡時本機沒有未同步的修改（有衝突的已改名成衝突副本），舊檔可直接取代
-            if dest.exists() && std::fs::remove_file(dest).is_err() {
-                return Err("無法取代舊的本機檔案".to_string());
-            }
-            if cloud_status::create_placeholder(dest, &item.remote_path, size).is_ok() {
-                return Ok(Some(Transfer {
-                    bytes: 0,
-                    remote_size: size,
-                    uploaded: false,
-                    placeholder: true,
-                    conflict_copy,
-                }));
-            }
+    // 啟用雲端檔案：只依 Drive 檔案清單資訊在本機建立 placeholder（雲朵圖示、不佔空間、不向 Drive 下載檔案內容），
+    // 等使用者在檔案總管打開檔案時才即時從 NAS 下載
+    if app
+        .state::<cloud_status::CloudStatusState>()
+        .is_enabled(&folder.id)
+    {
+        let size = expected.unwrap_or(0);
+        // 走到這裡時本機沒有未同步的修改（有衝突的已改名成衝突副本），舊檔可直接取代
+        if dest.exists() && std::fs::remove_file(dest).is_err() {
+            return Err("無法取代舊的本機檔案".to_string());
         }
+        cloud_status::create_placeholder(dest, &item.remote_path, size)?;
+        return Ok(Some(Transfer {
+            bytes: 0,
+            remote_size: size,
+            uploaded: false,
+            placeholder: true,
+            conflict_copy,
+        }));
     }
 
     let temp = dir.join(format!("{file_name}{TEMP_SUFFIX}"));
