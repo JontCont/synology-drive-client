@@ -86,6 +86,17 @@ pub struct QueueSnapshot {
     pub matched: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DehydrateFolderResult {
+    pub folder_id: String,
+    pub dehydrated_files: u64,
+    pub already_dehydrated_files: u64,
+    pub freed_bytes: u64,
+    pub skipped_unsynced: u64,
+    pub skipped_pinned_or_open: u64,
+}
+
 fn queue_action_label(action: &Action) -> Option<&'static str> {
     Some(match action {
         Action::Download => "download",
@@ -345,6 +356,99 @@ impl SyncRunState {
             })
             .map_err(|e| format!("啟動同步失敗：{e}"))?;
         Ok(())
+    }
+
+    /// 將指定同步資料夾內「已同步且本機未修改」的檔案轉為僅雲端 placeholder，釋放本機磁碟空間。
+    /// 尚未同步到 NAS 或本機有未上傳修改的檔案一律略過，避免遺失本機資料。
+    pub fn dehydrate_folder(
+        &self,
+        app: &AppHandle,
+        folder_id: &str,
+    ) -> Result<DehydrateFolderResult, String> {
+        let cfg = config::load(app)?;
+        if !cfg.explorer_status_icons {
+            return Err("請先在進階設定啟用「在檔案總管顯示同步狀態圖示」，才能將檔案轉為雲端檔案並釋放空間".to_string());
+        }
+        let folder = cfg
+            .sync_folders
+            .iter()
+            .find(|f| f.id == folder_id)
+            .ok_or_else(|| "找不到指定的同步資料夾".to_string())?;
+        if self.is_running(folder_id) {
+            return Err("此資料夾正在同步中，請等同步完成後再釋放空間".to_string());
+        }
+        if !app
+            .state::<cloud_status::CloudStatusState>()
+            .is_enabled(folder_id)
+        {
+            return Err("此資料夾尚未連線至 Windows 雲端同步根（請確認已登入且資料夾未暫停）".to_string());
+        }
+
+        let local_root = PathBuf::from(&folder.local_path);
+        if !local_root.is_dir() {
+            return Err("本機資料夾不存在".to_string());
+        }
+        let remote_root = folder.remote_path.trim_end_matches('/');
+        let mut baseline = sync_state::load(app, folder_id);
+        let cancel = AtomicBool::new(false);
+        let local_nodes = scan_local(&local_root, &cancel);
+
+        let mut result = DehydrateFolderResult {
+            folder_id: folder_id.to_string(),
+            ..Default::default()
+        };
+        let mut baseline_updated = false;
+
+        for node in local_nodes.iter().filter(|n| !n.is_dir) {
+            let key = key_of(&node.rel);
+            let local_path = rel_to_path(&local_root, &node.rel);
+            let Some(base) = baseline.files.get(&key).cloned() else {
+                if cloud_status::is_dehydrated(&local_path) == Some(true) {
+                    result.already_dehydrated_files += 1;
+                } else {
+                    result.skipped_unsynced += 1;
+                }
+                continue;
+            };
+            let lf = LocalFile {
+                size: node.size,
+                mtime_ms: node.mtime_ms,
+            };
+            if local_changed(&lf, &base) {
+                result.skipped_unsynced += 1;
+                continue;
+            }
+            let remote_path = cloud_status::file_remote_path(&local_path)
+                .unwrap_or_else(|| format!("{remote_root}/{}", node.rel.join("/")));
+            match cloud_status::dehydrate_file(&local_path, Some(&remote_path)) {
+                Ok(Some(freed)) => {
+                    result.dehydrated_files += 1;
+                    result.freed_bytes += freed;
+                    if let Ok(meta) = std::fs::metadata(&local_path) {
+                        baseline.files.insert(
+                            key,
+                            FileBase {
+                                local_size: meta.len(),
+                                local_mtime_ms: mtime_ms(&meta),
+                                remote_size: base.remote_size,
+                            },
+                        );
+                        baseline_updated = true;
+                    }
+                }
+                Ok(None) => {
+                    result.already_dehydrated_files += 1;
+                }
+                Err(_) => {
+                    result.skipped_pinned_or_open += 1;
+                }
+            }
+        }
+
+        if baseline_updated {
+            let _ = sync_state::save(app, folder_id, &baseline);
+        }
+        Ok(result)
     }
 }
 
@@ -927,11 +1031,16 @@ fn run_sync(
         ));
     }
     let file_items = plan.iter().filter(|i| !i.is_dir).count() as u64;
+    // 啟用雲端檔案時，NAS 的檔案只建立 placeholder，不下載內容，所以不計入傳輸量
+    let use_placeholders = app
+        .state::<cloud_status::CloudStatusState>()
+        .is_enabled(&folder.id);
     let transfer_bytes: u64 = plan
         .iter()
         .filter(|i| i.action.is_transfer())
         .map(|i| match i.action {
             Action::Upload | Action::UploadVersion => i.local.as_ref().map(|l| l.size).unwrap_or(0),
+            _ if use_placeholders => 0,
             _ => i.remote.as_ref().and_then(|r| r.size).unwrap_or(0),
         })
         .sum();
@@ -1110,6 +1219,29 @@ fn execute_plan(
                 if let Some(pos) = queue_pos {
                     state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
                 }
+                if show_icons
+                    && !item.is_dir
+                    && item.both_present
+                    && matches!(item.action, Action::Noop | Action::RecordBaseline)
+                {
+                    if folder.auto_dehydrate {
+                        if cloud_status::dehydrate_file(&local_path, Some(&item.remote_path)).is_err() {
+                            cloud_status::mark_file(&local_path, &item.remote_path, true);
+                        }
+                    } else {
+                        cloud_status::mark_file(&local_path, &item.remote_path, true);
+                    }
+                    if let (Ok(meta), Some(r)) = (std::fs::metadata(&local_path), &item.remote) {
+                        baseline.files.insert(
+                            item.key.clone(),
+                            FileBase {
+                                local_size: meta.len(),
+                                local_mtime_ms: mtime_ms(&meta),
+                                remote_size: r.size.unwrap_or(meta.len()),
+                            },
+                        );
+                    }
+                }
                 state.update(&folder.id, |p| p.skipped_files += 1);
             }
             Ok(Some(transfer)) => {
@@ -1118,7 +1250,17 @@ fn execute_plan(
                     state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
                 }
                 if show_icons {
-                    cloud_status::mark_file(&local_path, true);
+                    // 雲端 placeholder 建立時就已是「已同步」，不要再開啟檔案寫入而觸發下載；
+                    // 本機上傳（或退回完整下載）的檔案需寫入 NAS 路徑 blob，讓檔案總管與 App 都能釋放空間
+                    if !transfer.placeholder {
+                        if transfer.uploaded && folder.auto_dehydrate {
+                            if cloud_status::dehydrate_file(&local_path, Some(&item.remote_path)).is_err() {
+                                cloud_status::mark_file(&local_path, &item.remote_path, true);
+                            }
+                        } else {
+                            cloud_status::mark_file(&local_path, &item.remote_path, true);
+                        }
+                    }
                 }
                 // 狀態圖示標示後才讀取本機資訊，避免標示動作造成的差異被當成「本機有改動」
                 if let Ok(meta) = std::fs::metadata(&local_path) {
@@ -1221,6 +1363,8 @@ struct Transfer {
     /// 傳輸後 NAS 端的檔案大小（寫入同步紀錄）
     remote_size: u64,
     uploaded: bool,
+    /// 只建立了雲端 placeholder，內容尚未下載
+    placeholder: bool,
     conflict_copy: bool,
 }
 
@@ -1229,6 +1373,9 @@ fn upload_one(
     local_path: &Path,
     item: &PlanItem,
 ) -> Result<Option<Transfer>, String> {
+    if cloud_status::is_dehydrated(local_path) == Some(true) {
+        return Err("此檔案在本機僅為雲端 Placeholder（尚未下載內容），無法上傳".to_string());
+    }
     let planned = item
         .local
         .as_ref()
@@ -1245,6 +1392,7 @@ fn upload_one(
         remote_size: planned.size,
         uploaded: true,
         conflict_copy: false,
+        placeholder: false,
     }))
 }
 
@@ -1292,6 +1440,29 @@ fn download_one(
     }
 
     // 先寫入暫存檔，完成並確認大小後才改名，避免中斷後留下不完整的檔案
+    // 啟用雲端檔案：只在本機建立 placeholder（雲朵圖示、不佔空間），打開檔案時才從 NAS 下載。
+    // 建立失敗（例如路徑過長、非 NTFS）時退回完整下載
+    if let Some(size) = expected {
+        if app
+            .state::<cloud_status::CloudStatusState>()
+            .is_enabled(&folder.id)
+        {
+            // 走到這裡時本機沒有未同步的修改（有衝突的已改名成衝突副本），舊檔可直接取代
+            if dest.exists() && std::fs::remove_file(dest).is_err() {
+                return Err("無法取代舊的本機檔案".to_string());
+            }
+            if cloud_status::create_placeholder(dest, &item.remote_path, size).is_ok() {
+                return Ok(Some(Transfer {
+                    bytes: 0,
+                    remote_size: size,
+                    uploaded: false,
+                    placeholder: true,
+                    conflict_copy,
+                }));
+            }
+        }
+    }
+
     let temp = dir.join(format!("{file_name}{TEMP_SUFFIX}"));
     let _ = std::fs::remove_file(&temp);
     let bytes = match auth.download_remote_file(&item.remote_path, &temp) {
@@ -1321,6 +1492,7 @@ fn download_one(
         bytes,
         remote_size: expected.unwrap_or(bytes),
         uploaded: false,
+        placeholder: false,
         conflict_copy,
     }))
 }

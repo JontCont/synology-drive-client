@@ -75,11 +75,18 @@ fn ensure_cloud_status(
         cloud.disconnect_all();
         return Ok(());
     }
+    // 打開雲端檔案（hydration）時，由此向 NAS 下載內容
+    let downloader: cloud_status::Downloader = {
+        let app = app.clone();
+        std::sync::Arc::new(move |remote_path: &str, dest: &std::path::Path| {
+            app.state::<auth::AuthState>().download_remote_file(remote_path, dest)
+        })
+    };
     let mut errors = Vec::new();
     for folder in &cfg.sync_folders {
         if folder.paused {
             cloud.disconnect(&folder.id);
-        } else if let Err(err) = cloud.enable(&folder.id, &folder.name, &folder.local_path) {
+        } else if let Err(err) = cloud.enable(&folder.id, &folder.name, &folder.local_path, downloader.clone()) {
             errors.push(format!("「{}」{err}", folder.name));
         }
     }
@@ -655,21 +662,38 @@ async fn update_sync_folder(
     mode: Option<String>,
     paused: Option<bool>,
     sync_deletes: Option<bool>,
+    auto_dehydrate: Option<bool>,
 ) -> Result<config::AppConfig, String> {
-    let cfg = config::update_folder(&app, &id, mode.clone(), paused, sync_deletes)?;
+    let cfg = config::update_folder(&app, &id, mode.clone(), paused, sync_deletes, auto_dehydrate)?;
     let _ = ensure_watcher(&app, &watcher_state, &auth_state);
     let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
     if paused == Some(true) {
         sync_run_state.cancel(&id);
     }
-    // 繼續同步或切換模式後，補做一次同步，並確保同步服務在執行
-    if paused == Some(false) || mode.is_some() {
+    // 繼續同步、切換模式或開啟自動釋放空間後，補做一次同步，並確保同步服務在執行
+    if paused == Some(false) || mode.is_some() || auto_dehydrate == Some(true) {
         if auth_state.status().map(|s| s.stage == "authenticated").unwrap_or(false) {
             let _ = sync_run_state.start(&app, &id);
             let _ = ensure_sync_service(&app, &sync_service_state, &watcher_state, &auth_state);
         }
     }
     Ok(cfg)
+}
+
+#[tauri::command]
+async fn dehydrate_sync_folder(
+    app: tauri::AppHandle,
+    auth_state: State<'_, auth::AuthState>,
+    cloud_state: State<'_, cloud_status::CloudStatusState>,
+    id: String,
+) -> Result<folder_sync::DehydrateFolderResult, String> {
+    let _ = ensure_cloud_status(&app, &cloud_state, &auth_state);
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<folder_sync::SyncRunState>()
+            .dehydrate_folder(&app, &id)
+    })
+    .await
+    .map_err(|e| format!("釋放空間失敗：{e}"))?
 }
 
 #[tauri::command]
@@ -1401,6 +1425,7 @@ pub fn run() {
             ensure_explorer_icons,
             start_folder_sync,
             cancel_folder_sync,
+            dehydrate_sync_folder,
             get_sync_progress,
             get_sync_queue,
             update_sync_folder,
