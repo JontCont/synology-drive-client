@@ -38,9 +38,29 @@ mod imp {
     use super::Downloader;
 
     const PROVIDER_NAME: &str = "SynologyDriveClient";
-    const ICON: &str = "%SystemRoot%\\system32\\imageres.dll,197";
+    const FALLBACK_ICON: &str = "%SystemRoot%\\system32\\imageres.dll,-3";
+    const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.ico");
     /// placeholder 的 blob 上限為 4 KiB，NAS 路徑超過時改為一般下載
     const MAX_BLOB_LEN: usize = 4096;
+
+    /// 將內建的 App 圖示寫出至本機固定路徑（`%LOCALAPPDATA%\com.synology.driveclient\sync-root.ico`），
+    /// 供 Windows 檔案總管同步根與左側導覽列顯示圖示（原本的 `imageres.dll,197` 在 Win10/11 是空白陰影圖層）
+    fn sync_root_icon_resource() -> String {
+        let base_dir = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("com.synology.driveclient");
+        if std::fs::create_dir_all(&base_dir).is_ok() {
+            let ico_path = base_dir.join("sync-root.ico");
+            let need_write = std::fs::metadata(&ico_path)
+                .map(|m| m.len() != APP_ICON_BYTES.len() as u64)
+                .unwrap_or(true);
+            if (!need_write || std::fs::write(&ico_path, APP_ICON_BYTES).is_ok()) && ico_path.is_file() {
+                return format!("{},0", ico_path.to_string_lossy());
+            }
+        }
+        FALLBACK_ICON.to_string()
+    }
     /// 寫入 hydration 資料的區塊大小（必須是 4 KiB 的倍數，最後一塊除外）
     const HYDRATE_CHUNK: usize = 1024 * 1024;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -175,12 +195,13 @@ mod imp {
             // Register 可重複呼叫，已存在時會更新註冊內容。
             // Full：打開檔案時整個檔案一次下載；AlwaysFull：目錄內容由同步引擎預先建立 placeholder，
             // 不需要 Windows 即時列舉；允許釘選（永遠保留在此裝置）與釋放空間。
+            let icon_resource = sync_root_icon_resource();
             let info = SyncRootInfo::default()
                 .with_display_name(display_name)
                 .with_hydration_type(HydrationType::Full)
                 .with_hydration_policy(HydrationPolicy::AutoDehydrationAllowed)
                 .with_population_type(PopulationType::AlwaysFull)
-                .with_icon(ICON)
+                .with_icon(&icon_resource)
                 .with_version("2.0.0")
                 .with_allow_pinning(true)
                 .with_path(local_path)
