@@ -342,11 +342,6 @@ mod imp {
         let wanted_blob = remote_path
             .filter(|p| !p.is_empty() && p.len() <= MAX_BLOB_LEN)
             .map(str::as_bytes);
-        if wanted_blob.is_some() {
-            if let Some(parent) = path.parent() {
-                let _ = mark_path(parent, None, false);
-            }
-        }
         let mut placeholder = open_win32(path, false).map_err(|e| format!("開啟失敗：{e}"))?;
         let state = placeholder
             .state()
@@ -664,6 +659,11 @@ pub fn mark_directories(root: &Path, in_sync: bool) {
         }
     }
     let _ = imp::mark_path(root, None, in_sync);
+}
+
+/// 只標記單一資料夾（不遞迴子資料夾），用於增量同步後更新受影響的父層資料夾狀態
+pub fn mark_directory(path: &Path, in_sync: bool) {
+    let _ = imp::mark_path(path, None, in_sync);
 }
 
 pub fn mark_file(path: &Path, remote_path: &str, in_sync: bool) {

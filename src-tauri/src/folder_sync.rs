@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -26,8 +26,12 @@ const TEMP_SUFFIX: &str = ".synodl-part";
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASELINE_SAVE_EVERY: u64 = 25;
 const PLACEHOLDER_SAVE_EVERY: u64 = 500;
-/// 列出 NAS 目錄樹時每一波平行請求的子資料夾數量上限
+/// 列出 NAS 目錄樹時工作池的平行執行緒數量
 const LIST_REMOTE_CONCURRENCY: usize = 8;
+/// 列出單一 NAS 目錄失敗時的重試退避時間（總計最多嘗試 3 次）
+const LIST_RETRY_BACKOFF_MS: [u64; 2] = [300, 900];
+/// 連續同步錯誤的重試退避階梯：1m -> 2m -> 5m -> 10m
+const ERROR_BACKOFF_SCHEDULE_MS: [u64; 4] = [60_000, 120_000, 300_000, 600_000];
 /// 一次同步要刪除的檔案數達到這個數量（且過半）才會觸發大量刪除保護
 const MASS_DELETE_MIN: usize = 10;
 /// NTFS 與 NAS 的時間精度不同，差距在此範圍內視為沒有改動
@@ -37,6 +41,23 @@ const MTIME_TOLERANCE_MS: u64 = 2000;
 const REMOTE_POLL_MS: u64 = 5 * 60 * 1000;
 /// 本機偵測到變動後，距離上次同步結束至少要隔這段時間才會自動再同步一次
 const EVENT_COOLDOWN_MS: u64 = 30 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrigger {
+    None,
+    Incremental,
+    Full,
+}
+
+pub fn error_backoff_ms(consecutive_errors: u32) -> u64 {
+    if consecutive_errors == 0 {
+        return 0;
+    }
+    let idx = (consecutive_errors as usize)
+        .saturating_sub(1)
+        .min(ERROR_BACKOFF_SCHEDULE_MS.len() - 1);
+    ERROR_BACKOFF_SCHEDULE_MS[idx]
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -148,6 +169,7 @@ pub struct SyncRunState {
     progress: Mutex<HashMap<String, SyncProgress>>,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     queues: Mutex<HashMap<String, Vec<QueueItem>>>,
+    consecutive_errors: Mutex<HashMap<String, u32>>,
 }
 
 pub fn now_ms() -> u64 {
@@ -169,7 +191,7 @@ impl SyncRunState {
             .unwrap_or_default()
     }
 
-    /// 資料夾被移除後清掉它的進度與佇列
+    /// 資料夾被移除後清掉它的進度、佇列與錯誤退避計數
     pub fn forget(&self, folder_id: &str) {
         if let Ok(mut p) = self.progress.lock() {
             p.remove(folder_id);
@@ -179,6 +201,9 @@ impl SyncRunState {
         }
         if let Ok(mut c) = self.cancels.lock() {
             c.remove(folder_id);
+        }
+        if let Ok(mut e) = self.consecutive_errors.lock() {
+            e.remove(folder_id);
         }
     }
 
@@ -250,8 +275,62 @@ impl SyncRunState {
             .unwrap_or(false)
     }
 
-    /// 自動同步是否該啟動：從未同步過就立刻做；之後本機有變動時隔一小段時間做，否則定期檢查 NAS。
-    /// 上次失敗、出錯或被取消時一律等到下一次定期檢查，避免反覆重試與連續通知
+    /// 決定自動同步應執行增量同步、完整同步或不啟動；
+    /// 發生錯誤、部分失敗或被取消時改用指數退避重試（1m -> 2m -> 5m -> 10m，上限為 remote_poll_ms）
+    pub fn auto_sync_trigger(
+        &self,
+        folder_id: &str,
+        now_ms: u64,
+        local_dirty: bool,
+        remote_poll_ms: u64,
+        mode: &str,
+    ) -> SyncTrigger {
+        let Some(p) = self
+            .progress
+            .lock()
+            .ok()
+            .and_then(|p| p.get(folder_id).cloned())
+        else {
+            return if local_dirty && mode == config::SYNC_MODE_UPLOAD_ONLY {
+                SyncTrigger::Incremental
+            } else {
+                SyncTrigger::Full
+            };
+        };
+        if matches!(p.phase.as_str(), PHASE_LISTING | PHASE_SYNCING) {
+            return SyncTrigger::None;
+        }
+        let Some(finished) = p.finished_at_ms else {
+            return SyncTrigger::None;
+        };
+        let since = now_ms.saturating_sub(finished);
+        let trouble = p.phase != PHASE_DONE || p.failed_files > 0;
+        if trouble {
+            let errors = self
+                .consecutive_errors
+                .lock()
+                .ok()
+                .and_then(|e| e.get(folder_id).copied())
+                .unwrap_or(1)
+                .max(1);
+            let backoff = error_backoff_ms(errors).min(remote_poll_ms);
+            return if since >= backoff {
+                SyncTrigger::Full
+            } else {
+                SyncTrigger::None
+            };
+        }
+        if since >= remote_poll_ms {
+            SyncTrigger::Full
+        } else if local_dirty && since >= EVENT_COOLDOWN_MS {
+            SyncTrigger::Incremental
+        } else {
+            SyncTrigger::None
+        }
+    }
+
+    /// 自動同步是否該啟動（相容舊呼叫端與測試）
+    #[cfg(test)]
     pub fn auto_sync_due(
         &self,
         folder_id: &str,
@@ -259,23 +338,30 @@ impl SyncRunState {
         local_dirty: bool,
         remote_poll_ms: u64,
     ) -> bool {
-        let Some(p) = self
+        self.auto_sync_trigger(
+            folder_id,
+            now_ms,
+            local_dirty,
+            remote_poll_ms,
+            config::SYNC_MODE_BIDIRECTIONAL,
+        ) != SyncTrigger::None
+    }
+
+    fn record_completion(&self, folder_id: &str, phase: &str) {
+        let failed_files = self
             .progress
             .lock()
             .ok()
-            .and_then(|p| p.get(folder_id).cloned())
-        else {
-            return true;
-        };
-        if matches!(p.phase.as_str(), PHASE_LISTING | PHASE_SYNCING) {
-            return false;
+            .and_then(|p| p.get(folder_id).map(|s| s.failed_files))
+            .unwrap_or(0);
+        if let Ok(mut errors) = self.consecutive_errors.lock() {
+            if phase == PHASE_DONE && failed_files == 0 {
+                errors.insert(folder_id.to_string(), 0);
+            } else {
+                let entry = errors.entry(folder_id.to_string()).or_insert(0);
+                *entry = entry.saturating_add(1);
+            }
         }
-        let Some(finished) = p.finished_at_ms else {
-            return false;
-        };
-        let since = now_ms.saturating_sub(finished);
-        let trouble = p.phase != PHASE_DONE || p.failed_files > 0;
-        since >= remote_poll_ms || (local_dirty && !trouble && since >= EVENT_COOLDOWN_MS)
     }
 
     pub fn cancel(&self, folder_id: &str) {
@@ -302,14 +388,14 @@ impl SyncRunState {
         }
     }
 
-    /// 在背景執行緒開始（或重新）同步指定資料夾；同一資料夾同時只會有一個同步
-    pub fn start(&self, app: &AppHandle, folder_id: &str) -> Result<(), String> {
+    fn prepare_start(&self, app: &AppHandle, folder_id: &str) -> Result<(config::SyncFolder, Arc<AtomicBool>), String> {
         let cfg = config::load(app)?;
         let folder = cfg
             .sync_folders
             .iter()
             .find(|f| f.id == folder_id)
-            .ok_or_else(|| "找不到指定的同步資料夾".to_string())?;
+            .ok_or_else(|| "找不到指定的同步資料夾".to_string())?
+            .clone();
         if folder.paused {
             return Err("此資料夾已暫停，請先繼續同步".to_string());
         }
@@ -334,30 +420,41 @@ impl SyncRunState {
                     ..Default::default()
                 },
             );
+        Ok((folder, cancel))
+    }
 
+    /// 在背景執行緒開始（或重新）同步指定資料夾；同一資料夾同時只會有一個同步
+    pub fn start(&self, app: &AppHandle, folder_id: &str) -> Result<(), String> {
+        let (folder, cancel) = self.prepare_start(app, folder_id)?;
         let app = app.clone();
-        let folder = folder.clone();
         std::thread::Builder::new()
             .name(format!("sync-{folder_id}"))
             .spawn(move || {
                 let state = app.state::<SyncRunState>();
                 let outcome = run_sync(&app, &state, &folder, &cancel);
-                let (phase, last_error) = match outcome {
-                    Ok(()) if cancel.load(Ordering::SeqCst) => (PHASE_CANCELLED, None),
-                    Ok(()) => (PHASE_DONE, None),
-                    Err(err) => (PHASE_ERROR, Some(err)),
-                };
-                state.update(&folder.id, |p| {
-                    p.phase = phase.to_string();
-                    p.current_file = None;
-                    p.finished_at_ms = Some(now_ms());
-                    if last_error.is_some() {
-                        p.last_error = last_error.clone();
-                    }
-                });
-                notify_finished(&app, &state, &folder.id, &folder.name);
+                finish_sync_run(&app, &state, &folder, outcome, &cancel);
             })
             .map_err(|e| format!("啟動同步失敗：{e}"))?;
+        Ok(())
+    }
+
+    /// 針對監看事件回報的變更路徑執行增量同步（不列舉整個 NAS 目錄樹，也不掃描整個本機）
+    pub fn start_incremental(
+        &self,
+        app: &AppHandle,
+        folder_id: &str,
+        dirty_paths: Vec<String>,
+    ) -> Result<(), String> {
+        let (folder, cancel) = self.prepare_start(app, folder_id)?;
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name(format!("sync-inc-{folder_id}"))
+            .spawn(move || {
+                let state = app.state::<SyncRunState>();
+                let outcome = run_incremental_sync(&app, &state, &folder, dirty_paths, &cancel);
+                finish_sync_run(&app, &state, &folder, outcome, &cancel);
+            })
+            .map_err(|e| format!("啟動增量同步失敗：{e}"))?;
         Ok(())
     }
 
@@ -392,15 +489,19 @@ impl SyncRunState {
             return Err("本機資料夾不存在".to_string());
         }
         let remote_root = folder.remote_path.trim_end_matches('/');
-        let mut baseline = sync_state::load(app, folder_id);
+        let mut index = sync_state::SyncIndex::open(app, folder_id).ok();
+        let mut baseline = index
+            .as_ref()
+            .and_then(|idx| idx.load_baseline().ok())
+            .unwrap_or_default();
         let cancel = AtomicBool::new(false);
-        let local_nodes = scan_local(&local_root, &cancel);
+        let local_nodes = scan_local(&local_root, &cfg.exclude_patterns, &cancel);
 
         let mut result = DehydrateFolderResult {
             folder_id: folder_id.to_string(),
             ..Default::default()
         };
-        let mut baseline_updated = false;
+        let mut delta = PendingIndexDelta::default();
 
         for node in local_nodes.iter().filter(|n| !n.is_dir) {
             let key = key_of(&node.rel);
@@ -428,15 +529,13 @@ impl SyncRunState {
                     result.dehydrated_files += 1;
                     result.freed_bytes += freed;
                     if let Ok(meta) = std::fs::metadata(&local_path) {
-                        baseline.files.insert(
-                            key,
-                            FileBase {
-                                local_size: meta.len(),
-                                local_mtime_ms: mtime_ms(&meta),
-                                remote_size: base.remote_size,
-                            },
-                        );
-                        baseline_updated = true;
+                        let fb = FileBase {
+                            local_size: meta.len(),
+                            local_mtime_ms: mtime_ms(&meta),
+                            remote_size: base.remote_size,
+                        };
+                        baseline.files.insert(key.clone(), fb.clone());
+                        delta.files.push((key, fb));
                     }
                 }
                 Ok(None) => {
@@ -448,11 +547,33 @@ impl SyncRunState {
             }
         }
 
-        if baseline_updated {
-            let _ = sync_state::save(app, folder_id, &baseline);
-        }
+        delta.flush(index.as_mut());
         Ok(result)
     }
+}
+
+fn finish_sync_run(
+    app: &AppHandle,
+    state: &SyncRunState,
+    folder: &config::SyncFolder,
+    outcome: Result<(), String>,
+    cancel: &AtomicBool,
+) {
+    let (phase, last_error) = match outcome {
+        Ok(()) if cancel.load(Ordering::SeqCst) => (PHASE_CANCELLED, None),
+        Ok(()) => (PHASE_DONE, None),
+        Err(err) => (PHASE_ERROR, Some(err)),
+    };
+    state.update(&folder.id, |p| {
+        p.phase = phase.to_string();
+        p.current_file = None;
+        p.finished_at_ms = Some(now_ms());
+        if last_error.is_some() {
+            p.last_error = last_error.clone();
+        }
+    });
+    state.record_completion(&folder.id, phase);
+    notify_finished(app, state, &folder.id, &folder.name);
 }
 
 fn notify_finished(app: &AppHandle, state: &SyncRunState, folder_id: &str, name: &str) {
@@ -554,6 +675,58 @@ pub fn is_ignored_name(name: &str) -> bool {
         || matches!(lower.as_str(), "desktop.ini" | "thumbs.db" | ".ds_store")
 }
 
+/// 檢查檔名或資料夾名是否屬於系統忽略項目或使用者設定的排除樣式
+pub fn is_excluded_name(name: &str, exclude_patterns: &[String]) -> bool {
+    is_ignored_name(name) || config::matches_exclude_pattern(name, exclude_patterns)
+}
+
+fn key_has_excluded_segment(key: &str, exclude_patterns: &[String]) -> bool {
+    key.split('/')
+        .filter(|s| !s.is_empty())
+        .any(|seg| is_excluded_name(seg, exclude_patterns))
+}
+
+/// 將監看事件回報的本機路徑轉為相對於 `local_root` 的路徑區段（Windows 上不分大小寫比對前綴）；
+/// 若路徑不在 `local_root` 之下、等於 `local_root` 本身、或任何區段符合排除規則，回傳 None
+pub fn relative_segments_for_dirty_path(
+    local_root: &Path,
+    dirty_path: &str,
+    exclude_patterns: &[String],
+) -> Option<Vec<String>> {
+    let root_str = local_root.to_string_lossy();
+    let root_clean = root_str.strip_prefix(r"\\?\").unwrap_or(&root_str);
+    let path_clean = dirty_path
+        .trim()
+        .strip_prefix(r"\\?\")
+        .unwrap_or(dirty_path.trim());
+
+    let split_norm = |s: &str| -> Vec<String> {
+        s.replace('\\', "/")
+            .split('/')
+            .filter(|seg| !seg.is_empty() && *seg != ".")
+            .map(str::to_string)
+            .collect()
+    };
+
+    let root_segs = split_norm(root_clean);
+    let path_segs = split_norm(path_clean);
+    if root_segs.is_empty() || path_segs.len() <= root_segs.len() {
+        return None;
+    }
+    let prefix_matches = root_segs
+        .iter()
+        .zip(path_segs.iter())
+        .all(|(a, b)| a.to_lowercase() == b.to_lowercase());
+    if !prefix_matches {
+        return None;
+    }
+    let rel: Vec<String> = path_segs[root_segs.len()..].to_vec();
+    if rel.is_empty() || rel.iter().any(|seg| is_excluded_name(seg, exclude_patterns)) {
+        return None;
+    }
+    Some(rel)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFile {
     pub size: u64,
@@ -612,7 +785,9 @@ impl Action {
 }
 
 fn local_changed(local: &LocalFile, base: &FileBase) -> bool {
-    local.size != base.local_size || local.mtime_ms.abs_diff(base.local_mtime_ms) > MTIME_TOLERANCE_MS
+    local.size != base.local_size
+        || local.size != base.remote_size
+        || local.mtime_ms.abs_diff(base.local_mtime_ms) > MTIME_TOLERANCE_MS
 }
 
 fn remote_changed(remote: &RemoteFile, base: &FileBase) -> bool {
@@ -896,8 +1071,8 @@ fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// 掃描本機資料夾；不跟隨捷徑/符號連結，也略過暫存檔與系統自動產生的檔案
-fn scan_local(root: &Path, cancel: &AtomicBool) -> Vec<LocalNode> {
+/// 掃描本機資料夾；不跟隨捷徑/符號連結，也略過暫存檔、系統檔與符合排除規則的檔案/資料夾
+fn scan_local(root: &Path, exclude_patterns: &[String], cancel: &AtomicBool) -> Vec<LocalNode> {
     let mut nodes = Vec::new();
     let mut stack: Vec<(PathBuf, Vec<String>)> = vec![(root.to_path_buf(), Vec::new())];
     while let Some((dir, rel)) = stack.pop() {
@@ -909,7 +1084,7 @@ fn scan_local(root: &Path, cancel: &AtomicBool) -> Vec<LocalNode> {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if is_ignored_name(&name) {
+            if is_excluded_name(&name, exclude_patterns) {
                 continue;
             }
             let Ok(file_type) = entry.file_type() else {
@@ -941,6 +1116,27 @@ fn scan_local(root: &Path, cancel: &AtomicBool) -> Vec<LocalNode> {
     nodes
 }
 
+fn scan_local_subtree(
+    dir_path: &Path,
+    rel_prefix: &[String],
+    exclude_patterns: &[String],
+    cancel: &AtomicBool,
+) -> Vec<LocalNode> {
+    let mut out = vec![LocalNode {
+        rel: rel_prefix.to_vec(),
+        is_dir: true,
+        size: 0,
+        mtime_ms: 0,
+    }];
+    for mut node in scan_local(dir_path, exclude_patterns, cancel) {
+        let mut full_rel = rel_prefix.to_vec();
+        full_rel.append(&mut node.rel);
+        node.rel = full_rel;
+        out.push(node);
+    }
+    out
+}
+
 fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
     let candidate = dir.join(file_name);
     if !candidate.exists() {
@@ -956,59 +1152,295 @@ fn is_session_error(err: &str) -> bool {
     err.contains("請重新登入") || err.contains("尚未登入") || err.contains("請先登入")
 }
 
+fn is_remote_not_found_error(err: &str) -> bool {
+    err.contains("找不到這個資料夾") || err.contains("錯誤碼 1002") || err.contains("錯誤碼 1003")
+}
+
+fn sleep_or_cancel(duration: Duration, cancel: &AtomicBool) {
+    let mut remaining = duration;
+    let step = Duration::from_millis(50);
+    while !remaining.is_zero() {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let chunk = remaining.min(step);
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+}
+
+fn list_dir_with_retry(
+    auth: &auth::AuthState,
+    dir: &str,
+    cancel: &AtomicBool,
+) -> Result<Vec<auth::RemoteEntry>, String> {
+    for attempt in 0..=LIST_RETRY_BACKOFF_MS.len() {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("同步已取消".to_string());
+        }
+        match auth.list_remote_entries(dir) {
+            Ok(entries) => return Ok(entries),
+            Err(err) => {
+                if is_session_error(&err) || is_remote_not_found_error(&err) {
+                    return Err(err);
+                }
+                if attempt == LIST_RETRY_BACKOFF_MS.len() {
+                    return Err(err);
+                }
+                sleep_or_cancel(Duration::from_millis(LIST_RETRY_BACKOFF_MS[attempt]), cancel);
+            }
+        }
+    }
+    unreachable!()
+}
+
+fn filter_remote_entries(
+    entries: Vec<auth::RemoteEntry>,
+    exclude_patterns: &[String],
+) -> Vec<RemoteNode> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let name = entry.path.rsplit('/').next().unwrap_or("");
+            !is_excluded_name(name, exclude_patterns)
+        })
+        .map(|entry| RemoteNode {
+            path: entry.path,
+            is_dir: entry.is_dir,
+            size: entry.size,
+        })
+        .collect()
+}
+
+/// 盡力列出單一遠端目錄：暫時性錯誤最多重試 3 次，遠端目錄不存在視為空清單（絕不吞掉登入工作階段錯誤）
+fn list_remote_dir_best_effort(
+    auth: &auth::AuthState,
+    dir: &str,
+    exclude_patterns: &[String],
+    cancel: &AtomicBool,
+) -> Result<Vec<RemoteNode>, String> {
+    let res = match list_dir_with_retry(auth, dir, cancel) {
+        Err(err)
+            if !is_session_error(&err)
+                && !is_remote_not_found_error(&err)
+                && auth.lan_active()
+                && !cancel.load(Ordering::SeqCst) =>
+        {
+            auth.set_lan_origin(None);
+            list_dir_with_retry(auth, dir, cancel)
+        }
+        other => other,
+    };
+    match res {
+        Ok(entries) => Ok(filter_remote_entries(entries, exclude_patterns)),
+        Err(err) if is_remote_not_found_error(&err) => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQLite 增量同步紀錄緩衝
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct PendingIndexDelta {
+    files: Vec<(String, FileBase)>,
+    dirs: Vec<String>,
+    removed_files: Vec<String>,
+    removed_dirs: Vec<String>,
+}
+
+impl PendingIndexDelta {
+    fn is_empty(&self) -> bool {
+        self.files.is_empty()
+            && self.dirs.is_empty()
+            && self.removed_files.is_empty()
+            && self.removed_dirs.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.files.clear();
+        self.dirs.clear();
+        self.removed_files.clear();
+        self.removed_dirs.clear();
+    }
+
+    fn flush(&mut self, index: Option<&mut sync_state::SyncIndex>) {
+        if self.is_empty() {
+            return;
+        }
+        if let Some(idx) = index {
+            let _ = idx.upsert_batch(
+                &self.files,
+                &self.dirs,
+                &self.removed_files,
+                &self.removed_dirs,
+            );
+        }
+        self.clear();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 同步流程
 // ---------------------------------------------------------------------------
 
-/// 由淺到深（Breadth-First）平行列出 NAS 目錄樹；每列出一個批次就透過 `on_batch` 即時回報，
-/// 讓呼叫端能在掃描第一層時就立刻在本機建立資料夾與雲端 Placeholder，不用等數千個子資料夾全部掃完
+struct RemoteTreeResult {
+    nodes: Vec<RemoteNode>,
+    failed_dirs: usize,
+}
+
+struct PoolState {
+    queue: VecDeque<String>,
+    active: usize,
+    pending_batch: Vec<RemoteNode>,
+    file_count: u64,
+    failed_dirs: usize,
+    fatal_error: Option<String>,
+}
+
+/// 持續拉取式（Worker Pool）平行列出 NAS 目錄樹：
+/// 8 個背景工作執行緒從共用佇列連續取用目錄（不須等整波最慢請求結束才開始下一批），
+/// 每個請求在暫時性錯誤時重試 3 次（300ms / 900ms）；非根目錄失敗時累計 `failed_dirs` 並繼續列舉其餘目錄。
 fn list_remote_tree(
     auth: &auth::AuthState,
     remote_root: &str,
+    exclude_patterns: &[String],
     cancel: &AtomicBool,
     mut on_batch: impl FnMut(&[RemoteNode], u64),
-) -> Result<Vec<RemoteNode>, String> {
+) -> Result<RemoteTreeResult, String> {
     let mut nodes = Vec::new();
-    let mut pending: VecDeque<String> = VecDeque::from([remote_root.to_string()]);
-    let mut file_count = 0u64;
-    while !pending.is_empty() {
-        if cancel.load(Ordering::SeqCst) {
-            return Ok(nodes);
-        }
-        let take = pending.len().min(LIST_REMOTE_CONCURRENCY);
-        let batch: Vec<String> = pending.drain(..take).collect();
-        let results: Vec<Result<Vec<auth::RemoteEntry>, String>> = if batch.len() == 1 {
-            vec![auth.list_remote_entries(&batch[0])]
-        } else {
-            std::thread::scope(|s| {
-                let handles: Vec<_> = batch
-                    .iter()
-                    .map(|dir| s.spawn(move || auth.list_remote_entries(dir)))
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| Err("列出遠端目錄執行緒中斷".to_string())))
-                    .collect()
-            })
-        };
-        let batch_start = nodes.len();
-        for entries in results {
-            for entry in entries? {
-                if entry.is_dir {
-                    pending.push_back(entry.path.clone());
-                } else {
-                    file_count += 1;
+    let shared = Mutex::new(PoolState {
+        queue: VecDeque::from([remote_root.to_string()]),
+        active: 0,
+        pending_batch: Vec::new(),
+        file_count: 0,
+        failed_dirs: 0,
+        fatal_error: None,
+    });
+    let worker_cv = Condvar::new();
+    let caller_cv = Condvar::new();
+    let wait_slice = Duration::from_millis(100);
+
+    std::thread::scope(|scope| {
+        for _ in 0..LIST_REMOTE_CONCURRENCY {
+            scope.spawn(|| loop {
+                let dir = {
+                    let mut guard = match shared.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    loop {
+                        if guard.fatal_error.is_some() || cancel.load(Ordering::SeqCst) {
+                            caller_cv.notify_one();
+                            return;
+                        }
+                        if let Some(next_dir) = guard.queue.pop_front() {
+                            guard.active += 1;
+                            break next_dir;
+                        }
+                        if guard.active == 0 {
+                            caller_cv.notify_one();
+                            return;
+                        }
+                        guard = match worker_cv.wait_timeout(guard, wait_slice) {
+                            Ok((g, _)) => g,
+                            Err(_) => return,
+                        };
+                    }
+                };
+
+                let res = list_dir_with_retry(auth, &dir, cancel);
+
+                let Ok(mut guard) = shared.lock() else {
+                    return;
+                };
+                guard.active = guard.active.saturating_sub(1);
+                match res {
+                    Ok(entries) => {
+                        for entry in entries {
+                            let name = entry.path.rsplit('/').next().unwrap_or("");
+                            if is_excluded_name(name, exclude_patterns) {
+                                continue;
+                            }
+                            if entry.is_dir {
+                                guard.queue.push_back(entry.path.clone());
+                            } else {
+                                guard.file_count += 1;
+                            }
+                            guard.pending_batch.push(RemoteNode {
+                                path: entry.path,
+                                is_dir: entry.is_dir,
+                                size: entry.size,
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        if !cancel.load(Ordering::SeqCst) {
+                            if is_session_error(&err) || dir == remote_root {
+                                if guard.fatal_error.is_none() {
+                                    guard.fatal_error = Some(err);
+                                }
+                            } else {
+                                guard.failed_dirs += 1;
+                            }
+                        }
+                    }
                 }
-                nodes.push(RemoteNode {
-                    path: entry.path,
-                    is_dir: entry.is_dir,
-                    size: entry.size,
-                });
+                worker_cv.notify_all();
+                caller_cv.notify_one();
+            });
+        }
+
+        loop {
+            let (batch, file_count, done) = {
+                let mut guard_opt = shared.lock().ok();
+                while let Some(guard) = guard_opt.take() {
+                    if !guard.pending_batch.is_empty()
+                        || guard.fatal_error.is_some()
+                        || cancel.load(Ordering::SeqCst)
+                        || (guard.queue.is_empty() && guard.active == 0)
+                    {
+                        guard_opt = Some(guard);
+                        break;
+                    }
+                    guard_opt = caller_cv.wait_timeout(guard, wait_slice).ok().map(|(g, _)| g);
+                }
+                let Some(mut guard) = guard_opt else {
+                    break;
+                };
+                let batch = std::mem::take(&mut guard.pending_batch);
+                let file_count = guard.file_count;
+                let done = guard.fatal_error.is_some()
+                    || cancel.load(Ordering::SeqCst)
+                    || (guard.queue.is_empty() && guard.active == 0);
+                (batch, file_count, done)
+            };
+            if !batch.is_empty() {
+                on_batch(&batch, file_count);
+                nodes.extend(batch);
+            }
+            if done {
+                worker_cv.notify_all();
+                break;
             }
         }
-        on_batch(&nodes[batch_start..], file_count);
+    });
+
+    let final_state = shared
+        .into_inner()
+        .map_err(|_| "遠端列舉狀態鎖定失敗".to_string())?;
+    if let Some(err) = final_state.fatal_error {
+        return Err(err);
     }
-    Ok(nodes)
+    if !final_state.pending_batch.is_empty() && !cancel.load(Ordering::SeqCst) {
+        on_batch(&final_state.pending_batch, final_state.file_count);
+        nodes.extend(final_state.pending_batch);
+    }
+    Ok(RemoteTreeResult {
+        nodes,
+        failed_dirs: final_state.failed_dirs,
+    })
 }
 
 /// 在列出 NAS 目錄的同時，由淺到深即時在本機建立尚不存在的資料夾與 0-byte 雲端 Placeholder。
@@ -1019,6 +1451,7 @@ fn materialize_batch_placeholders(
     batch: &[RemoteNode],
     sync_deletes: bool,
     baseline: &mut Baseline,
+    delta: &mut PendingIndexDelta,
     since_save: &mut u64,
 ) -> u64 {
     let root = remote_root.trim_end_matches('/');
@@ -1045,8 +1478,9 @@ fn materialize_batch_placeholders(
             continue;
         }
         if node.is_dir {
-            if std::fs::create_dir_all(&local_path).is_ok() {
-                baseline.dirs.insert(key);
+            if std::fs::create_dir_all(&local_path).is_ok() && baseline.dirs.insert(key.clone()) {
+                delta.dirs.push(key);
+                *since_save += 1;
             }
         } else {
             if let Some(parent) = local_path.parent() {
@@ -1055,14 +1489,13 @@ fn materialize_batch_placeholders(
             let size = node.size.unwrap_or(0);
             if cloud_status::create_placeholder(&local_path, &node.path, size).is_ok() {
                 if let Ok(meta) = std::fs::metadata(&local_path) {
-                    baseline.files.insert(
-                        key,
-                        FileBase {
-                            local_size: meta.len(),
-                            local_mtime_ms: mtime_ms(&meta),
-                            remote_size: size,
-                        },
-                    );
+                    let fb = FileBase {
+                        local_size: meta.len(),
+                        local_mtime_ms: mtime_ms(&meta),
+                        remote_size: size,
+                    };
+                    baseline.files.insert(key.clone(), fb.clone());
+                    delta.files.push((key, fb));
                     created_files += 1;
                     *since_save += 1;
                 }
@@ -1072,21 +1505,31 @@ fn materialize_batch_placeholders(
     created_files
 }
 
-fn run_sync(
-    app: &AppHandle,
-    state: &SyncRunState,
-    folder: &config::SyncFolder,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    let auth = app.state::<auth::AuthState>();
+struct SyncFolderContext {
+    local_root: PathBuf,
+    remote_root: String,
+    exclude_patterns: Vec<String>,
+    index: Option<sync_state::SyncIndex>,
+    baseline: Baseline,
+    show_icons: bool,
+}
+
+fn prepare_sync_context(app: &AppHandle, folder: &config::SyncFolder) -> Result<SyncFolderContext, String> {
     let _ = storage::init(app);
     let local_root = PathBuf::from(&folder.local_path);
     std::fs::create_dir_all(&local_root).map_err(|e| format!("無法建立本機資料夾：{e}"))?;
-    if config::load(app).map(|c| c.explorer_status_icons).unwrap_or(true) {
+    let cfg = config::load(app).ok();
+    let explorer_status_icons = cfg.as_ref().map(|c| c.explorer_status_icons).unwrap_or(true);
+    let exclude_patterns = cfg
+        .map(|c| c.exclude_patterns)
+        .unwrap_or_else(config::default_exclude_patterns);
+
+    if explorer_status_icons {
         let downloader: cloud_status::Downloader = {
             let app = app.clone();
             std::sync::Arc::new(move |remote_path: &str, dest: &std::path::Path| {
-                app.state::<auth::AuthState>().download_remote_file(remote_path, dest)
+                app.state::<auth::AuthState>()
+                    .download_remote_file(remote_path, dest)
             })
         };
         let _ = app.state::<cloud_status::CloudStatusState>().enable(
@@ -1096,62 +1539,28 @@ fn run_sync(
             downloader,
         );
     }
-    let remote_root = folder.remote_path.trim_end_matches('/').to_string();
 
-    // 1) 列出兩邊（由淺到深 Breadth-First）。啟用雲端檔案且允許下載時，每掃完一層就立即在本機建立資料夾與 0-byte 雲端 Placeholder，
-    // 讓檔案總管在第一秒就能看到第一層檔案，不必等數千個子資料夾全部掃完才開始建立。
     crate::lan::refresh(app);
-    let mut baseline = sync_state::load(app, &folder.id);
-    let use_placeholders = app
+    let index = sync_state::SyncIndex::open(app, &folder.id).ok();
+    let baseline = index
+        .as_ref()
+        .and_then(|idx| idx.load_baseline().ok())
+        .unwrap_or_default();
+    let show_icons = app
         .state::<cloud_status::CloudStatusState>()
         .is_enabled(&folder.id);
-    let can_download = folder.mode != config::SYNC_MODE_UPLOAD_ONLY;
-    let mut pre_created_files = 0u64;
-    let mut pre_since_save = 0u64;
-    let mut on_batch = |batch: &[RemoteNode], files: u64| {
-        if use_placeholders && can_download {
-            let added = materialize_batch_placeholders(
-                &local_root,
-                &remote_root,
-                batch,
-                folder.sync_deletes,
-                &mut baseline,
-                &mut pre_since_save,
-            );
-            pre_created_files += added;
-            if pre_since_save >= PLACEHOLDER_SAVE_EVERY {
-                let _ = sync_state::save(app, &folder.id, &baseline);
-                pre_since_save = 0;
-            }
-        }
-        state.update(&folder.id, |p| {
-            p.total_files = files;
-            p.done_files = pre_created_files;
-        });
-    };
-    let remote = match list_remote_tree(&auth, &remote_root, cancel, &mut on_batch) {
-        Err(_) if auth.lan_active() => {
-            auth.set_lan_origin(None);
-            list_remote_tree(&auth, &remote_root, cancel, &mut on_batch)?
-        }
-        other => other?,
-    };
-    if pre_since_save > 0 {
-        let _ = sync_state::save(app, &folder.id, &baseline);
-    }
-    if cancel.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    let local = scan_local(&local_root, cancel);
-    if cancel.load(Ordering::SeqCst) {
-        return Ok(());
-    }
 
-    // 2) 比對產生計畫
-    let plan = build_plan(&folder.mode, folder.sync_deletes, &remote_root, &remote, &local, &baseline)?;
+    Ok(SyncFolderContext {
+        local_root,
+        remote_root: folder.remote_path.trim_end_matches('/').to_string(),
+        exclude_patterns,
+        index,
+        baseline,
+        show_icons,
+    })
+}
 
-    // 保護：一次要刪除的檔案佔同步紀錄的一半以上時，多半是列表異常或資料夾被整個搬走/中斷連線，
-    // 不執行任何刪除，避免誤刪整個資料夾
+fn check_mass_delete_guard(plan: &[PlanItem], baseline: &Baseline) -> Result<(), String> {
     let planned_deletes = plan.iter().filter(|i| !i.is_dir && i.action.is_delete()).count();
     if planned_deletes >= MASS_DELETE_MIN && planned_deletes * 2 > baseline.files.len() {
         return Err(format!(
@@ -1160,8 +1569,16 @@ fn run_sync(
             baseline.files.len()
         ));
     }
+    Ok(())
+}
+
+fn prepare_plan_progress(
+    state: &SyncRunState,
+    folder: &config::SyncFolder,
+    plan: &[PlanItem],
+    use_placeholders: bool,
+) -> (Vec<Option<usize>>, bool) {
     let file_items = plan.iter().filter(|i| !i.is_dir).count() as u64;
-    // 啟用雲端檔案時，NAS 的檔案只建立 placeholder，不下載內容，所以不計入傳輸量
     let transfer_bytes: u64 = plan
         .iter()
         .filter(|i| i.action.is_transfer())
@@ -1172,7 +1589,7 @@ fn run_sync(
         })
         .sum();
     let has_transfers = plan.iter().any(|i| i.action.is_transfer());
-    let (queue, positions) = build_queue(&folder.id, &plan);
+    let (queue, positions) = build_queue(&folder.id, plan);
     state.set_queue(&folder.id, queue);
     state.update(&folder.id, |p| {
         p.phase = PHASE_SYNCING.to_string();
@@ -1180,18 +1597,420 @@ fn run_sync(
         p.total_bytes = transfer_bytes;
         p.done_files = 0;
     });
+    (positions, has_transfers)
+}
 
-    // 檔案總管的狀態圖示：有檔案要傳輸時資料夾顯示「同步中」，每個檔案完成後立即顯示「已同步」
-    let show_icons = app
-        .state::<cloud_status::CloudStatusState>()
-        .is_enabled(&folder.id);
-    if show_icons && has_transfers {
-        cloud_status::mark_directories(&local_root, false);
+fn current_failed_files(state: &SyncRunState, folder_id: &str) -> u64 {
+    state
+        .snapshot()
+        .iter()
+        .find(|p| p.folder_id == folder_id)
+        .map(|p| p.failed_files)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Default)]
+struct UploadOnlyDiff {
+    affected_keys: HashSet<String>,
+    deleted_file_keys: Vec<String>,
+    deleted_dir_keys: Vec<String>,
+    parent_rels: HashSet<Vec<String>>,
+    /// 需要檢查或補充遠端目錄的路徑區段（含受影響父層）
+    listed_dir_keys: HashSet<String>,
+}
+
+fn compute_upload_only_diff(
+    local: &[LocalNode],
+    baseline: &Baseline,
+    sync_deletes: bool,
+    exclude_patterns: &[String],
+) -> UploadOnlyDiff {
+    let mut diff = UploadOnlyDiff::default();
+    let mut local_files: HashMap<String, &LocalNode> = HashMap::new();
+    let mut local_dirs: HashMap<String, &LocalNode> = HashMap::new();
+
+    for node in local {
+        if node.rel.is_empty() {
+            continue;
+        }
+        let key = key_of(&node.rel);
+        if node.is_dir {
+            local_dirs.insert(key, node);
+        } else {
+            local_files.insert(key, node);
+        }
     }
 
-    // 3) 逐項執行；無論成功、失敗或取消，都要保存已完成項目的同步紀錄
+    for (key, node) in &local_files {
+        let lf = LocalFile {
+            size: node.size,
+            mtime_ms: node.mtime_ms,
+        };
+        if baseline
+            .files
+            .get(key)
+            .is_none_or(|base| local_changed(&lf, base))
+        {
+            diff.affected_keys.insert(key.clone());
+            let parent_rel = node.rel[..node.rel.len().saturating_sub(1)].to_vec();
+            diff.listed_dir_keys.insert(key_of(&parent_rel));
+            diff.parent_rels.insert(parent_rel);
+        }
+    }
+
+    for (key, node) in &local_dirs {
+        if !baseline.dirs.contains(key) {
+            diff.affected_keys.insert(key.clone());
+            let parent_rel = node.rel[..node.rel.len().saturating_sub(1)].to_vec();
+            diff.listed_dir_keys.insert(key_of(&parent_rel));
+            diff.parent_rels.insert(parent_rel);
+        }
+    }
+
+    if sync_deletes {
+        for key in baseline.files.keys() {
+            if !local_files.contains_key(key) && !key_has_excluded_segment(key, exclude_patterns) {
+                diff.affected_keys.insert(key.clone());
+                diff.deleted_file_keys.push(key.clone());
+                let parent_rel = find_existing_parent_rel(key, &local_dirs);
+                diff.listed_dir_keys.insert(key_of(&parent_rel));
+                diff.parent_rels.insert(parent_rel);
+            }
+        }
+        for key in &baseline.dirs {
+            if !local_dirs.contains_key(key) && !key_has_excluded_segment(key, exclude_patterns) {
+                diff.affected_keys.insert(key.clone());
+                diff.deleted_dir_keys.push(key.clone());
+                let parent_rel = find_existing_parent_rel(key, &local_dirs);
+                diff.listed_dir_keys.insert(key_of(&parent_rel));
+                diff.parent_rels.insert(parent_rel);
+            }
+        }
+    }
+
+    diff
+}
+
+fn find_existing_parent_rel(key: &str, local_dirs: &HashMap<String, &LocalNode>) -> Vec<String> {
+    let mut cur = key;
+    while let Some((parent, _)) = cur.rsplit_once('/') {
+        if let Some(dir_node) = local_dirs.get(parent) {
+            return dir_node.rel.clone();
+        }
+        cur = parent;
+    }
+    Vec::new()
+}
+
+fn remote_key_from_path(remote_root: &str, remote_path: &str) -> Option<String> {
+    let root = remote_root.trim_end_matches('/');
+    let relative = remote_path.strip_prefix(root)?.trim_start_matches('/');
+    if relative.is_empty() {
+        return None;
+    }
+    let segments: Vec<String> = relative
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(sanitize_segment)
+        .collect();
+    if segments.is_empty() {
+        None
+    } else {
+        Some(key_of(&segments))
+    }
+}
+
+fn list_affected_remote_dirs(
+    auth: &auth::AuthState,
+    remote_root: &str,
+    parent_rels: &HashSet<Vec<String>>,
+    deleted_dir_keys: &[String],
+    deleted_file_keys: &[String],
+    exclude_patterns: &[String],
+    cancel: &AtomicBool,
+) -> Result<Vec<RemoteNode>, String> {
+    let mut to_list: VecDeque<String> = {
+        let mut sorted: Vec<Vec<String>> = parent_rels.iter().cloned().collect();
+        sorted.sort_by_key(|r| r.len());
+        sorted
+            .into_iter()
+            .map(|rel| {
+                if rel.is_empty() {
+                    remote_root.to_string()
+                } else {
+                    format!("{remote_root}/{}", rel.join("/"))
+                }
+            })
+            .collect()
+    };
+    let mut seen_dirs: HashSet<String> = HashSet::new();
+    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let mut remote_nodes: Vec<RemoteNode> = Vec::new();
+    let deleted_dir_set: HashSet<&String> = deleted_dir_keys.iter().collect();
+
+    while let Some(dir_path) = to_list.pop_front() {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(remote_nodes);
+        }
+        if !seen_dirs.insert(dir_path.clone()) {
+            continue;
+        }
+        let entries = list_remote_dir_best_effort(auth, &dir_path, exclude_patterns, cancel)?;
+        for node in entries {
+            if node.is_dir {
+                if let Some(key) = remote_key_from_path(remote_root, &node.path) {
+                    let prefix = format!("{key}/");
+                    let has_deleted_descendant = deleted_dir_set.contains(&key)
+                        || deleted_dir_keys.iter().any(|k| k.starts_with(&prefix))
+                        || deleted_file_keys.iter().any(|k| k.starts_with(&prefix));
+                    if has_deleted_descendant && !seen_dirs.contains(&node.path) {
+                        to_list.push_back(node.path.clone());
+                    }
+                }
+            }
+            if seen_nodes.insert(node.path.clone()) {
+                remote_nodes.push(node);
+            }
+        }
+    }
+
+    Ok(remote_nodes)
+}
+
+fn mark_affected_parent_dirs(
+    local_root: &Path,
+    parent_rels: &HashSet<Vec<String>>,
+    in_sync: bool,
+) {
+    let mut paths: HashSet<PathBuf> = HashSet::new();
+    for rel in parent_rels {
+        let p = rel_to_path(local_root, rel);
+        if p.is_dir() {
+            paths.insert(p);
+        }
+    }
+    for p in paths {
+        cloud_status::mark_directory(&p, in_sync);
+    }
+}
+
+fn remove_absent_deleted_keys(
+    plan: &[PlanItem],
+    deleted_file_keys: &[String],
+    deleted_dir_keys: &[String],
+    baseline: &mut Baseline,
+    delta: &mut PendingIndexDelta,
+) {
+    let planned_keys: HashSet<&String> = plan.iter().map(|i| &i.key).collect();
+    for key in deleted_file_keys {
+        if !planned_keys.contains(key) && baseline.files.remove(key).is_some() {
+            delta.removed_files.push(key.clone());
+        }
+    }
+    for key in deleted_dir_keys {
+        if !planned_keys.contains(key) && baseline.dirs.remove(key) {
+            delta.removed_dirs.push(key.clone());
+        }
+    }
+}
+
+fn run_upload_only_sync(
+    app: &AppHandle,
+    state: &SyncRunState,
+    folder: &config::SyncFolder,
+    mut ctx: SyncFolderContext,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let auth = app.state::<auth::AuthState>();
+    let local = scan_local(&ctx.local_root, &ctx.exclude_patterns, cancel);
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let diff = compute_upload_only_diff(
+        &local,
+        &ctx.baseline,
+        folder.sync_deletes,
+        &ctx.exclude_patterns,
+    );
+    if diff.affected_keys.is_empty() {
+        return Ok(());
+    }
+
+    let remote = list_affected_remote_dirs(
+        &auth,
+        &ctx.remote_root,
+        &diff.parent_rels,
+        &diff.deleted_dir_keys,
+        &diff.deleted_file_keys,
+        &ctx.exclude_patterns,
+        cancel,
+    )?;
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // 只將受影響項目及已列舉父層中的兄弟節點傳入 build_plan，避免未列舉的 58k 遠端項目被誤判為缺少
+    let filtered_local: Vec<LocalNode> = local
+        .into_iter()
+        .filter(|node| {
+            if node.rel.is_empty() {
+                return false;
+            }
+            let key = key_of(&node.rel);
+            let parent_key = key_of(&node.rel[..node.rel.len().saturating_sub(1)]);
+            diff.affected_keys.contains(&key) || diff.listed_dir_keys.contains(&parent_key)
+        })
+        .collect();
+
+    let mut plan = build_plan(
+        &folder.mode,
+        folder.sync_deletes,
+        &ctx.remote_root,
+        &remote,
+        &filtered_local,
+        &ctx.baseline,
+    )?;
+    plan.retain(|item| {
+        diff.affected_keys.contains(&item.key) || item.action == Action::CreateRemoteDir
+    });
+    check_mass_delete_guard(&plan, &ctx.baseline)?;
+
+    let (positions, has_transfers) = prepare_plan_progress(state, folder, &plan, ctx.show_icons);
+    if ctx.show_icons && has_transfers {
+        mark_affected_parent_dirs(&ctx.local_root, &diff.parent_rels, false);
+    }
+
+    let mut delta = PendingIndexDelta::default();
     let result = execute_plan(
-        app, state, folder, &auth, &local_root, &plan, &positions, &mut baseline, cancel, show_icons,
+        app,
+        state,
+        folder,
+        &auth,
+        &ctx.local_root,
+        &plan,
+        &positions,
+        &mut ctx.baseline,
+        ctx.index.as_mut(),
+        &mut delta,
+        cancel,
+        ctx.show_icons,
+    );
+    let completed = result.is_ok() && !cancel.load(Ordering::SeqCst);
+    if completed && folder.sync_deletes {
+        remove_absent_deleted_keys(
+            &plan,
+            &diff.deleted_file_keys,
+            &diff.deleted_dir_keys,
+            &mut ctx.baseline,
+            &mut delta,
+        );
+    }
+    delta.flush(ctx.index.as_mut());
+    result?;
+
+    if ctx.show_icons && completed && current_failed_files(state, &folder.id) == 0 {
+        mark_affected_parent_dirs(&ctx.local_root, &diff.parent_rels, true);
+    }
+    Ok(())
+}
+
+fn run_sync(
+    app: &AppHandle,
+    state: &SyncRunState,
+    folder: &config::SyncFolder,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let mut ctx = prepare_sync_context(app, folder)?;
+    if folder.mode == config::SYNC_MODE_UPLOAD_ONLY {
+        return run_upload_only_sync(app, state, folder, ctx, cancel);
+    }
+
+    let auth = app.state::<auth::AuthState>();
+    let mut delta = PendingIndexDelta::default();
+    let mut pre_created_files = 0u64;
+    let mut pre_since_save = 0u64;
+    let can_download = folder.mode != config::SYNC_MODE_UPLOAD_ONLY;
+    let remote_res = {
+        let local_root = &ctx.local_root;
+        let remote_root = &ctx.remote_root;
+        let use_placeholders = ctx.show_icons;
+        let baseline = &mut ctx.baseline;
+        let index = &mut ctx.index;
+        let mut on_batch = |batch: &[RemoteNode], files: u64| {
+            if use_placeholders && can_download {
+                let added = materialize_batch_placeholders(
+                    local_root,
+                    remote_root,
+                    batch,
+                    folder.sync_deletes,
+                    baseline,
+                    &mut delta,
+                    &mut pre_since_save,
+                );
+                pre_created_files += added;
+                if pre_since_save >= PLACEHOLDER_SAVE_EVERY {
+                    delta.flush(index.as_mut());
+                    pre_since_save = 0;
+                }
+            }
+            state.update(&folder.id, |p| {
+                p.total_files = files;
+                p.done_files = pre_created_files;
+            });
+        };
+        match list_remote_tree(&auth, remote_root, &ctx.exclude_patterns, cancel, &mut on_batch) {
+            Err(_) if auth.lan_active() && !cancel.load(Ordering::SeqCst) => {
+                auth.set_lan_origin(None);
+                list_remote_tree(&auth, remote_root, &ctx.exclude_patterns, cancel, &mut on_batch)?
+            }
+            other => other?,
+        }
+    };
+    delta.flush(ctx.index.as_mut());
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let partial_remote_error = remote_res.failed_dirs > 0;
+    let local = scan_local(&ctx.local_root, &ctx.exclude_patterns, cancel);
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // 2) 若本次列舉有部分遠端目錄失敗，停用刪除同步以避免誤刪本機檔案或清掉未列舉目錄的紀錄
+    let effective_sync_deletes = folder.sync_deletes && !partial_remote_error;
+    let plan = build_plan(
+        &folder.mode,
+        effective_sync_deletes,
+        &ctx.remote_root,
+        &remote_res.nodes,
+        &local,
+        &ctx.baseline,
+    )?;
+    check_mass_delete_guard(&plan, &ctx.baseline)?;
+
+    let (positions, has_transfers) = prepare_plan_progress(state, folder, &plan, ctx.show_icons);
+
+    // 檔案總管的狀態圖示：有檔案要傳輸時資料夾顯示「同步中」，每個檔案完成後立即顯示「已同步」
+    if ctx.show_icons && has_transfers {
+        cloud_status::mark_directories(&ctx.local_root, false);
+    }
+
+    // 3) 逐項執行；無論成功、失敗或取消，都要將已完成的增量異動寫入 SQLite
+    let result = execute_plan(
+        app,
+        state,
+        folder,
+        &auth,
+        &ctx.local_root,
+        &plan,
+        &positions,
+        &mut ctx.baseline,
+        ctx.index.as_mut(),
+        &mut delta,
+        cancel,
+        ctx.show_icons,
     );
     if pre_created_files > 0 {
         state.update(&folder.id, |p| {
@@ -1200,28 +2019,349 @@ fn run_sync(
         });
     }
     let completed = result.is_ok() && !cancel.load(Ordering::SeqCst);
-    if completed {
-        // 兩邊都已不存在的項目不再保留紀錄
+    if completed && !partial_remote_error {
         let live: HashSet<&String> = plan.iter().map(|i| &i.key).collect();
-        baseline.files.retain(|key, _| live.contains(key));
-        baseline.dirs.retain(|key| live.contains(key));
-        for item in plan.iter().filter(|i| i.is_dir && i.both_present && i.action == Action::Noop) {
-            baseline.dirs.insert(item.key.clone());
+        ctx.baseline.files.retain(|key, _| live.contains(key));
+        ctx.baseline.dirs.retain(|key| live.contains(key));
+        for item in plan
+            .iter()
+            .filter(|i| i.is_dir && i.both_present && i.action == Action::Noop)
+        {
+            if ctx.baseline.dirs.insert(item.key.clone()) {
+                delta.dirs.push(item.key.clone());
+            }
         }
+        delta.flush(ctx.index.as_mut());
+        if let Some(idx) = ctx.index.as_mut() {
+            let live_files: HashSet<&String> = ctx.baseline.files.keys().collect();
+            let live_dirs: HashSet<&String> = ctx.baseline.dirs.iter().collect();
+            let _ = idx.prune_missing(&live_files, &live_dirs);
+        }
+    } else {
+        delta.flush(ctx.index.as_mut());
     }
-    let _ = sync_state::save(app, &folder.id, &baseline);
+    if partial_remote_error {
+        state.update(&folder.id, |p| {
+            if p.last_error.is_none() {
+                p.last_error = Some(format!(
+                    "有 {} 個 NAS 子資料夾無法列出，本次已暫時略過刪除同步",
+                    remote_res.failed_dirs
+                ));
+            }
+        });
+    }
     result?;
 
-    if show_icons && completed {
-        let failed = state
-            .snapshot()
-            .iter()
-            .find(|p| p.folder_id == folder.id)
-            .map(|p| p.failed_files)
-            .unwrap_or(0);
-        if failed == 0 {
-            cloud_status::mark_directories(&local_root, true);
+    if ctx.show_icons && completed && current_failed_files(state, &folder.id) == 0 {
+        cloud_status::mark_directories(&ctx.local_root, true);
+    }
+    Ok(())
+}
+
+fn run_incremental_sync(
+    app: &AppHandle,
+    state: &SyncRunState,
+    folder: &config::SyncFolder,
+    dirty_paths: Vec<String>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let mut ctx = prepare_sync_context(app, folder)?;
+    let mut unique_rels: HashMap<String, Vec<String>> = HashMap::new();
+    for raw in dirty_paths {
+        if let Some(rel) =
+            relative_segments_for_dirty_path(&ctx.local_root, &raw, &ctx.exclude_patterns)
+        {
+            unique_rels.entry(key_of(&rel)).or_insert(rel);
         }
+    }
+    if unique_rels.is_empty() {
+        return Ok(());
+    }
+
+    let mut local_nodes_by_key: HashMap<String, LocalNode> = HashMap::new();
+    let mut affected_keys: HashSet<String> = HashSet::new();
+    let mut affected_dir_prefixes: HashSet<String> = HashSet::new();
+    let mut affected_remote_dirs: HashSet<Vec<String>> = HashSet::new();
+    let mut deleted_file_keys: Vec<String> = Vec::new();
+    let mut deleted_dir_keys: Vec<String> = Vec::new();
+
+    for (key, rel) in unique_rels {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let full_path = rel_to_path(&ctx.local_root, &rel);
+        let parent_rel = rel[..rel.len().saturating_sub(1)].to_vec();
+        match std::fs::symlink_metadata(&full_path) {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(meta) if meta.is_dir() => {
+                let subtree = scan_local_subtree(&full_path, &rel, &ctx.exclude_patterns, cancel);
+                let mut subtree_file_keys = HashSet::new();
+                let mut subtree_dir_keys = HashSet::new();
+                let mut subtree_dir_nodes: HashMap<String, Vec<String>> = HashMap::new();
+                subtree_dir_nodes.insert(key.clone(), rel.clone());
+                let mut changed_nodes: Vec<LocalNode> = Vec::new();
+
+                if !ctx.baseline.dirs.contains(&key) {
+                    affected_keys.insert(key.clone());
+                    affected_remote_dirs.insert(parent_rel.clone());
+                }
+
+                for node in subtree {
+                    let k = key_of(&node.rel);
+                    if node.is_dir {
+                        subtree_dir_keys.insert(k.clone());
+                        subtree_dir_nodes.insert(k.clone(), node.rel.clone());
+                        if !ctx.baseline.dirs.contains(&k) {
+                            let p_rel = node.rel[..node.rel.len().saturating_sub(1)].to_vec();
+                            affected_keys.insert(k.clone());
+                            affected_remote_dirs.insert(p_rel);
+                            changed_nodes.push(node);
+                        }
+                    } else {
+                        subtree_file_keys.insert(k.clone());
+                        let lf = LocalFile {
+                            size: node.size,
+                            mtime_ms: node.mtime_ms,
+                        };
+                        if ctx
+                            .baseline
+                            .files
+                            .get(&k)
+                            .is_none_or(|b| local_changed(&lf, b))
+                        {
+                            let p_rel = node.rel[..node.rel.len().saturating_sub(1)].to_vec();
+                            affected_keys.insert(k.clone());
+                            affected_remote_dirs.insert(p_rel);
+                            changed_nodes.push(node);
+                        }
+                    }
+                }
+                let prefix = format!("{key}/");
+                let mut has_subtree_deletions = false;
+                if folder.sync_deletes || folder.mode != config::SYNC_MODE_UPLOAD_ONLY {
+                    for bfile in ctx.baseline.files.keys() {
+                        if bfile.starts_with(&prefix)
+                            && !subtree_file_keys.contains(bfile)
+                            && !key_has_excluded_segment(bfile, &ctx.exclude_patterns)
+                        {
+                            has_subtree_deletions = true;
+                            affected_keys.insert(bfile.clone());
+                            deleted_file_keys.push(bfile.clone());
+                            let mut cur = bfile.as_str();
+                            let p_rel = loop {
+                                let Some((parent, _)) = cur.rsplit_once('/') else {
+                                    break Vec::new();
+                                };
+                                if let Some(d_rel) = subtree_dir_nodes.get(parent) {
+                                    break d_rel.clone();
+                                }
+                                cur = parent;
+                            };
+                            affected_remote_dirs.insert(p_rel);
+                        }
+                    }
+                    for bdir in &ctx.baseline.dirs {
+                        if bdir.starts_with(&prefix)
+                            && !subtree_dir_keys.contains(bdir)
+                            && !key_has_excluded_segment(bdir, &ctx.exclude_patterns)
+                        {
+                            has_subtree_deletions = true;
+                            affected_keys.insert(bdir.clone());
+                            deleted_dir_keys.push(bdir.clone());
+                            let mut cur = bdir.as_str();
+                            let p_rel = loop {
+                                let Some((parent, _)) = cur.rsplit_once('/') else {
+                                    break Vec::new();
+                                };
+                                if let Some(d_rel) = subtree_dir_nodes.get(parent) {
+                                    break d_rel.clone();
+                                }
+                                cur = parent;
+                            };
+                            affected_remote_dirs.insert(p_rel);
+                        }
+                    }
+                }
+                if changed_nodes.is_empty() && !has_subtree_deletions && ctx.baseline.dirs.contains(&key) {
+                    continue;
+                }
+                if has_subtree_deletions {
+                    affected_dir_prefixes.insert(prefix);
+                }
+                for node in changed_nodes {
+                    let k = key_of(&node.rel);
+                    local_nodes_by_key.insert(k, node);
+                }
+            }
+            Ok(meta) => {
+                let lf = LocalFile {
+                    size: meta.len(),
+                    mtime_ms: mtime_ms(&meta),
+                };
+                if ctx
+                    .baseline
+                    .files
+                    .get(&key)
+                    .is_some_and(|base| !local_changed(&lf, base))
+                {
+                    continue;
+                }
+                affected_keys.insert(key.clone());
+                affected_remote_dirs.insert(parent_rel);
+                local_nodes_by_key.insert(
+                    key,
+                    LocalNode {
+                        rel,
+                        is_dir: false,
+                        size: lf.size,
+                        mtime_ms: lf.mtime_ms,
+                    },
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if folder.mode == config::SYNC_MODE_UPLOAD_ONLY && !folder.sync_deletes {
+                    continue;
+                }
+                let mut had_baseline = false;
+                if ctx.baseline.files.contains_key(&key) {
+                    had_baseline = true;
+                    affected_keys.insert(key.clone());
+                    deleted_file_keys.push(key.clone());
+                }
+                if ctx.baseline.dirs.contains(&key) {
+                    had_baseline = true;
+                    affected_keys.insert(key.clone());
+                    deleted_dir_keys.push(key.clone());
+                    let prefix = format!("{key}/");
+                    affected_dir_prefixes.insert(prefix.clone());
+                    for bfile in ctx.baseline.files.keys() {
+                        if bfile.starts_with(&prefix)
+                            && !key_has_excluded_segment(bfile, &ctx.exclude_patterns)
+                        {
+                            affected_keys.insert(bfile.clone());
+                            deleted_file_keys.push(bfile.clone());
+                        }
+                    }
+                    for bdir in &ctx.baseline.dirs {
+                        if bdir.starts_with(&prefix)
+                            && !key_has_excluded_segment(bdir, &ctx.exclude_patterns)
+                        {
+                            affected_keys.insert(bdir.clone());
+                            deleted_dir_keys.push(bdir.clone());
+                        }
+                    }
+                }
+                if had_baseline {
+                    affected_remote_dirs.insert(parent_rel);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if affected_keys.is_empty() {
+        return Ok(());
+    }
+
+    // 補齊新本地檔案上層尚不在 baseline 的祖先資料夾，讓 CreateRemoteDir 可正確建立遠端目錄
+    let seed_rels: Vec<Vec<String>> = local_nodes_by_key
+        .values()
+        .map(|n| n.rel.clone())
+        .collect();
+    for rel in seed_rels {
+        for depth in 1..rel.len() {
+            let ancestor_rel = rel[..depth].to_vec();
+            let ancestor_key = key_of(&ancestor_rel);
+            if !ctx.baseline.dirs.contains(&ancestor_key) {
+                let ancestor_path = rel_to_path(&ctx.local_root, &ancestor_rel);
+                if ancestor_path.is_dir() {
+                    affected_keys.insert(ancestor_key.clone());
+                    affected_remote_dirs.insert(rel[..depth - 1].to_vec());
+                    local_nodes_by_key.entry(ancestor_key).or_insert(LocalNode {
+                        rel: ancestor_rel,
+                        is_dir: true,
+                        size: 0,
+                        mtime_ms: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    let auth = app.state::<auth::AuthState>();
+    let listed_remote = list_affected_remote_dirs(
+        &auth,
+        &ctx.remote_root,
+        &affected_remote_dirs,
+        &deleted_dir_keys,
+        &deleted_file_keys,
+        &ctx.exclude_patterns,
+        cancel,
+    )?;
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let filtered_remote: Vec<RemoteNode> = listed_remote
+        .into_iter()
+        .filter(|rn| {
+            remote_key_from_path(&ctx.remote_root, &rn.path).is_some_and(|k| {
+                affected_keys.contains(&k)
+                    || affected_dir_prefixes.iter().any(|p| k.starts_with(p))
+            })
+        })
+        .collect();
+    let local_nodes: Vec<LocalNode> = local_nodes_by_key.into_values().collect();
+    let mut plan = build_plan(
+        &folder.mode,
+        folder.sync_deletes,
+        &ctx.remote_root,
+        &filtered_remote,
+        &local_nodes,
+        &ctx.baseline,
+    )?;
+    plan.retain(|item| {
+        affected_keys.contains(&item.key)
+            || item.action == Action::CreateRemoteDir
+            || affected_dir_prefixes.iter().any(|p| item.key.starts_with(p))
+    });
+    check_mass_delete_guard(&plan, &ctx.baseline)?;
+
+    let (positions, has_transfers) = prepare_plan_progress(state, folder, &plan, ctx.show_icons);
+    if ctx.show_icons && has_transfers {
+        mark_affected_parent_dirs(&ctx.local_root, &affected_remote_dirs, false);
+    }
+
+    let mut delta = PendingIndexDelta::default();
+    let result = execute_plan(
+        app,
+        state,
+        folder,
+        &auth,
+        &ctx.local_root,
+        &plan,
+        &positions,
+        &mut ctx.baseline,
+        ctx.index.as_mut(),
+        &mut delta,
+        cancel,
+        ctx.show_icons,
+    );
+    let completed = result.is_ok() && !cancel.load(Ordering::SeqCst);
+    if completed && folder.sync_deletes {
+        remove_absent_deleted_keys(
+            &plan,
+            &deleted_file_keys,
+            &deleted_dir_keys,
+            &mut ctx.baseline,
+            &mut delta,
+        );
+    }
+    delta.flush(ctx.index.as_mut());
+    result?;
+
+    if ctx.show_icons && completed && current_failed_files(state, &folder.id) == 0 {
+        mark_affected_parent_dirs(&ctx.local_root, &affected_remote_dirs, true);
     }
     Ok(())
 }
@@ -1236,17 +2376,19 @@ fn execute_plan(
     plan: &[PlanItem],
     positions: &[Option<usize>],
     baseline: &mut Baseline,
+    mut index: Option<&mut sync_state::SyncIndex>,
+    delta: &mut PendingIndexDelta,
     cancel: &AtomicBool,
     show_icons: bool,
 ) -> Result<(), String> {
     let mut consecutive_failures = 0u32;
     let mut since_save = 0u64;
-    for (index, item) in plan.iter().enumerate() {
+    for (index_pos, item) in plan.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             return Ok(());
         }
         let local_path = rel_to_path(local_root, &item.rel_local);
-        let queue_pos = positions.get(index).copied().flatten();
+        let queue_pos = positions.get(index_pos).copied().flatten();
         if let Some(pos) = queue_pos {
             state.set_queue_status(&folder.id, pos, QUEUE_RUNNING, None);
         }
@@ -1261,8 +2403,12 @@ fn execute_plan(
             match result {
                 Ok(()) => {
                     consecutive_failures = 0;
-                    baseline.files.remove(&item.key);
-                    baseline.dirs.remove(&item.key);
+                    if baseline.files.remove(&item.key).is_some() {
+                        delta.removed_files.push(item.key.clone());
+                    }
+                    if baseline.dirs.remove(&item.key) {
+                        delta.removed_dirs.push(item.key.clone());
+                    }
                     since_save += PLACEHOLDER_SAVE_EVERY / BASELINE_SAVE_EVERY;
                     if let Some(pos) = queue_pos {
                         state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
@@ -1287,6 +2433,10 @@ fn execute_plan(
                     }
                 }
             }
+            if since_save >= PLACEHOLDER_SAVE_EVERY {
+                delta.flush(index.as_deref_mut());
+                since_save = 0;
+            }
             continue;
         }
 
@@ -1300,8 +2450,11 @@ fn execute_plan(
             };
             match result {
                 Ok(()) => {
-                    if matches!(item.action, Action::CreateLocalDir | Action::CreateRemoteDir) {
-                        baseline.dirs.insert(item.key.clone());
+                    if matches!(item.action, Action::CreateLocalDir | Action::CreateRemoteDir)
+                        && baseline.dirs.insert(item.key.clone())
+                    {
+                        delta.dirs.push(item.key.clone());
+                        since_save += 1;
                     }
                     if let Some(pos) = queue_pos {
                         state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
@@ -1317,27 +2470,18 @@ fn execute_plan(
                     record_failure(state, folder, &item.rel_local.join("/"), &err);
                 }
             }
+            if since_save >= PLACEHOLDER_SAVE_EVERY {
+                delta.flush(index.as_deref_mut());
+                since_save = 0;
+            }
             continue;
         }
 
         state.update(&folder.id, |p| p.current_file = Some(item.remote_path.clone()));
         let outcome: Result<Option<Transfer>, String> = match item.action {
-            Action::Noop => Ok(None),
-            Action::RecordBaseline => {
-                if let (Some(l), Some(r)) = (&item.local, &item.remote) {
-                    baseline.files.insert(
-                        item.key.clone(),
-                        FileBase {
-                            local_size: l.size,
-                            local_mtime_ms: l.mtime_ms,
-                            remote_size: r.size.unwrap_or(l.size),
-                        },
-                    );
-                }
-                Ok(None)
-            }
+            Action::Noop | Action::RecordBaseline => Ok(None),
             Action::Download | Action::DownloadOverwrite | Action::KeepBothThenDownload => {
-                download_one(app, auth, folder, &local_path, item, index)
+                download_one(app, auth, folder, &local_path, item, index_pos)
             }
             Action::Upload | Action::UploadVersion => upload_one(auth, &local_path, item),
             Action::TypeMismatch => Err("此名稱在本機與 NAS 一邊是檔案、一邊是資料夾".to_string()),
@@ -1353,28 +2497,63 @@ fn execute_plan(
                 if let Some(pos) = queue_pos {
                     state.set_queue_status(&folder.id, pos, QUEUE_DONE, None);
                 }
-                if show_icons
-                    && !item.is_dir
-                    && item.both_present
-                    && matches!(item.action, Action::Noop | Action::RecordBaseline)
-                {
-                    if folder.auto_dehydrate {
-                        if cloud_status::dehydrate_file(&local_path, Some(&item.remote_path)).is_err() {
-                            cloud_status::mark_file(&local_path, &item.remote_path, true);
+                match item.action {
+                    Action::Noop => {
+                        // 僅在需要自動釋放空間且目前尚未為雲端 placeholder 時才觸發釋放，避免 58k 檔案每次同步都重標圖示
+                        if show_icons
+                            && item.both_present
+                            && folder.auto_dehydrate
+                            && cloud_status::is_dehydrated(&local_path) != Some(true)
+                        {
+                            if let Ok(Some(_)) =
+                                cloud_status::dehydrate_file(&local_path, Some(&item.remote_path))
+                            {
+                                if let (Ok(meta), Some(r)) =
+                                    (std::fs::metadata(&local_path), &item.remote)
+                                {
+                                    let fb = FileBase {
+                                        local_size: meta.len(),
+                                        local_mtime_ms: mtime_ms(&meta),
+                                        remote_size: r.size.unwrap_or(meta.len()),
+                                    };
+                                    baseline.files.insert(item.key.clone(), fb.clone());
+                                    delta.files.push((item.key.clone(), fb));
+                                    since_save += 1;
+                                }
+                            }
                         }
-                    } else {
-                        cloud_status::mark_file(&local_path, &item.remote_path, true);
                     }
-                    if let (Ok(meta), Some(r)) = (std::fs::metadata(&local_path), &item.remote) {
-                        baseline.files.insert(
-                            item.key.clone(),
-                            FileBase {
-                                local_size: meta.len(),
-                                local_mtime_ms: mtime_ms(&meta),
-                                remote_size: r.size.unwrap_or(meta.len()),
-                            },
-                        );
+                    Action::RecordBaseline => {
+                        if show_icons && item.both_present {
+                            if folder.auto_dehydrate {
+                                if cloud_status::dehydrate_file(&local_path, Some(&item.remote_path))
+                                    .is_err()
+                                {
+                                    cloud_status::mark_file(&local_path, &item.remote_path, true);
+                                }
+                            } else {
+                                cloud_status::mark_file(&local_path, &item.remote_path, true);
+                            }
+                        }
+                        if let Some(r) = &item.remote {
+                            let (local_size, local_mtime_ms) = match std::fs::metadata(&local_path) {
+                                Ok(meta) => (meta.len(), mtime_ms(&meta)),
+                                Err(_) => match &item.local {
+                                    Some(l) => (l.size, l.mtime_ms),
+                                    None => (0, 0),
+                                },
+                            };
+                            let fb = FileBase {
+                                local_size,
+                                local_mtime_ms,
+                                remote_size: r.size.unwrap_or(local_size),
+                            };
+                            baseline.files.insert(item.key.clone(), fb.clone());
+                            delta.files.push((item.key.clone(), fb));
+                            since_save += 1;
+                        }
                     }
+                    _ => {}
                 }
                 state.update(&folder.id, |p| p.skipped_files += 1);
             }
@@ -1398,14 +2577,13 @@ fn execute_plan(
                 }
                 // 狀態圖示標示後才讀取本機資訊，避免標示動作造成的差異被當成「本機有改動」
                 if let Ok(meta) = std::fs::metadata(&local_path) {
-                    baseline.files.insert(
-                        item.key.clone(),
-                        FileBase {
-                            local_size: meta.len(),
-                            local_mtime_ms: mtime_ms(&meta),
-                            remote_size: transfer.remote_size,
-                        },
-                    );
+                    let fb = FileBase {
+                        local_size: meta.len(),
+                        local_mtime_ms: mtime_ms(&meta),
+                        remote_size: transfer.remote_size,
+                    };
+                    baseline.files.insert(item.key.clone(), fb.clone());
+                    delta.files.push((item.key.clone(), fb));
                 }
                 since_save += if transfer.placeholder {
                     1
@@ -1446,7 +2624,7 @@ fn execute_plan(
             }
         }
         if since_save >= PLACEHOLDER_SAVE_EVERY {
-            let _ = sync_state::save(app, &folder.id, baseline);
+            delta.flush(index.as_deref_mut());
             since_save = 0;
         }
     }
@@ -1928,28 +3106,212 @@ mod tests {
                     ..Default::default()
                 },
             );
+            state.record_completion("f", phase);
         };
-        // 從未同步過：立刻同步
-        assert!(state.auto_sync_due("f", 1_000, false, REMOTE_POLL_MS));
-        // 剛完成：沒有本機變動不會再跑；有變動也要等冷卻
+        // 從未同步過：雙向立刻完整同步；僅上傳有本機變動時走增量同步
+        assert_eq!(
+            state.auto_sync_trigger("f", 1_000, false, REMOTE_POLL_MS, BI),
+            SyncTrigger::Full
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 1_000, true, REMOTE_POLL_MS, UP),
+            SyncTrigger::Incremental
+        );
+        // 剛完成：沒有本機變動不會再跑；有變動也要等冷卻，冷卻後走增量同步
         finished(PHASE_DONE, 0, 10_000);
         assert!(!state.auto_sync_due("f", 10_000 + 1_000, false, REMOTE_POLL_MS));
         assert!(!state.auto_sync_due("f", 10_000 + 1_000, true, REMOTE_POLL_MS));
-        assert!(state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, true, REMOTE_POLL_MS));
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + EVENT_COOLDOWN_MS, true, REMOTE_POLL_MS, BI),
+            SyncTrigger::Incremental
+        );
         assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, false, REMOTE_POLL_MS));
-        // 定期檢查 NAS
-        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, false, REMOTE_POLL_MS));
-        // 有失敗或出錯：即使本機有變動，也等到定期檢查才重試
+        // 定期檢查 NAS（完整同步）
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + REMOTE_POLL_MS, false, REMOTE_POLL_MS, BI),
+            SyncTrigger::Full
+        );
+        // 有失敗、出錯或取消：即使本機有變動也先等待退避時間（第 1 次 60 秒）才重試
         finished(PHASE_DONE, 2, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
-        assert!(state.auto_sync_due("f", 10_000 + REMOTE_POLL_MS, true, REMOTE_POLL_MS));
+        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS, true, REMOTE_POLL_MS));
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 60_000, true, REMOTE_POLL_MS, BI),
+            SyncTrigger::Full
+        );
         finished(PHASE_ERROR, 0, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
+        assert!(!state.auto_sync_due("f", 10_000 + 60_000, true, REMOTE_POLL_MS));
         finished(PHASE_CANCELLED, 0, 10_000);
-        assert!(!state.auto_sync_due("f", 10_000 + EVENT_COOLDOWN_MS * 2, true, REMOTE_POLL_MS));
+        assert!(!state.auto_sync_due("f", 10_000 + 120_000, true, REMOTE_POLL_MS));
         // 進行中不會重複啟動
         state.progress.lock().unwrap().get_mut("f").unwrap().phase = PHASE_SYNCING.to_string();
         assert!(!state.auto_sync_due("f", u64::MAX / 2, true, REMOTE_POLL_MS));
+    }
+
+    #[test]
+    fn error_backoff_schedule_and_trigger_rules() {
+        assert_eq!(error_backoff_ms(0), 0);
+        assert_eq!(error_backoff_ms(1), 60_000);
+        assert_eq!(error_backoff_ms(2), 120_000);
+        assert_eq!(error_backoff_ms(3), 300_000);
+        assert_eq!(error_backoff_ms(4), 600_000);
+        assert_eq!(error_backoff_ms(10), 600_000);
+
+        let state = SyncRunState::new();
+        let long_poll = 60 * 60 * 1000;
+        let short_poll = 3 * 60 * 1000;
+
+        let mark_error = |at: u64| {
+            state.progress.lock().unwrap().insert(
+                "f".to_string(),
+                SyncProgress {
+                    folder_id: "f".to_string(),
+                    phase: PHASE_ERROR.to_string(),
+                    finished_at_ms: Some(at),
+                    ..Default::default()
+                },
+            );
+            state.record_completion("f", PHASE_ERROR);
+        };
+
+        // 第 1 次錯誤：1 分鐘
+        mark_error(10_000);
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 59_999, false, long_poll, BI),
+            SyncTrigger::None
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 60_000, false, long_poll, BI),
+            SyncTrigger::Full
+        );
+
+        // 第 2 次錯誤：2 分鐘
+        mark_error(10_000);
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 119_999, false, long_poll, BI),
+            SyncTrigger::None
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 120_000, false, long_poll, BI),
+            SyncTrigger::Full
+        );
+
+        // 第 3 次錯誤：5 分鐘，但會受 remote_poll_ms（3 分鐘）上限限制
+        mark_error(10_000);
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 299_999, false, long_poll, BI),
+            SyncTrigger::None
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 300_000, false, long_poll, BI),
+            SyncTrigger::Full
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + short_poll, false, short_poll, BI),
+            SyncTrigger::Full
+        );
+
+        // 第 4 次錯誤：10 分鐘
+        mark_error(10_000);
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 599_999, false, long_poll, BI),
+            SyncTrigger::None
+        );
+        assert_eq!(
+            state.auto_sync_trigger("f", 10_000 + 600_000, false, long_poll, BI),
+            SyncTrigger::Full
+        );
+
+        // 成功完成後歸零
+        state.progress.lock().unwrap().get_mut("f").unwrap().phase = PHASE_DONE.to_string();
+        state.record_completion("f", PHASE_DONE);
+        assert_eq!(*state.consecutive_errors.lock().unwrap().get("f").unwrap(), 0);
+    }
+
+    #[test]
+    fn scan_local_skips_excluded_subtrees_and_keeps_normal_files() {
+        let root = std::env::temp_dir().join(format!("synology-scan-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("obj").join("Debug")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+
+        std::fs::write(root.join("README.md"), b"hello").unwrap();
+        std::fs::write(root.join("src").join("main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(root.join("src").join("debug.tmp"), b"tmp").unwrap();
+        std::fs::write(root.join("obj").join("Debug").join("app.dll"), b"dll").unwrap();
+        std::fs::write(root.join("node_modules").join("pkg").join("index.js"), b"js").unwrap();
+        std::fs::write(root.join(".git").join("objects").join("pack"), b"git").unwrap();
+
+        let mut patterns = config::default_exclude_patterns();
+        patterns.push("*.tmp".to_string());
+        let cancel = AtomicBool::new(false);
+        let nodes = scan_local(&root, &patterns, &cancel);
+        let keys: HashSet<String> = nodes.iter().map(|n| key_of(&n.rel)).collect();
+
+        assert!(keys.contains("readme.md"));
+        assert!(keys.contains("src"));
+        assert!(keys.contains("src/main.rs"));
+        assert!(!keys.contains("src/debug.tmp"));
+        assert!(!keys.iter().any(|k| k == "obj" || k.starts_with("obj/")));
+        assert!(!keys.iter().any(|k| k == "node_modules" || k.starts_with("node_modules/")));
+        assert!(!keys.iter().any(|k| k == ".git" || k.starts_with(".git/")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relative_segments_for_dirty_path_handles_case_outside_and_excluded() {
+        let root = Path::new(r"D:\Sync\Work");
+        let patterns = config::default_exclude_patterns();
+
+        assert_eq!(
+            relative_segments_for_dirty_path(root, r"d:/sync/work/Sub/Report.docx", &patterns),
+            Some(vec!["Sub".to_string(), "Report.docx".to_string()])
+        );
+        assert_eq!(
+            relative_segments_for_dirty_path(root, r"\\?\D:\Sync\Work\a.txt", &patterns),
+            Some(vec!["a.txt".to_string()])
+        );
+        // 根目錄本身或外部路徑（含相同前綴的相鄰資料夾）皆應拒絕
+        assert_eq!(relative_segments_for_dirty_path(root, r"D:\Sync\Work", &patterns), None);
+        assert_eq!(relative_segments_for_dirty_path(root, r"D:\Sync\Workshop\a.txt", &patterns), None);
+        assert_eq!(relative_segments_for_dirty_path(root, r"E:\Other\a.txt", &patterns), None);
+        // 任何區段符合排除規則皆應拒絕
+        assert_eq!(
+            relative_segments_for_dirty_path(root, r"D:\Sync\Work\app\obj\Debug\a.dll", &patterns),
+            None
+        );
+        assert_eq!(
+            relative_segments_for_dirty_path(root, r"D:\Sync\Work\~$draft.xlsx", &patterns),
+            None
+        );
+    }
+
+    #[test]
+    fn upload_only_diff_detects_only_changed_and_new_parents() {
+        let patterns = config::default_exclude_patterns();
+        let mut baseline = Baseline::default();
+        baseline.dirs.insert("docs".to_string());
+        baseline.dirs.insert("other".to_string());
+        baseline.files.insert("docs/same.txt".to_string(), base(10, 5_000, 10));
+        baseline.files.insert("other/stay.txt".to_string(), base(20, 5_000, 20));
+
+        let unchanged_local = vec![
+            ln(&["docs"], true, 0, 0),
+            ln(&["other"], true, 0, 0),
+            ln(&["docs", "same.txt"], false, 10, 5_500),
+            ln(&["other", "stay.txt"], false, 20, 5_000),
+        ];
+        let diff_none = compute_upload_only_diff(&unchanged_local, &baseline, false, &patterns);
+        assert!(diff_none.affected_keys.is_empty());
+        assert!(diff_none.parent_rels.is_empty());
+
+        let mut changed_local = unchanged_local;
+        changed_local.push(ln(&["docs", "new.txt"], false, 15, 9_000));
+        let diff_one = compute_upload_only_diff(&changed_local, &baseline, false, &patterns);
+        assert_eq!(diff_one.affected_keys, HashSet::from(["docs/new.txt".to_string()]));
+        assert_eq!(diff_one.parent_rels, HashSet::from([vec!["docs".to_string()]]));
     }
 
     #[test]
@@ -2019,5 +3381,20 @@ mod tests {
         let down = build_plan(DOWN, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(down.iter().find(|i| i.key == "l").unwrap().action, Action::Noop);
         assert_eq!(down.iter().find(|i| i.key == "r").unwrap().action, Action::CreateLocalDir);
+    }
+
+    #[test]
+    fn poisoned_baseline_size_mismatch_triggers_upload_version() {
+        // 舊版 Noop 曾誤把未上傳的本機大小覆寫進 baseline（local_size=21504, remote_size=18944），
+        // 必須偵測到 local_size != remote_size 並補上傳新版本，而非永遠 Noop
+        let b = base(21_504, 1_000, 18_944);
+        assert_eq!(
+            decide_file(UP, false, Some(&lf(21_504, 1_000)), Some(&rf(18_944)), Some(&b)),
+            Action::UploadVersion
+        );
+        assert_eq!(
+            decide_file(BI, false, Some(&lf(21_504, 1_000)), Some(&rf(18_944)), Some(&b)),
+            Action::UploadVersion
+        );
     }
 }

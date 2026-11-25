@@ -1254,6 +1254,7 @@ async fn apply_window_preset(
             lan_host: None,
             lan_wifi_names: None,
             language: None,
+            exclude_patterns: None,
         },
     )
 }
@@ -1395,7 +1396,8 @@ pub fn run() {
                 .unwrap_or(config::DEFAULT_LANGUAGE);
             let menu = build_tray_menu(app.handle(), tray_lang)?;
 
-            TrayIconBuilder::with_id("main-tray")
+            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+                .tooltip("Synology Drive Client")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1412,8 +1414,11 @@ pub fn run() {
                     {
                         show_main_window(tray.app_handle());
                     }
-                })
-                .build(app)?;
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            tray_builder.build(app)?;
 
             if let Some(cfg) = loaded_cfg {
                 let _ = apply_window_preset_size(app.handle(), &cfg.window_preset);
