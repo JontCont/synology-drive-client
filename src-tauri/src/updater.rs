@@ -83,9 +83,9 @@ fn asset_priority_for_os(name: &str, target_os: &str) -> Option<u8> {
     }
     match target_os {
         "windows" => {
-            if lower.ends_with(".msi") {
+            if lower.ends_with(".exe") {
                 Some(2)
-            } else if lower.ends_with(".exe") {
+            } else if lower.ends_with(".msi") {
                 Some(1)
             } else {
                 None
@@ -387,6 +387,33 @@ mod tests {
             Some("Synology-Drive-Client_0.2.0_x64_en-US.msi")
         );
         assert_eq!(info.asset_size, Some(4194304));
+    }
+
+    #[test]
+    fn prefers_windows_nsis_exe_over_msi_when_both_trusted() {
+        let json = r#"{
+            "tag_name": "v0.2.0",
+            "name": "Synology Drive Client v0.2.0",
+            "body": "Installer update",
+            "html_url": "https://github.com/JontCont/synology-drive-client/releases/tag/v0.2.0",
+            "assets": [
+                {
+                    "name": "Synology.Drive.Client_0.2.0_windows_x64_en-US.msi",
+                    "browser_download_url": "https://github.com/JontCont/synology-drive-client/releases/download/v0.2.0/Synology.Drive.Client_0.2.0_windows_x64_en-US.msi",
+                    "size": 4194304
+                },
+                {
+                    "name": "Synology.Drive.Client_0.2.0_windows_x64-setup.exe",
+                    "browser_download_url": "https://github.com/JontCont/synology-drive-client/releases/download/v0.2.0/Synology.Drive.Client_0.2.0_windows_x64-setup.exe",
+                    "size": 3145728
+                }
+            ]
+        }"#;
+        let info = parse_github_release(json, "0.1.0", "windows").unwrap();
+        assert_eq!(
+            info.asset_name.as_deref(),
+            Some("Synology.Drive.Client_0.2.0_windows_x64-setup.exe")
+        );
     }
 
     #[test]
