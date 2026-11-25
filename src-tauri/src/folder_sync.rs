@@ -785,7 +785,9 @@ impl Action {
 }
 
 fn local_changed(local: &LocalFile, base: &FileBase) -> bool {
-    local.size != base.local_size || local.mtime_ms.abs_diff(base.local_mtime_ms) > MTIME_TOLERANCE_MS
+    local.size != base.local_size
+        || local.size != base.remote_size
+        || local.mtime_ms.abs_diff(base.local_mtime_ms) > MTIME_TOLERANCE_MS
 }
 
 fn remote_changed(remote: &RemoteFile, base: &FileBase) -> bool {
@@ -3379,5 +3381,20 @@ mod tests {
         let down = build_plan(DOWN, false, "/mydrive/W", &remote, &local, &Baseline::default()).unwrap();
         assert_eq!(down.iter().find(|i| i.key == "l").unwrap().action, Action::Noop);
         assert_eq!(down.iter().find(|i| i.key == "r").unwrap().action, Action::CreateLocalDir);
+    }
+
+    #[test]
+    fn poisoned_baseline_size_mismatch_triggers_upload_version() {
+        // 舊版 Noop 曾誤把未上傳的本機大小覆寫進 baseline（local_size=21504, remote_size=18944），
+        // 必須偵測到 local_size != remote_size 並補上傳新版本，而非永遠 Noop
+        let b = base(21_504, 1_000, 18_944);
+        assert_eq!(
+            decide_file(UP, false, Some(&lf(21_504, 1_000)), Some(&rf(18_944)), Some(&b)),
+            Action::UploadVersion
+        );
+        assert_eq!(
+            decide_file(BI, false, Some(&lf(21_504, 1_000)), Some(&rf(18_944)), Some(&b)),
+            Action::UploadVersion
+        );
     }
 }
