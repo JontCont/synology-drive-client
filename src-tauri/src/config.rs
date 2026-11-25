@@ -60,6 +60,26 @@ pub struct AppConfig {
     /// Interface language ("system" | "zh-TW" | "zh-CN" | "en" | "ja")
     #[serde(default = "default_language")]
     pub language: String,
+    /// 排除不同步的資料夾或檔名樣式（支援 `*` 萬用字元，不分大小寫）
+    #[serde(default = "default_exclude_patterns")]
+    pub exclude_patterns: Vec<String>,
+}
+
+pub fn default_exclude_patterns() -> Vec<String> {
+    [
+        ".git",
+        "node_modules",
+        "obj",
+        "bin",
+        "target",
+        ".vs",
+        "__pycache__",
+        ".idea",
+        "PackageTmp",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 pub const DEFAULT_LANGUAGE: &str = "en";
@@ -123,6 +143,7 @@ pub struct AppConfigUpdate {
     pub lan_host: Option<String>,
     pub lan_wifi_names: Option<Vec<String>>,
     pub language: Option<String>,
+    pub exclude_patterns: Option<Vec<String>>,
 }
 
 impl Default for AppConfig {
@@ -142,8 +163,59 @@ impl Default for AppConfig {
             lan_host: None,
             lan_wifi_names: Vec::new(),
             language: default_language(),
+            exclude_patterns: default_exclude_patterns(),
         }
     }
+}
+
+fn wildcard_match_chars(text: &[char], pattern: &[char]) -> bool {
+    let (mut ti, mut pi) = (0, 0);
+    let (mut star_pi, mut match_ti) = (None, 0);
+
+    while ti < text.len() {
+        if pi < pattern.len() && pattern[pi] == text[ti] {
+            ti += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == '*' {
+            star_pi = Some(pi);
+            match_ti = ti;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            match_ti += 1;
+            ti = match_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
+}
+
+/// 檢查單一路徑區段（檔名或資料夾名）是否符合任一排除樣式（不分大小寫，支援 `*` 萬用字元）
+pub fn matches_exclude_pattern(name: &str, patterns: &[String]) -> bool {
+    let name_chars: Vec<char> = name.to_lowercase().chars().collect();
+    patterns.iter().any(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let pat_chars: Vec<char> = trimmed.to_lowercase().chars().collect();
+        wildcard_match_chars(&name_chars, &pat_chars)
+    })
+}
+
+fn normalize_exclude_patterns(patterns: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    patterns
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty() && seen.insert(p.to_lowercase()))
+        .collect()
 }
 
 fn normalize_local(path: &str) -> String {
@@ -445,6 +517,10 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, update: AppConfigUpdate) -> Result<A
         config.language = language;
     }
 
+    if let Some(patterns) = update.exclude_patterns {
+        config.exclude_patterns = normalize_exclude_patterns(patterns);
+    }
+
     write_config(app, &config)?;
     Ok(config)
 }
@@ -559,5 +635,53 @@ mod tests {
         }
         assert!(!is_valid_language("fr"));
         assert!(!is_valid_language(""));
+    }
+
+    #[test]
+    fn legacy_json_without_exclude_patterns_uses_defaults() {
+        let raw = r#"{"pollIntervalSeconds":30,"ingestBacklogLimit":200}"#;
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(config.exclude_patterns, default_exclude_patterns());
+        assert_eq!(AppConfig::default().exclude_patterns, default_exclude_patterns());
+    }
+
+    #[test]
+    fn matches_exclude_pattern_handles_exact_wildcards_and_non_matches() {
+        let mut patterns = default_exclude_patterns();
+        patterns.extend(["*.tmp".to_string(), "*.log".to_string(), "build-*".to_string()]);
+
+        // Exact names (case-insensitive)
+        assert!(matches_exclude_pattern("obj", &patterns));
+        assert!(matches_exclude_pattern("OBJ", &patterns));
+        assert!(matches_exclude_pattern("node_modules", &patterns));
+        assert!(matches_exclude_pattern(".git", &patterns));
+        assert!(matches_exclude_pattern("PackageTmp", &patterns));
+
+        // Prefix/suffix wildcards
+        assert!(matches_exclude_pattern("debug.tmp", &patterns));
+        assert!(matches_exclude_pattern("APP.LOG", &patterns));
+        assert!(matches_exclude_pattern("build-output", &patterns));
+        assert!(matches_exclude_pattern("BUILD-", &patterns));
+
+        // Non-matching names
+        assert!(!matches_exclude_pattern("objects", &patterns));
+        assert!(!matches_exclude_pattern("my_bin", &patterns));
+        assert!(!matches_exclude_pattern("report.xlsx", &patterns));
+        assert!(!matches_exclude_pattern("foo.tmp.bak", &patterns));
+        assert!(!matches_exclude_pattern("my-build-1", &patterns));
+    }
+
+    #[test]
+    fn normalize_exclude_patterns_trims_filters_empty_and_dedups_case_insensitively() {
+        let normalized = normalize_exclude_patterns(vec![
+            "  obj ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "*.TMP".to_string(),
+            "OBJ".to_string(),
+            "*.tmp".to_string(),
+            "node_modules".to_string(),
+        ]);
+        assert_eq!(normalized, vec!["obj", "*.TMP", "node_modules"]);
     }
 }

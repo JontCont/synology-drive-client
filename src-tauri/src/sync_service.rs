@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -15,11 +15,13 @@ use crate::scanner;
 use crate::storage;
 use crate::watcher;
 
+const MAX_DIRTY_PATHS_PER_FOLDER: usize = 2000;
+
 #[derive(Debug, Default)]
 struct IngestOutcome {
     queued: usize,
-    /// 這一輪偵測到本機有變動的同步資料夾
-    local_changed_folders: HashSet<String>,
+    /// 這一輪偵測到本機有變動的同步資料夾與對應本機路徑
+    local_changed_paths: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -101,8 +103,10 @@ impl SyncServiceState {
             .name("sync-service-loop".to_string())
             .spawn(move || {
                 let mut last_notified_error: Option<String> = None;
-                // 本機有變動、但因為正在同步或冷卻中而尚未自動同步的資料夾
-                let mut dirty_folders: HashSet<String> = HashSet::new();
+                // 本機有變動、但因為正在同步或冷卻中而尚未自動同步的本機路徑（依資料夾分組）
+                let mut dirty_paths: HashMap<String, HashSet<String>> = HashMap::new();
+                // 單一資料夾累計過多變動路徑時，改走完整掃描
+                let mut full_sync_folders: HashSet<String> = HashSet::new();
                 // 啟動後馬上跑第一輪，之後才依輪詢間隔
                 let mut wait = Duration::from_millis(500);
                 loop {
@@ -117,7 +121,20 @@ impl SyncServiceState {
                             let result = (|| -> Result<executor::ExecutorRunResult, String> {
                                 let _ = storage::init(&app_for_thread)?;
                                 let ingest = Self::ingest_once(&app_for_thread)?;
-                                dirty_folders.extend(ingest.local_changed_folders);
+                                for (folder_id, paths) in ingest.local_changed_paths {
+                                    if full_sync_folders.contains(&folder_id) {
+                                        continue;
+                                    }
+                                    let set = dirty_paths.entry(folder_id.clone()).or_default();
+                                    for path in paths {
+                                        if set.len() >= MAX_DIRTY_PATHS_PER_FOLDER {
+                                            full_sync_folders.insert(folder_id.clone());
+                                            set.clear();
+                                            break;
+                                        }
+                                        set.insert(path);
+                                    }
+                                }
                                 let queued = ingest.queued;
                                 if let Ok(mut m) = metrics_for_thread.lock() {
                                     if queued == 0 {
@@ -128,7 +145,11 @@ impl SyncServiceState {
                                 }
                                 executor::run_once(&app_for_thread)
                             })();
-                            Self::auto_sync(&app_for_thread, &mut dirty_folders);
+                            Self::auto_sync(
+                                &app_for_thread,
+                                &mut dirty_paths,
+                                &mut full_sync_folders,
+                            );
                             if let Ok(mut m) = metrics_for_thread.lock() {
                                 match &result {
                                     Ok(run_result) if run_result.outcome == "failed" => {
@@ -281,13 +302,18 @@ impl SyncServiceState {
                     .then(|| (folder.id.clone(), path))
             })
             .collect();
-        let local_changed_folders: HashSet<String> =
-            entries.iter().map(|(id, _)| id.clone()).collect();
+        let mut local_changed_paths: HashMap<String, Vec<String>> = HashMap::new();
+        for (folder_id, path) in &entries {
+            local_changed_paths
+                .entry(folder_id.clone())
+                .or_default()
+                .push(path.clone());
+        }
 
         if Self::pending_backlog_count(app)? >= cfg.ingest_backlog_limit as i64 {
             return Ok(IngestOutcome {
                 queued: 0,
-                local_changed_folders,
+                local_changed_paths,
             });
         }
         if entries.is_empty() {
@@ -327,12 +353,16 @@ impl SyncServiceState {
         }
         Ok(IngestOutcome {
             queued,
-            local_changed_folders,
+            local_changed_paths,
         })
     }
 
-    /// 依本機變動與定期檢查，為需要的資料夾啟動 NAS ⇄ 本機同步
-    fn auto_sync(app: &AppHandle, dirty_folders: &mut HashSet<String>) {
+    /// 依本機變動與定期檢查，為需要的資料夾啟動 NAS ⇄ 本機同步（優先走事件驅動增量同步）
+    fn auto_sync(
+        app: &AppHandle,
+        dirty_paths: &mut HashMap<String, HashSet<String>>,
+        full_sync_folders: &mut HashSet<String>,
+    ) {
         let authenticated = app
             .state::<auth::AuthState>()
             .status()
@@ -348,11 +378,39 @@ impl SyncServiceState {
         let runs = app.state::<folder_sync::SyncRunState>();
         let now = folder_sync::now_ms();
         for folder in config::active_folders(&cfg) {
-            let dirty = dirty_folders.contains(&folder.id);
-            if runs.auto_sync_due(&folder.id, now, dirty, remote_poll_ms)
-                && runs.start(app, &folder.id).is_ok()
-            {
-                dirty_folders.remove(&folder.id);
+            let force_full = full_sync_folders.contains(&folder.id);
+            let has_dirty =
+                force_full || dirty_paths.get(&folder.id).is_some_and(|s| !s.is_empty());
+            let trigger = match runs.auto_sync_trigger(
+                &folder.id,
+                now,
+                has_dirty,
+                remote_poll_ms,
+                &folder.mode,
+            ) {
+                folder_sync::SyncTrigger::Incremental if force_full => {
+                    folder_sync::SyncTrigger::Full
+                }
+                other => other,
+            };
+            match trigger {
+                folder_sync::SyncTrigger::None => {}
+                folder_sync::SyncTrigger::Incremental => {
+                    let paths: Vec<String> = dirty_paths
+                        .get(&folder.id)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    if runs.start_incremental(app, &folder.id, paths).is_ok() {
+                        dirty_paths.remove(&folder.id);
+                        full_sync_folders.remove(&folder.id);
+                    }
+                }
+                folder_sync::SyncTrigger::Full => {
+                    if runs.start(app, &folder.id).is_ok() {
+                        dirty_paths.remove(&folder.id);
+                        full_sync_folders.remove(&folder.id);
+                    }
+                }
             }
         }
     }
